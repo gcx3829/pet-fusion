@@ -708,6 +708,39 @@ class AppStore:
             connection.commit()
         return cursor.rowcount == 1
 
+    def complete_expired_provider_call(
+        self,
+        request_key: str,
+        response: Mapping[str, object],
+    ) -> bool:
+        """Atomically close an abandoned provider lease without re-running its side effect.
+
+        The outcome of a paid request is unknowable after its worker dies. A caller may
+        therefore persist a conservative rollback only after the lease expires. The
+        current owner wins while its heartbeat is healthy, and a late owner cannot
+        overwrite the rollback because normal completion requires ``status='running'``.
+        """
+
+        now = utcnow().isoformat()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE provider_calls SET status = 'completed', response_json = ?,
+                    error_json = NULL, lease_owner = NULL, lease_until = NULL,
+                    updated_at = ?
+                WHERE request_key = ? AND status = 'running'
+                  AND (lease_until IS NULL OR lease_until < ?)
+                """,
+                (
+                    json.dumps(response, separators=(",", ":"), sort_keys=True),
+                    now,
+                    request_key,
+                    now,
+                ),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
     def fail_provider_call(
         self, request_key: str, message: str, *, owner_id: str
     ) -> None:
