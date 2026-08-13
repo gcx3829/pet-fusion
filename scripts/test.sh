@@ -29,7 +29,17 @@ fi
 
 # The default suite is deterministic and must never make a paid provider call.
 export FAKE_GENERATOR=1
+export PET_FUSION_FAKE_GENERATOR=1
+export FAKE_CRITIC=1
+export PET_FUSION_FAKE_CRITIC=1
 export RUN_OPENAI_LIVE_TESTS=0
+# Mask both supported credential aliases so a developer's live shell or dotenv
+# configuration cannot leak into the deterministic suite. Tests that exercise a
+# live-provider constructor pass an explicit inert SecretStr instead.
+export OPENAI_API_KEY=
+export PET_FUSION_OPENAI_API_KEY=
+export OPENAI_BASE_URL=
+export PET_FUSION_OPENAI_BASE_URL=
 export CI=true
 
 echo "检查后端格式与测试"

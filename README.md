@@ -84,28 +84,31 @@ OpenAI      GPT Image 2 + GPT-5.6 系列多模态模型
 
 ## 仓库状态
 
-这是一次 **greenfield rewrite**，没有导入旧 MVP 的 ComfyUI、Depth、抠图或规则合成代码。当前已经实现 `CODEX_TASK.md` 规定的首个 mocked vertical slice：
+这是一次 **greenfield rewrite**，没有导入旧 MVP 的 ComfyUI、Depth、抠图或规则合成代码。当前可离线验证的 MVP 包括：
 
 ```text
 创建项目
 → 上传一张背景图和 1～5 张同一宠物的参考图
 → 内容寻址存储并固化 source manifest
-→ 提交单轮 mock 搜索
-→ worker 执行显式 LangGraph
+→ worker 执行显式 SearchGraph
+   ├─ CriticSubgraph：候选独立盲评
+   └─ FeedbackPlannerSubgraph：只把 selected blocking issue 转成有界 directive
+→ 确定性 Ranker、历史 Global Winner、停止策略与 immutable-source rebase
 → SQLite checkpoint 与业务事件持久化
 → REST / SSE 返回候选
 → React 工作台展示 placement、候选和时间线
+→ local Composite Floor 回贴、全分辨率导出 JPEG/PNG、ICC/EXIF 尽力保留
 ```
 
-默认配置不会调用 OpenAI，也不需要 API key。mock 候选用于验证资产、状态、恢复边界和前后端数据流，不代表最终生成质量。
+Local Fix 已实现为独立、一次一调用的 LangGraph 后端图和服务：它只允许 `generation_depth` 从 0 到 2，保留回退候选，并且不会回流到自动 Search。它尚未暴露为 HTTP 接口或前端操作。默认配置不会调用 OpenAI，也不需要 API key；mock 候选用于验证资产、状态、恢复边界和前后端数据流，不代表最终生成质量。
 
 ## 当前实现结构
 
 ```text
-backend/   FastAPI、显式 LangGraph、SQLite、内容寻址资产和确定性 mock provider
-frontend/  React、TypeScript、Vite、TanStack Query、Placement Canvas 和候选审片
+backend/   FastAPI、Search/Critic/Planner/Local Fix 显式 LangGraph、SQLite、内容寻址资产、Composite Floor 与导出
+frontend/  React、TypeScript、Vite、TanStack Query、Placement Canvas、候选审片和搜索时间线
 data/      本地业务数据库、checkpoint 和项目资产；除 .gitkeep 外不进入 Git
-scripts/   联合开发启动与完整测试脚本
+scripts/   联合开发启动与确定性完整测试脚本
 ```
 
 后端请求只在数据库中保存结构化状态和资产引用；图片字节保存在资产目录，不写入 LangGraph checkpoint。搜索生成入口接收固化后的 source manifest，不提供上一轮 candidate 作为下一轮输入的参数。
@@ -172,13 +175,13 @@ pnpm dev
 ./scripts/test.sh
 ```
 
-该脚本强制使用 fake generator，不会执行付费 API 调用，并依次运行：
+该脚本强制使用 fake generator、fake Critic，并关闭 live smoke 开关；不会执行付费 API 调用。它依次运行：
 
 ```text
 ruff → mypy → pytest → TypeScript typecheck → Vitest → Vite production build
 ```
 
-需要单独调试时，可分别在 `backend/` 运行 `uv run --locked pytest`，在 `frontend/` 运行 `pnpm test`。
+需要单独调试时，可分别在 `backend/` 运行 `uv run --locked pytest`，在 `frontend/` 运行 `pnpm test`。pytest harness 也会强制 fake provider 并屏蔽两套 OpenAI credential/base URL 环境别名，避免已配置 live shell 时单测意外付费。额外的离线架构契约覆盖 Search 的 Critic/Planner 子图、Local Fix 的隔离路径、checkpoint 禁止图像数据，以及 fake/live provider 与 Export 路由边界；见 [`backend/tests/unit/test_architecture_contract.py`](backend/tests/unit/test_architecture_contract.py)。
 
 ## 环境变量与密钥
 
@@ -187,12 +190,19 @@ ruff → mypy → pytest → TypeScript typecheck → Vitest → Vite production
 ```dotenv
 FAKE_GENERATOR=1
 FAKE_CRITIC=1
+RUN_OPENAI_LIVE_TESTS=0
 RUN_INLINE=0
 OPENAI_API_KEY=
 OPENAI_BASE_URL=
 ```
 
-默认 `FAKE_GENERATOR=1` 且 `FAKE_CRITIC=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把 `FAKE_GENERATOR` 设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图和 1～5 张参考图；把 `FAKE_CRITIC` 设为 `0` 后，会通过官方 Responses API 的 Pydantic Structured Outputs 独立评价每张 protected candidate。两个开关可分别启用。`OPENAI_BASE_URL` 可选，用于你自行管理的 OpenAI-compatible endpoint，留空即官方端点。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64、endpoint 原文或完整 prompt。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
+默认 `FAKE_GENERATOR=1` 且 `FAKE_CRITIC=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把 `FAKE_GENERATOR` 设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图和 1～5 张参考图；把 `FAKE_CRITIC` 设为 `0` 后，会通过官方 Responses API 的 Pydantic Structured Outputs 独立评价每张 protected candidate。两个开关可分别启用。
+
+`RUN_OPENAI_LIVE_TESTS` 不参与应用 provider 选择，只为未来独立的 opt-in 自动 live test 预留；手工工作台验证仍由两个 `FAKE_*` 开关明确控制。默认测试脚本和 pytest harness 会把它保持为 `0`。
+
+`OPENAI_BASE_URL` 是可选的、仅后端使用的 SDK base URL：留空即走官方 OpenAI 端点；使用中转站时，必须由你确认它同时兼容 Image edits 与 Responses Structured Outputs。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64、endpoint 原文或完整 prompt。当前 Planner 仍是确定性离线实现，`OPENAI_PLANNER_MODEL` 和 `OPENAI_CRITIC_ESCALATION_MODEL` 仅保留为实施指导中的预留配置，尚不会触发调用。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
+
+不执行真实调用的配置检查、以及明天可手工执行的一次低成本 live smoke 步骤见 [`docs/QA_AND_LIVE_SMOKE.md`](docs/QA_AND_LIVE_SMOKE.md)。
 
 ## 已实现的 API 流程
 
@@ -203,16 +213,19 @@ OPENAI_BASE_URL=
 3. `GET /searches/{search_id}`：读取搜索状态和候选；
 4. `GET /searches/{search_id}/events`：通过 SSE 接收持久化时间线；
 5. `GET /assets/{asset_id}`：读取后端校验过的图片资产。
+6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、继续一轮或取消；
+7. `POST /searches/{search_id}/export`：只导出已接受搜索的历史 Global Winner，可选 PNG/JPEG、JPEG 质量与 ICC/EXIF 复制策略；
+8. `GET /searches/{search_id}/exports/{export_key}`：读取幂等、内容寻址的导出记录。
 
 浏览器在开发模式下通过 Vite 的 `/api` 代理访问后端，因此不会接触服务端密钥。
 `scripts/dev.sh` 会根据 `PET_FUSION_API_HOST` 和 `PET_FUSION_API_PORT` 自动配置 Vite 代理；也可用 `VITE_DEV_API_TARGET=http://host:port ./scripts/dev.sh` 显式覆盖。需要让浏览器跨域直连时，则在 `frontend/.env.local` 中设置 `VITE_API_BASE_URL`。
 
 ## 当前限制
 
-- 默认仍使用确定性的 mock generator；`FAKE_GENERATOR=0` 时真实 GPT Image 2 provider 路径已接通，但尚未用项目外的真实凭据完成联调；
-- Critic 默认仍为离线确定性实现；`FAKE_CRITIC=0` 的 GPT-5.6 Terra Responses Structured Outputs 路径已接通但尚未用真实凭据联调。Feedback Planner 仍是离线实现；
-- composite floor、全分辨率回贴和 ICC/EXIF groundwork 已实现；生产导出 API、JPEG 导出和 Local Fix 尚未实现；
+- 默认仍使用确定性的 mock generator；`FAKE_GENERATOR=0` 时真实 GPT Image 2 provider 路径已接通，但尚未用真实凭据或中转站完成联调；
+- Critic 默认仍为离线确定性实现；`FAKE_CRITIC=0` 的 GPT-5.6 Terra Responses Structured Outputs 路径已接通但尚未用真实凭据或中转站完成联调。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
+- Composite Floor、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Local Fix 的独立后端图、深度保护和回退已实现，但还没有 FastAPI route、真实 edit transport 或前端审片/导出操作；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
-- 前端已覆盖首个工作流，不是通用节点编辑器，也暂不包含完整人工 interrupt/resume 与导出体验。
+- 前端已覆盖首个 Search 工作流，不是通用节点编辑器，也暂不包含 Local Fix、导出体验或完整人工 interrupt/resume 操作。
 
 这些限制是实施指导中分阶段交付的结果，不是对非协商架构约束的替代；后续真实 provider、自动多轮和局部修复仍必须遵守 immutable-source rebase、幂等调用、PNG lineage、历史最佳和最大修复深度 2 等规则。

@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 import io
+import os
 from collections.abc import Iterator
 from pathlib import Path
+
+# Keep every test under ``backend/tests`` deterministic. The shell wrapper provides
+# the same fence, but contributors often run one test from a shell configured for a
+# live provider. A future paid smoke suite must live outside this default test tree
+# and implement its own explicit opt-in instead of weakening this global boundary.
+os.environ["FAKE_GENERATOR"] = "1"
+os.environ["PET_FUSION_FAKE_GENERATOR"] = "1"
+os.environ["FAKE_CRITIC"] = "1"
+os.environ["PET_FUSION_FAKE_CRITIC"] = "1"
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["PET_FUSION_OPENAI_API_KEY"] = ""
+os.environ["OPENAI_BASE_URL"] = ""
+os.environ["PET_FUSION_OPENAI_BASE_URL"] = ""
 
 import pytest
 from fastapi.testclient import TestClient
