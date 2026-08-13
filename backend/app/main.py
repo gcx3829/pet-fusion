@@ -87,7 +87,10 @@ def create_app(
     @app.get("/health", include_in_schema=False)
     @app.get("/api/v1/health", tags=["health"])
     async def health() -> dict[str, str]:
-        return {"status": "ok", "generator": "fake"}
+        return {
+            "status": "ok",
+            "generator": "fake" if resolved_settings.fake_generator else "openai",
+        }
 
     app.include_router(projects.router, prefix="/api/v1")
     app.include_router(searches.router, prefix="/api/v1")

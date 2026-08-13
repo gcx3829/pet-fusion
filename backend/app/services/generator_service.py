@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import io
 import json
+import math
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
@@ -18,12 +20,19 @@ from app.domain.errors import SourceManifestMismatchError
 from app.domain.searches import PlacementIntent
 from app.persistence.app_store import AppStore
 from app.services.asset_store import AssetStore
+from app.services.openai_image_client import (
+    OpenAIImageEditResult,
+    OpenAIImageEditsTransport,
+    OpenAIImageInput,
+)
 
 FAKE_IMAGE_MODEL = "fake-gpt-image-2"
 GENERATOR_SCHEMA_VERSION = "generator-request/v1"
 PROVIDER_RESULT_POLL_SECONDS = 0.02
 PROVIDER_RESULT_WAIT_SECONDS = 30.0
 PROVIDER_CALL_LEASE_SECONDS = 5
+PROVIDER_USAGE_TOTAL_FIELDS = frozenset({"input_tokens", "output_tokens", "total_tokens"})
+PROVIDER_USAGE_DETAIL_FIELDS = frozenset({"image_tokens", "text_tokens"})
 
 
 class GenerationRequest(BaseModel):
@@ -45,6 +54,8 @@ class GenerationRequest(BaseModel):
 class GeneratedImage:
     png_bytes: bytes
     variant_index: int
+    provider_request_id: str | None = None
+    provider_usage: Mapping[str, object] | None = None
 
 
 class ImageGenerator(Protocol):
@@ -58,9 +69,8 @@ class DeterministicFakeImageGenerator:
         self.call_count = 0
         self.requests: list[GenerationRequest] = []
 
-    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
-        self.call_count += 1
-        self.requests.append(request)
+    @staticmethod
+    def _render_round(request: GenerationRequest) -> list[GeneratedImage]:
         with Image.open(request.source_manifest.background.path) as opened:
             base = opened.convert("RGBA")
 
@@ -93,6 +103,93 @@ class DeterministicFakeImageGenerator:
             results.append(GeneratedImage(png_bytes=output.getvalue(), variant_index=variant_index))
         return results
 
+    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
+        self.call_count += 1
+        self.requests.append(request)
+        return await asyncio.to_thread(self._render_round, request)
+
+
+class OpenAIImageGenerator:
+    """GPT Image 2 edit provider restricted to immutable PNG source assets."""
+
+    def __init__(self, *, transport: OpenAIImageEditsTransport) -> None:
+        self.transport = transport
+
+    @staticmethod
+    def _source_inputs(request: GenerationRequest) -> tuple[OpenAIImageInput, ...]:
+        assets = (request.source_manifest.background, *request.source_manifest.cat_references)
+        inputs: list[OpenAIImageInput] = []
+        for index, asset in enumerate(assets):
+            with Image.open(asset.filesystem_path) as opened:
+                normalized = opened.convert("RGBA" if "A" in opened.getbands() else "RGB")
+                output = io.BytesIO()
+                normalized.save(output, format="PNG", compress_level=9, optimize=False)
+            png_bytes = output.getvalue()
+            role = "background" if index == 0 else f"reference-{index}"
+            inputs.append(
+                OpenAIImageInput(
+                    filename=f"{index:02d}-{role}-{asset.asset_id}.png",
+                    png_bytes=png_bytes,
+                )
+            )
+        return tuple(inputs)
+
+    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
+        source_inputs = await asyncio.to_thread(self._source_inputs, request)
+        result: OpenAIImageEditResult = await self.transport.edit(
+            model=request.model,
+            prompt=request.prompt,
+            images=source_inputs,
+            n=request.candidate_count,
+            quality=request.quality,
+            size=request.size,
+        )
+        if len(result.png_images) != request.candidate_count:
+            raise RuntimeError("OpenAI Image API returned an unexpected number of candidates")
+        generated: list[GeneratedImage] = []
+        for variant_index, png_bytes in enumerate(result.png_images):
+            if not png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise RuntimeError("OpenAI Image API did not return a PNG candidate")
+            generated.append(
+                GeneratedImage(
+                    png_bytes=png_bytes,
+                    variant_index=variant_index,
+                    provider_request_id=result.request_id,
+                    provider_usage=result.usage,
+                )
+            )
+        return generated
+
+
+def _safe_provider_usage(usage: Mapping[str, object]) -> dict[str, object]:
+    """Keep numeric token accounting only; never retain provider text or binary payloads."""
+
+    def numeric(value: object) -> int | float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and math.isfinite(value):
+            return value
+        return None
+
+    sanitized: dict[str, object] = {}
+    for field in PROVIDER_USAGE_TOTAL_FIELDS:
+        if (value := numeric(usage.get(field))) is not None:
+            sanitized[field] = value
+    for field in ("input_tokens_details", "output_tokens_details"):
+        details = usage.get(field)
+        if not isinstance(details, Mapping):
+            continue
+        sanitized_details = {
+            detail_field: value
+            for detail_field in PROVIDER_USAGE_DETAIL_FIELDS
+            if (value := numeric(details.get(detail_field))) is not None
+        }
+        if sanitized_details:
+            sanitized[field] = sanitized_details
+    return sanitized
+
 
 class GeneratorService:
     def __init__(
@@ -101,10 +198,16 @@ class GeneratorService:
         provider: ImageGenerator,
         asset_store: AssetStore,
         app_store: AppStore,
+        model: str = FAKE_IMAGE_MODEL,
+        quality: str = "medium",
+        size: str | None = None,
     ) -> None:
         self.provider = provider
         self.asset_store = asset_store
         self.app_store = app_store
+        self.model = model
+        self.quality = quality
+        self.size = size
 
     @staticmethod
     def build_request_key(request: GenerationRequest) -> str:
@@ -175,11 +278,13 @@ class GeneratorService:
         interval = PROVIDER_CALL_LEASE_SECONDS / 3
         while True:
             await asyncio.sleep(interval)
-            if not self.app_store.renew_provider_call_lease(
+            renewed = await asyncio.to_thread(
+                self.app_store.renew_provider_call_lease,
                 request_key=request_key,
                 owner_id=owner_id,
                 lease_seconds=PROVIDER_CALL_LEASE_SECONDS,
-            ):
+            )
+            if not renewed:
                 return
 
     async def generate_round(
@@ -188,7 +293,11 @@ class GeneratorService:
         *,
         expected_manifest_hash: str,
     ) -> list[CandidateRecord]:
-        self._assert_rebase_inputs(request, expected_manifest_hash=expected_manifest_hash)
+        await asyncio.to_thread(
+            self._assert_rebase_inputs,
+            request,
+            expected_manifest_hash=expected_manifest_hash,
+        )
         request_key = self.build_request_key(request)
         audit_payload = {
             "schema_version": GENERATOR_SCHEMA_VERSION,
@@ -205,7 +314,8 @@ class GeneratorService:
             "size": request.size,
         }
         owner_id = f"provider_{uuid4().hex}"
-        claimed, status, completed_response = self.app_store.claim_provider_call(
+        claimed, status, completed_response = await asyncio.to_thread(
+            self.app_store.claim_provider_call,
             request_key=request_key,
             operation="generate_round",
             search_id=request.search_id,
@@ -214,20 +324,24 @@ class GeneratorService:
             lease_seconds=PROVIDER_CALL_LEASE_SECONDS,
         )
         if status == "completed" and completed_response is not None:
-            return self._completed_candidates(
+            return await asyncio.to_thread(
+                self._completed_candidates,
                 search_id=request.search_id, completed_response=completed_response
             )
 
-        existing = self.app_store.find_candidates_for_request(request.search_id, request_key)
+        existing = await asyncio.to_thread(
+            self.app_store.find_candidates_for_request, request.search_id, request_key
+        )
         if len(existing) == request.candidate_count:
             for candidate in existing:
-                self._emit_candidate_ready(request.search_id, candidate)
-            response: dict[str, object] = {
+                await asyncio.to_thread(self._emit_candidate_ready, request.search_id, candidate)
+            existing_response: dict[str, object] = {
                 "candidates": [item.model_dump(mode="json") for item in existing]
             }
             if claimed:
-                self.app_store.complete_provider_call(
-                    request_key, response, owner_id=owner_id
+                await asyncio.to_thread(
+                    self.app_store.complete_provider_call,
+                    request_key, existing_response, owner_id=owner_id
                 )
             return existing
 
@@ -235,7 +349,8 @@ class GeneratorService:
             deadline = asyncio.get_running_loop().time() + PROVIDER_RESULT_WAIT_SECONDS
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(PROVIDER_RESULT_POLL_SECONDS)
-                claimed, status, completed_response = self.app_store.claim_provider_call(
+                claimed, status, completed_response = await asyncio.to_thread(
+                    self.app_store.claim_provider_call,
                     request_key=request_key,
                     operation="generate_round",
                     search_id=request.search_id,
@@ -244,20 +359,24 @@ class GeneratorService:
                     lease_seconds=PROVIDER_CALL_LEASE_SECONDS,
                 )
                 if status == "completed" and completed_response is not None:
-                    return self._completed_candidates(
+                    return await asyncio.to_thread(
+                        self._completed_candidates,
                         search_id=request.search_id,
                         completed_response=completed_response,
                     )
-                existing = self.app_store.find_candidates_for_request(
-                    request.search_id, request_key
+                existing = await asyncio.to_thread(
+                    self.app_store.find_candidates_for_request,
+                    request.search_id,
+                    request_key,
                 )
                 if len(existing) == request.candidate_count:
-                    response = {
+                    existing_response = {
                         "candidates": [item.model_dump(mode="json") for item in existing]
                     }
                     if claimed:
-                        self.app_store.complete_provider_call(
-                            request_key, response, owner_id=owner_id
+                        await asyncio.to_thread(
+                            self.app_store.complete_provider_call,
+                            request_key, existing_response, owner_id=owner_id
                         )
                     return existing
                 if claimed:
@@ -276,7 +395,9 @@ class GeneratorService:
                 )
             candidates: list[CandidateRecord] = []
             for output in sorted(generated, key=lambda item: item.variant_index):
-                asset = self.asset_store.put_image_bytes(output.png_bytes)
+                asset = await asyncio.to_thread(
+                    self.asset_store.put_image_bytes, output.png_bytes
+                )
                 candidate_seed = (
                     f"{request.search_id}:{request.round_index}:{output.variant_index}:"
                     f"{request_key}"
@@ -297,16 +418,42 @@ class GeneratorService:
                     quality=request.quality,
                     size=request.size,
                 )
-                self.app_store.add_candidate(request.search_id, candidate)
-                self._emit_candidate_ready(request.search_id, candidate)
+                await asyncio.to_thread(
+                    self.app_store.add_candidate, request.search_id, candidate
+                )
+                await asyncio.to_thread(
+                    self._emit_candidate_ready, request.search_id, candidate
+                )
                 candidates.append(candidate)
-            response = {"candidates": [item.model_dump(mode="json") for item in candidates]}
-            self.app_store.complete_provider_call(
+            provider_request_ids = {
+                item.provider_request_id
+                for item in generated
+                if item.provider_request_id is not None
+            }
+            provider_usage = next(
+                (
+                    _safe_provider_usage(item.provider_usage)
+                    for item in generated
+                    if item.provider_usage is not None
+                ),
+                {},
+            )
+            response: dict[str, object] = {
+                "candidates": [item.model_dump(mode="json") for item in candidates],
+                "provider": {
+                    "request_id": next(iter(provider_request_ids), None),
+                    "usage": provider_usage,
+                    "model": request.model,
+                },
+            }
+            await asyncio.to_thread(
+                self.app_store.complete_provider_call,
                 request_key, response, owner_id=owner_id
             )
             return candidates
         except Exception as exc:
-            self.app_store.fail_provider_call(
+            await asyncio.to_thread(
+                self.app_store.fail_provider_call,
                 request_key, type(exc).__name__, owner_id=owner_id
             )
             raise

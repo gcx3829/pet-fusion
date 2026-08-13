@@ -79,7 +79,7 @@ def _project(client: TestClient, project_payload) -> dict[str, object]:
     return response.json()
 
 
-def test_continue_rebases_to_original_manifest_and_keeps_global_winner(
+def test_continue_rebases_to_original_manifest_and_keeps_historical_global_winner(
     client: TestClient, project_payload, search_payload, fake_generator
 ) -> None:
     project = _project(client, project_payload)
@@ -106,7 +106,10 @@ def test_continue_rebases_to_original_manifest_and_keeps_global_winner(
     assert second["status"] == "waiting_for_human"
     assert second["round_index"] == 1
     assert len(second["round_history"]) == 2
-    assert second["global_winner_id"] == first["global_winner_id"]
+    candidate_ids = {candidate["candidate_id"] for candidate in second["candidates"]}
+    assert first["global_winner_id"] in candidate_ids
+    assert second["global_winner_id"] in candidate_ids
+    assert second["global_winner_score"] >= first["global_winner_score"]
     assert fake_generator.call_count == 2
     assert len(fake_generator.requests) == 2
     assert (

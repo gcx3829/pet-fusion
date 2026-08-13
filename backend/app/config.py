@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    """Runtime configuration. Secrets are intentionally absent from the mocked slice."""
+    """Runtime configuration; the API key remains server-side and redacted in reprs."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -38,6 +39,29 @@ class Settings(BaseSettings):
     fake_generator: bool = Field(
         default=True,
         validation_alias=AliasChoices("FAKE_GENERATOR", "PET_FUSION_FAKE_GENERATOR"),
+    )
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_API_KEY", "PET_FUSION_OPENAI_API_KEY"),
+    )
+    openai_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_BASE_URL", "PET_FUSION_OPENAI_BASE_URL"),
+    )
+    openai_image_model: str = Field(
+        default="gpt-image-2-2026-04-21",
+        min_length=1,
+        validation_alias=AliasChoices("OPENAI_IMAGE_MODEL", "PET_FUSION_OPENAI_IMAGE_MODEL"),
+    )
+    openai_image_quality: Literal["low", "medium", "high", "auto"] = Field(
+        default="medium",
+        validation_alias=AliasChoices(
+            "OPENAI_IMAGE_QUALITY", "PET_FUSION_OPENAI_IMAGE_QUALITY"
+        ),
+    )
+    openai_image_size: Literal["auto", "1024x1024", "1536x1024", "1024x1536"] = Field(
+        default="auto",
+        validation_alias=AliasChoices("OPENAI_IMAGE_SIZE", "PET_FUSION_OPENAI_IMAGE_SIZE"),
     )
     cors_origins: str = Field(
         default="http://localhost:5173",

@@ -19,7 +19,6 @@ from app.persistence.app_store import AppStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
 from app.services.critic_service import CriticInput, DeterministicCriticService
 from app.services.generator_service import (
-    FAKE_IMAGE_MODEL,
     GenerationRequest,
     GeneratorService,
 )
@@ -166,9 +165,12 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             prompt_hash=state["canonical_prompt_hash"],
             round_index=state["round_index"],
             candidate_count=state["candidate_count"],
-            model=FAKE_IMAGE_MODEL,
-            quality="medium",
-            size=f"{manifest.background.width}x{manifest.background.height}",
+            model=services.generator_service.model,
+            quality=services.generator_service.quality,
+            size=(
+                services.generator_service.size
+                or f"{manifest.background.width}x{manifest.background.height}"
+            ),
         )
         records = await services.generator_service.generate_round(
             request,

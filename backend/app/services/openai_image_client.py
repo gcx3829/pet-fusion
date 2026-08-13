@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import base64
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from app.domain.errors import ConfigurationError
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIImageInput:
+    """One PNG image sent to the Image API, held only for the lifetime of a request."""
+
+    filename: str
+    png_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIImageEditResult:
+    png_images: tuple[bytes, ...]
+    request_id: str | None
+    usage: Mapping[str, object]
+
+
+class OpenAIImageEditsTransport(Protocol):
+    async def edit(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        images: Sequence[OpenAIImageInput],
+        n: int,
+        quality: str,
+        size: str,
+    ) -> OpenAIImageEditResult: ...
+
+
+class OfficialOpenAIImageEditsTransport:
+    """Thin, lazy adapter around the official OpenAI Python SDK.
+
+    Importing this module never imports the SDK or constructs a network client, so
+    the default fake-generator test path remains fully offline.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None = None,
+        client_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._base_url = base_url or None
+        self._client_factory = client_factory
+        self._client: Any | None = None
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if self._client_factory is not None:
+            self._client = self._client_factory(
+                api_key=self._api_key,
+                base_url=self._base_url,
+            )
+            return self._client
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:  # pragma: no cover - dependency is a runtime requirement
+            raise ConfigurationError("The real image provider requires the openai package") from exc
+        self._client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
+        return self._client
+
+    async def edit(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        images: Sequence[OpenAIImageInput],
+        n: int,
+        quality: str,
+        size: str,
+    ) -> OpenAIImageEditResult:
+        client = self._get_client()
+        response = await client.images.edit(
+            model=model,
+            prompt=prompt,
+            image=[(image.filename, image.png_bytes, "image/png") for image in images],
+            n=n,
+            quality=quality,
+            size=size,
+            output_format="png",
+        )
+        encoded_images = tuple(item.b64_json for item in response.data)
+        if any(not isinstance(encoded, str) for encoded in encoded_images):
+            raise RuntimeError("OpenAI Image API response did not include PNG base64 data")
+        usage: object = getattr(response, "usage", None)
+        model_dump = getattr(usage, "model_dump", None)
+        if callable(model_dump):
+            usage = model_dump(mode="json", exclude_none=True)
+        return OpenAIImageEditResult(
+            png_images=tuple(
+                base64.b64decode(encoded, validate=True) for encoded in encoded_images
+            ),
+            request_id=getattr(response, "_request_id", None),
+            usage=dict(usage) if isinstance(usage, Mapping) else {},
+        )

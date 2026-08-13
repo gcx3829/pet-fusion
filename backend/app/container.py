@@ -9,10 +9,13 @@ from app.services.asset_store import AssetStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
 from app.services.critic_service import DeterministicCriticService
 from app.services.generator_service import (
+    FAKE_IMAGE_MODEL,
     DeterministicFakeImageGenerator,
     GeneratorService,
     ImageGenerator,
+    OpenAIImageGenerator,
 )
+from app.services.openai_image_client import OfficialOpenAIImageEditsTransport
 from app.services.search_runner import SearchRunner
 from app.services.stop_policy import DeterministicStopPolicy
 
@@ -37,17 +40,28 @@ class AppContainer:
         stop_policy: DeterministicStopPolicy | None = None,
     ) -> AppContainer:
         if image_generator is None:
-            if not settings.fake_generator:
+            if settings.fake_generator:
+                image_generator = DeterministicFakeImageGenerator()
+            elif settings.openai_api_key is None or not settings.openai_api_key.get_secret_value():
                 raise ConfigurationError(
-                    "The first vertical slice only enables the deterministic fake generator"
+                    "OPENAI_API_KEY is required when FAKE_GENERATOR is disabled"
                 )
-            image_generator = DeterministicFakeImageGenerator()
+            else:
+                image_generator = OpenAIImageGenerator(
+                    transport=OfficialOpenAIImageEditsTransport(
+                        api_key=settings.openai_api_key.get_secret_value(),
+                        base_url=settings.openai_base_url,
+                    )
+                )
         app_store = AppStore(settings.resolved_app_db_path)
         asset_store = AssetStore(settings.asset_dir, max_image_pixels=settings.max_image_pixels)
         generator_service = GeneratorService(
             provider=image_generator,
             asset_store=asset_store,
             app_store=app_store,
+            model=(FAKE_IMAGE_MODEL if settings.fake_generator else settings.openai_image_model),
+            quality=settings.openai_image_quality,
+            size=(None if settings.fake_generator else settings.openai_image_size),
         )
         return cls(
             settings=settings,

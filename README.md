@@ -191,7 +191,7 @@ OPENAI_API_KEY=
 OPENAI_BASE_URL=
 ```
 
-`OPENAI_BASE_URL` 只为后续真实 provider 路径预留；留空表示官方端点。当前 mock 切片不会读取或调用真实 OpenAI 凭据。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。API key 不应放进前端环境变量、请求体、checkpoint 或日志。
+默认 `FAKE_GENERATOR=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把它设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图和 1～5 张参考图；`OPENAI_BASE_URL` 可选，用于你自行管理的 OpenAI-compatible endpoint，留空即官方端点。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64 或完整 prompt。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
 
 ## 已实现的 API 流程
 
@@ -208,8 +208,8 @@ OPENAI_BASE_URL=
 
 ## 当前限制
 
-- 当前里程碑仅实现单轮、确定性的 mock generation；真实 GPT Image 2 调用尚未启用；
-- Critic、Feedback Planner、确定性 Ranker、跨轮 Global Winner 和完整停止策略仍属于后续里程碑；
+- 默认仍使用确定性的 mock generator；`FAKE_GENERATOR=0` 时真实 GPT Image 2 provider 路径已接通，但尚未用项目外的真实凭据完成联调；
+- Critic 和 Feedback Planner 目前仍是离线确定性实现；确定性 Ranker、跨轮 Global Winner、停止策略和人工 review/resume 已接通，真实多模态 Critic/Planner 仍待实现；
 - composite floor、全分辨率回贴、ICC/EXIF 导出和 Local Fix 尚未实现；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
 - 前端已覆盖首个工作流，不是通用节点编辑器，也暂不包含完整人工 interrupt/resume 与导出体验。
