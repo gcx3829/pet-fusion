@@ -87,26 +87,27 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         current = services.app_store.get_search(state["search_id"])
         if current.status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
             return {"status": current.status.value}
-        if not fenced_update(
-            state["search_id"],
-            expected_statuses=(SearchStatus.QUEUED, SearchStatus.RUNNING),
-            status=SearchStatus.RUNNING,
-            round_index=state["round_index"],
-        ):
-            current = services.app_store.get_search(state["search_id"])
-            return {"status": current.status.value}
         event_key = (
             "search:started"
             if state["round_index"] == 0
             else f"search:round:{state['round_index']}:started"
         )
         event_type = "search.started" if state["round_index"] == 0 else "round.started"
-        services.app_store.emit_event(
-            search_id=state["search_id"],
-            event_key=event_key,
-            event_type=event_type,
-            payload={"round_index": state["round_index"]},
-        )
+        if not fenced_update(
+            state["search_id"],
+            expected_statuses=(SearchStatus.QUEUED, SearchStatus.RUNNING),
+            status=SearchStatus.RUNNING,
+            round_index=state["round_index"],
+            events=(
+                (
+                    event_key,
+                    event_type,
+                    {"round_index": state["round_index"]},
+                ),
+            ),
+        ):
+            current = services.app_store.get_search(state["search_id"])
+            return {"status": current.status.value}
         return {"status": SearchStatus.RUNNING.value}
 
     async def compile_prompt(state: SearchState) -> dict[str, object]:
@@ -138,7 +139,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     async def prepare_round(state: SearchState) -> dict[str, object]:
         current = services.app_store.get_search(state["search_id"])
         if current.status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
-            return {"status": SearchStatus.CANCELLED.value, "current_candidates": []}
+            return {"status": current.status.value, "current_candidates": []}
         services.app_store.emit_event(
             search_id=state["search_id"],
             event_key=f"round:{state['round_index']}:generation:started",
@@ -155,7 +156,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     async def generate_candidates(state: SearchState) -> dict[str, object]:
         current = services.app_store.get_search(state["search_id"])
         if current.status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
-            return {"status": SearchStatus.CANCELLED.value, "current_candidates": []}
+            return {"status": current.status.value, "current_candidates": []}
         manifest = SourceManifest.model_validate(state["source_manifest"])
         request = GenerationRequest(
             search_id=state["search_id"],
@@ -180,7 +181,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     async def evaluate_round(state: SearchState) -> dict[str, object]:
         current = services.app_store.get_search(state["search_id"])
         if current.status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
-            return {"status": SearchStatus.CANCELLED.value, "current_candidates": []}
+            return {"status": current.status.value, "current_candidates": []}
         manifest = SourceManifest.model_validate(state["source_manifest"])
         placement = PlacementIntent.model_validate(state["placement"])
         candidates = [CandidateRecord.model_validate(item) for item in state["current_candidates"]]
@@ -270,6 +271,46 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
                 if issue.suggested_fix
             ][:3]
         )
+        transition_events: list[tuple[str, str, dict[str, object]]] = [
+            (
+                f"round:{state['round_index']}:winner",
+                "round.winner.updated",
+                {
+                    "round_index": state["round_index"],
+                    "round_winner_id": ranking.winner_id,
+                    "round_winner_score": ranking.winner_score,
+                },
+            ),
+            (
+                f"round:{state['round_index']}:stop",
+                "search.stop.decided",
+                {
+                    "round_index": state["round_index"],
+                    "action": decision.action.value,
+                    "reason": decision.reason,
+                    "global_winner_id": (
+                        global_winner.candidate_id if global_winner else None
+                    ),
+                },
+            ),
+        ]
+        if current.global_winner_id != (
+            global_winner.candidate_id if global_winner else None
+        ):
+            transition_events.insert(
+                1,
+                (
+                    f"round:{state['round_index']}:global-winner",
+                    "search.global_winner.updated",
+                    {
+                        "round_index": state["round_index"],
+                        "global_winner_id": (
+                            global_winner.candidate_id if global_winner else None
+                        ),
+                        "global_winner_score": global_winner.score if global_winner else None,
+                    },
+                ),
+            )
         if not fenced_update(
             state["search_id"],
             round_winner_id=ranking.winner_id,
@@ -278,41 +319,10 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             round_history=round_history,
             active_directives=active_directives,
             stop_reason=decision.reason,
+            events=transition_events,
         ):
             latest = services.app_store.get_search(state["search_id"])
             return {"status": latest.status.value}
-        services.app_store.emit_event(
-            search_id=state["search_id"],
-            event_key=f"round:{state['round_index']}:winner",
-            event_type="round.winner.updated",
-            payload={
-                "round_index": state["round_index"],
-                "round_winner_id": ranking.winner_id,
-                "round_winner_score": ranking.winner_score,
-            },
-        )
-        if current.global_winner_id != (global_winner.candidate_id if global_winner else None):
-            services.app_store.emit_event(
-                search_id=state["search_id"],
-                event_key=f"round:{state['round_index']}:global-winner",
-                event_type="search.global_winner.updated",
-                payload={
-                    "round_index": state["round_index"],
-                    "global_winner_id": global_winner.candidate_id if global_winner else None,
-                    "global_winner_score": global_winner.score if global_winner else None,
-                },
-            )
-        services.app_store.emit_event(
-            search_id=state["search_id"],
-            event_key=f"round:{state['round_index']}:stop",
-            event_type="search.stop.decided",
-            payload={
-                "round_index": state["round_index"],
-                "action": decision.action.value,
-                "reason": decision.reason,
-                "global_winner_id": global_winner.candidate_id if global_winner else None,
-            },
-        )
         evaluation_payloads = [evaluation.model_dump(mode="json") for evaluation in evaluations]
         return {
             "evaluations": evaluation_payloads,
@@ -335,15 +345,16 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             clear_stop_reason=True,
             clear_state_summary=True,
             clear_interrupt_payload=True,
+            events=(
+                (
+                    f"search:round:{next_round}:started",
+                    "round.started",
+                    {"round_index": next_round, "automatic": True},
+                ),
+            ),
         ):
             latest = services.app_store.get_search(state["search_id"])
             return {"status": latest.status.value}
-        services.app_store.emit_event(
-            search_id=state["search_id"],
-            event_key=f"search:round:{next_round}:started",
-            event_type="round.started",
-            payload={"round_index": next_round, "automatic": True},
-        )
         return {
             "round_index": next_round,
             "current_candidates": [],
@@ -400,6 +411,17 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         }
         assert_checkpoint_safe(interrupt_payload)
         assert_checkpoint_safe(summary)
+        public_candidates = [
+            CandidateResponse.from_record(CandidateRecord.model_validate(item)).model_dump(
+                mode="json"
+            )
+            for item in state["current_candidates"]
+        ]
+        waiting_event_key = (
+            "search:waiting-for-human"
+            if state["round_index"] == 0
+            else f"search:waiting-for-human:{state['round_index']}"
+        )
         if not fenced_update(
             state["search_id"],
             status=SearchStatus.WAITING_FOR_HUMAN,
@@ -408,36 +430,26 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             state_summary=summary,
             interrupt_payload=interrupt_payload,
             clear_lease=True,
+            events=(
+                (
+                    waiting_event_key,
+                    "search.waiting_for_human",
+                    {
+                        "round_index": state["round_index"],
+                        "candidates": public_candidates,
+                        "stop_reason": state.get("stop_reason"),
+                        "global_winner_id": state.get("global_winner_id"),
+                    },
+                ),
+                (
+                    f"search:interrupted:{state['round_index']}",
+                    "search.interrupted",
+                    interrupt_payload,
+                ),
+            ),
         ):
             latest = services.app_store.get_search(state["search_id"])
             return {"status": latest.status.value}
-        public_candidates = [
-            CandidateResponse.from_record(CandidateRecord.model_validate(item)).model_dump(
-                mode="json"
-            )
-            for item in state["current_candidates"]
-        ]
-        services.app_store.emit_event(
-            search_id=state["search_id"],
-            event_key=(
-                "search:waiting-for-human"
-                if state["round_index"] == 0
-                else f"search:waiting-for-human:{state['round_index']}"
-            ),
-            event_type="search.waiting_for_human",
-            payload={
-                "round_index": state["round_index"],
-                "candidates": public_candidates,
-                "stop_reason": state.get("stop_reason"),
-                "global_winner_id": state.get("global_winner_id"),
-            },
-        )
-        services.app_store.emit_event(
-            search_id=state["search_id"],
-            event_key=f"search:interrupted:{state['round_index']}",
-            event_type="search.interrupted",
-            payload=interrupt_payload,
-        )
         return {
             "status": SearchStatus.WAITING_FOR_HUMAN.value,
             "stop_reason": state.get("stop_reason"),
@@ -445,6 +457,13 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         }
 
     def route_after_finalize(state: SearchState) -> str:
+        state_status = state.get("status")
+        persisted_status = services.app_store.get_search(state["search_id"]).status
+        if state_status in {
+            SearchStatus.CANCELLED.value,
+            SearchStatus.ACCEPTED.value,
+        } or persisted_status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
+            return "end"
         if (
             state.get("stop_action") == "continue"
             and not state.get("review_each_round", False)

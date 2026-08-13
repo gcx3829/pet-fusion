@@ -346,9 +346,13 @@ class AppStore:
         clear_lease: bool = False,
         expected_statuses: Sequence[SearchStatus] | None = None,
         expected_lease_owner: str | None = None,
+        events: Sequence[tuple[str, str, Mapping[str, object]]] = (),
     ) -> bool:
+        """Conditionally update a search and append its resulting events atomically."""
+
+        now = utcnow()
         assignments = ["updated_at = ?"]
-        values: list[Any] = [utcnow().isoformat()]
+        values: list[Any] = [now.isoformat()]
         optional = {
             "status": status.value if status else None,
             "round_index": round_index,
@@ -412,6 +416,24 @@ class AppStore:
                 f"UPDATE search_runs SET {', '.join(assignments)} WHERE {' AND '.join(where)}",
                 values,
             )
+            if cursor.rowcount == 1:
+                for event_key, event_type, payload in events:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO search_events(
+                            search_id, event_key, type, payload_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            search_id,
+                            event_key,
+                            event_type,
+                            json.dumps(
+                                payload, separators=(",", ":"), sort_keys=True
+                            ),
+                            now.isoformat(),
+                        ),
+                    )
             connection.commit()
         if cursor.rowcount == 0:
             if expected_statuses is None:
@@ -860,6 +882,7 @@ class AppStore:
     def accept_search(self, search_id: str) -> bool:
         """Atomically accept only a waiting search with a persisted winner."""
 
+        now = utcnow().isoformat()
         with self._connection() as connection:
             cursor = connection.execute(
                 """
@@ -870,14 +893,43 @@ class AppStore:
                 WHERE search_id = ? AND status = 'waiting_for_human'
                   AND global_winner_id IS NOT NULL
                 """,
-                (utcnow().isoformat(), search_id),
+                (now, search_id),
             )
+            if cursor.rowcount == 1:
+                winner = connection.execute(
+                    """
+                    SELECT global_winner_id, global_winner_score
+                    FROM search_runs WHERE search_id = ?
+                    """,
+                    (search_id,),
+                ).fetchone()
+                assert winner is not None
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO search_events(
+                        search_id, event_key, type, payload_json, created_at
+                    ) VALUES (?, 'search:accepted', 'search.accepted', ?, ?)
+                    """,
+                    (
+                        search_id,
+                        json.dumps(
+                            {
+                                "global_winner_id": winner["global_winner_id"],
+                                "global_winner_score": winner["global_winner_score"],
+                            },
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now,
+                    ),
+                )
             connection.commit()
         return cursor.rowcount == 1
 
     def cancel_search(self, search_id: str) -> bool:
         """Atomically cancel any non-terminal search; terminal repeats are no-ops."""
 
+        now = utcnow().isoformat()
         with self._connection() as connection:
             cursor = connection.execute(
                 """
@@ -887,7 +939,19 @@ class AppStore:
                 WHERE search_id = ?
                   AND status IN ('queued', 'running', 'waiting_for_human')
                 """,
-                (utcnow().isoformat(), search_id),
+                (now, search_id),
             )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO search_events(
+                        search_id, event_key, type, payload_json, created_at
+                    ) VALUES (
+                        ?, 'search:cancelled', 'search.cancelled',
+                        '{"reason":"cancelled_by_user"}', ?
+                    )
+                    """,
+                    (search_id, now),
+                )
             connection.commit()
         return cursor.rowcount == 1

@@ -92,10 +92,37 @@ class SearchRunner:
             return
         result_status = SearchStatus(result["status"])
         if result_status is SearchStatus.WAITING_FOR_HUMAN:
+            round_index = result.get("round_index", 0)
+            waiting_payload: dict[str, object] = {
+                "round_index": round_index,
+                "candidates": [
+                    CandidateResponse.from_record(candidate).model_dump(mode="json")
+                    for candidate in current.candidates
+                ],
+                "stop_reason": result.get("stop_reason") or "mock_round_complete",
+            }
+            events: list[tuple[str, str, dict[str, object]]] = [
+                (
+                    "search:waiting-for-human"
+                    if round_index == 0
+                    else f"search:waiting-for-human:{round_index}",
+                    "search.waiting_for_human",
+                    waiting_payload,
+                )
+            ]
+            interrupt_payload = result.get("interrupt_payload")
+            if isinstance(interrupt_payload, dict):
+                events.append(
+                    (
+                        f"search:interrupted:{round_index}",
+                        "search.interrupted",
+                        interrupt_payload,
+                    )
+                )
             updated = self.app_store.update_search(
                 search_id,
                 status=result_status,
-                round_index=result.get("round_index", 0),
+                round_index=round_index,
                 stop_reason=result.get("stop_reason") or "mock_round_complete",
                 state_summary={
                     "schema_version": result["schema_version"],
@@ -109,29 +136,12 @@ class SearchRunner:
                 clear_lease=True,
                 expected_statuses=(SearchStatus.RUNNING,),
                 expected_lease_owner=worker_id,
+                events=events,
             )
             if not updated:
                 if self.app_store.get_search(search_id).status is SearchStatus.CANCELLED:
                     return
                 return
-            current = self.app_store.get_search(search_id)
-            self.app_store.emit_event(
-                search_id=search_id,
-                event_key=(
-                    "search:waiting-for-human"
-                    if current.round_index == 0
-                    else f"search:waiting-for-human:{current.round_index}"
-                ),
-                event_type="search.waiting_for_human",
-                payload={
-                    "round_index": current.round_index,
-                    "candidates": [
-                        CandidateResponse.from_record(candidate).model_dump(mode="json")
-                        for candidate in current.candidates
-                    ],
-                    "stop_reason": current.stop_reason,
-                },
-            )
 
     async def _watch_lease(
         self, *, search_id: str, worker_id: str, lease_seconds: int
@@ -280,15 +290,9 @@ class SearchRunner:
                 clear_lease=True,
                 expected_statuses=(SearchStatus.RUNNING, SearchStatus.QUEUED),
                 expected_lease_owner=resolved_worker_id,
+                events=(("search:failed", "search.failed", {"error": error}),),
             )
-            if updated:
-                self.app_store.emit_event(
-                    search_id=search_id,
-                    event_key="search:failed",
-                    event_type="search.failed",
-                    payload={"error": error},
-                )
-            elif self.app_store.get_search(search_id).status in {
+            if not updated and self.app_store.get_search(search_id).status in {
                 SearchStatus.CANCELLED,
                 SearchStatus.ACCEPTED,
             }:

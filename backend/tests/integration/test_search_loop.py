@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from typing import Any
 
 from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
 
 from app.config import Settings
 from app.domain.evaluations import (
@@ -209,3 +211,91 @@ def test_losing_blocking_candidate_does_not_create_selected_directive(
         search = client.get(f"/api/v1/searches/{created['search_id']}").json()
     assert search["global_winner_id"] == search["round_winner_id"]
     assert search["active_directives"] == []
+
+
+def test_cancel_fences_waiting_state_and_events_in_one_transaction(
+    tmp_path, project_payload, search_payload, fake_generator
+) -> None:
+    settings = Settings(data_dir=tmp_path / "atomic-events", run_inline=False)
+    app = create_app(settings, image_generator=fake_generator)
+    with TestClient(app) as client:
+        project = _project(client, project_payload)
+        created = client.post(
+            f"/api/v1/projects/{project['project_id']}/searches",
+            json=search_payload,
+            headers={"Idempotency-Key": "cancel-before-waiting-transition"},
+        ).json()
+
+    search_id = created["search_id"]
+    store = app.state.container.app_store
+    assert store.claim_search(search_id=search_id, worker_id="race-worker", lease_seconds=30)
+    assert store.cancel_search(search_id)
+    assert not store.update_search(
+        search_id,
+        status=SearchStatus.WAITING_FOR_HUMAN,
+        expected_statuses=(SearchStatus.RUNNING,),
+        expected_lease_owner="race-worker",
+        events=(
+            ("search:waiting-for-human", "search.waiting_for_human", {"round_index": 0}),
+            ("search:interrupted:0", "search.interrupted", {"round_index": 0}),
+        ),
+    )
+
+    event_types = [event.type for event in store.list_events(search_id)]
+    assert event_types[-1] == "search.cancelled"
+    assert "search.waiting_for_human" not in event_types
+    assert "search.interrupted" not in event_types
+
+
+def test_cancelled_search_ends_before_automatic_next_round(
+    tmp_path,
+    project_payload,
+    search_payload,
+    fake_generator,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    policy = ContinueOncePolicy()
+    settings = Settings(data_dir=tmp_path / "cancelled-auto-route", run_inline=False)
+    app = create_app(settings, image_generator=fake_generator, stop_policy=policy)
+    with TestClient(app) as client:
+        store = app.state.container.app_store
+        original_update = store.update_search
+
+        def update_then_cancel(search_id: str, **kwargs: Any) -> bool:
+            updated = original_update(search_id, **kwargs)
+            if updated and kwargs.get("stop_reason") == "blocking_issues":
+                assert store.cancel_search(search_id)
+            return updated
+
+        monkeypatch.setattr(store, "update_search", update_then_cancel)
+        project = _project(client, project_payload)
+        created = client.post(
+            f"/api/v1/projects/{project['project_id']}/searches",
+            json={**search_payload, "max_rounds": 2},
+            headers={"Idempotency-Key": "cancel-before-auto-route"},
+        ).json()
+        search_id = created["search_id"]
+        worker_id = "cancel-route-worker"
+        assert store.claim_search(
+            search_id=search_id, worker_id=worker_id, lease_seconds=30
+        )
+        result = asyncio.run(
+            app.state.container.search_runner.run_with_lease(
+                search_id=search_id,
+                worker_id=worker_id,
+                lease_seconds=30,
+            )
+        )
+
+        assert result["status"] == SearchStatus.CANCELLED.value
+        assert store.get_search(search_id).status is SearchStatus.CANCELLED
+        assert fake_generator.call_count == 1
+        events = store.list_events(search_id)
+        cancelled_index = next(
+            index for index, event in enumerate(events) if event.type == "search.cancelled"
+        )
+        assert not {
+            "round.started",
+            "search.waiting_for_human",
+            "search.interrupted",
+        }.intersection(event.type for event in events[cancelled_index + 1 :])

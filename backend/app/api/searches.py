@@ -99,12 +99,6 @@ async def resume_search(
         refreshed = container.app_store.get_search(search_id)
         if refreshed.status in {SearchStatus.ACCEPTED, SearchStatus.FAILED}:
             raise ConflictError(f"Cannot cancel a search with status {refreshed.status.value}")
-        container.app_store.emit_event(
-            search_id=search_id,
-            event_key="search:cancelled",
-            event_type="search.cancelled",
-            payload={"reason": "cancelled_by_user"},
-        )
         return SearchResponse.from_record(container.app_store.get_search(search_id))
 
     if request.action == "accept_global_winner":
@@ -127,15 +121,6 @@ async def resume_search(
             raise ConflictError(
                 f"Cannot accept a search with status {refreshed.status.value}"
             )
-        container.app_store.emit_event(
-            search_id=search_id,
-            event_key="search:accepted",
-            event_type="search.accepted",
-            payload={
-                "global_winner_id": search.global_winner_id,
-                "global_winner_score": search.global_winner_score,
-            },
-        )
         return SearchResponse.from_record(container.app_store.get_search(search_id))
 
     if request.action == "continue_one_round":
