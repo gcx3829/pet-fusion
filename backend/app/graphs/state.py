@@ -23,7 +23,21 @@ class SearchState(TypedDict, total=False):
     canonical_prompt: str
     canonical_prompt_hash: str
     canonical_template_version: str
+    generation_prompt: str
+    generation_prompt_hash: str
     active_directives: list[dict[str, object]]
+    active_directives_hash: str
+    directive_policy_version: str
+    directive_version: int
+    attempted_directive_categories: list[str]
+    planner_result: dict[str, object] | None
+    planner_input: dict[str, object] | None
+    selected_evaluation: dict[str, object] | None
+    selected_blocking_issues: list[dict[str, object]]
+    planner_proposal: dict[str, object] | None
+    validated_planner_result: dict[str, object] | None
+    planner_round_index: int | None
+    planner_fallback_attempts: int
     evaluations: list[dict[str, object]]
     round_history: list[dict[str, object]]
     round_index: int

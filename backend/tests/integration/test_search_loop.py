@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from app.config import Settings
+from app.domain.directives import PlannerInput, PlannerProposal
 from app.domain.evaluations import (
     CandidateEvaluation,
     CriticIssue,
@@ -18,6 +19,7 @@ from app.domain.evaluations import (
 from app.domain.searches import SearchStatus
 from app.main import create_app
 from app.services.critic_service import CriticInput, DeterministicCriticService
+from app.services.planner_service import DeterministicFakePlannerProvider
 from app.services.stop_policy import DeterministicStopPolicy
 
 
@@ -47,6 +49,37 @@ class ContinueOncePolicy(DeterministicStopPolicy):
         )
 
 
+class AlwaysContinuePolicy(DeterministicStopPolicy):
+    def decide(self, *, ranking, evaluations, global_winner, max_rounds):  # type: ignore[no-untyped-def]
+        return StopDecision(
+            action=StopAction.CONTINUE,
+            reason="blocking_issues",
+            round_index=ranking.round_index,
+            global_winner_id=global_winner.candidate_id if global_winner else None,
+            global_winner_score=global_winner.score if global_winner else None,
+            planner_required=True,
+        )
+
+
+class FailingPlannerProvider:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def plan(self, planner_input: PlannerInput) -> PlannerProposal:
+        self.call_count += 1
+        raise RuntimeError("planner unavailable")
+
+
+class CountingPlannerProvider:
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.delegate = DeterministicFakePlannerProvider()
+
+    def plan(self, planner_input: PlannerInput) -> PlannerProposal:
+        self.call_count += 1
+        return self.delegate.plan(planner_input)
+
+
 class LosingBlockingCritic(DeterministicCriticService):
     def evaluate(self, request: CriticInput) -> CandidateEvaluation:
         result = super().evaluate(request)
@@ -58,6 +91,28 @@ class LosingBlockingCritic(DeterministicCriticService):
             severity=Severity.BLOCKING,
             evidence="Fixture seam on a losing candidate.",
             suggested_fix="Match local edge sharpness.",
+            confidence=0.95,
+        )
+        return result.model_copy(
+            update={
+                "issues": (issue,),
+                "no_meaningful_defect": False,
+                "recommended_action": "regenerate",
+            }
+        )
+
+
+class SelectedBlockingCritic(DeterministicCriticService):
+    """Give every candidate one safe blocker so the auto-loop tests planner wiring."""
+
+    def evaluate(self, request: CriticInput) -> CandidateEvaluation:
+        result = super().evaluate(request)
+        issue = CriticIssue(
+            issue_id=f"selected-seam-{request.candidate.candidate_id}",
+            category="physical_integration",
+            severity=Severity.BLOCKING,
+            evidence="Fixture seam requiring one targeted next-round correction.",
+            suggested_fix="Match the local edge sharpness.",
             confidence=0.95,
         )
         return result.model_copy(
@@ -158,8 +213,15 @@ def test_review_false_automatically_runs_next_round_and_supplies_historical_eval
     tmp_path, project_payload, search_payload, fake_generator
 ) -> None:
     policy = ContinueOncePolicy()
+    planner_provider = CountingPlannerProvider()
     settings = Settings(data_dir=tmp_path / "automatic", run_inline=True)
-    app = create_app(settings, image_generator=fake_generator, stop_policy=policy)
+    app = create_app(
+        settings,
+        image_generator=fake_generator,
+        critic_service=SelectedBlockingCritic(),
+        stop_policy=policy,
+        planner_provider=planner_provider,
+    )
     with TestClient(app) as client:
         project = _project(client, project_payload)
         payload = {**search_payload, "max_rounds": 2, "candidate_count": 2}
@@ -175,6 +237,7 @@ def test_review_false_automatically_runs_next_round_and_supplies_historical_eval
     assert len(search["round_history"]) == 2
     assert fake_generator.call_count == 2
     assert len(policy.seen_evaluations) == 2
+    assert planner_provider.call_count == 1
     assert len(policy.seen_evaluations[1]) == 4
     assert set(policy.seen_evaluations[0]).issubset(set(policy.seen_evaluations[1]))
     checkpoint_path = settings.resolved_checkpoint_db_path
@@ -186,13 +249,134 @@ def test_review_false_automatically_runs_next_round_and_supplies_historical_eval
                 (created["search_id"],),
             )
         }
+        checkpoint_namespaces = {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT checkpoint_ns FROM checkpoints WHERE thread_id = ?",
+                (created["search_id"],),
+            )
+        }
     assert thread_ids == {created["search_id"]}
+    assert "" in checkpoint_namespaces
+    assert any(
+        namespace.startswith("feedback_planner:")
+        for namespace in checkpoint_namespaces
+    )
 
     container = app.state.container
     container.app_store.update_search(created["search_id"], status=SearchStatus.RUNNING)
     asyncio.run(container.search_runner.run_search(created["search_id"]))
     replayed = container.app_store.get_search(created["search_id"])
     assert len(replayed.round_history) == 2
+    assert planner_provider.call_count == 1
+
+
+def test_review_each_round_waits_after_planning_and_resume_uses_directive(
+    tmp_path, project_payload, search_payload, fake_generator
+) -> None:
+    policy = ContinueOncePolicy()
+    settings = Settings(data_dir=tmp_path / "review-after-planning", run_inline=True)
+    app = create_app(
+        settings,
+        image_generator=fake_generator,
+        critic_service=SelectedBlockingCritic(),
+        stop_policy=policy,
+    )
+    with TestClient(app) as client:
+        project = _project(client, project_payload)
+        created = client.post(
+            f"/api/v1/projects/{project['project_id']}/searches",
+            json={
+                **search_payload,
+                "max_rounds": 2,
+                "candidate_count": 2,
+                "review_each_round": True,
+            },
+            headers={"Idempotency-Key": "review-after-safe-plan"},
+        ).json()
+        first = client.get(f"/api/v1/searches/{created['search_id']}").json()
+        assert first["status"] == SearchStatus.WAITING_FOR_HUMAN.value
+        assert first["round_index"] == 0
+        assert len(first["active_directives"]) == 1
+        assert fake_generator.call_count == 1
+
+        continued = client.post(
+            f"/api/v1/searches/{created['search_id']}/resume",
+            json={"action": "continue_one_round"},
+        )
+        assert continued.status_code == 200, continued.text
+        second = client.get(f"/api/v1/searches/{created['search_id']}").json()
+        events = client.get(f"/api/v1/searches/{created['search_id']}/events").text
+
+    assert second["status"] == SearchStatus.WAITING_FOR_HUMAN.value
+    assert second["round_index"] == 1
+    assert fake_generator.call_count == 2
+    assert "Match the local edge sharpness." not in fake_generator.requests[0].prompt
+    assert "Match the local edge sharpness." in fake_generator.requests[1].prompt
+    assert events.count("event: search.planner.ready") == 1
+
+
+def test_planner_fallback_is_consumed_once_across_automatic_rounds_and_recovery(
+    tmp_path, project_payload, search_payload, fake_generator
+) -> None:
+    provider = FailingPlannerProvider()
+    settings = Settings(data_dir=tmp_path / "planner-fallback", run_inline=True)
+    app = create_app(
+        settings,
+        image_generator=fake_generator,
+        critic_service=SelectedBlockingCritic(),
+        stop_policy=AlwaysContinuePolicy(),
+        planner_provider=provider,
+    )
+    with TestClient(app) as client:
+        project = _project(client, project_payload)
+        created = client.post(
+            f"/api/v1/projects/{project['project_id']}/searches",
+            json={**search_payload, "max_rounds": 3, "candidate_count": 2},
+            headers={"Idempotency-Key": "single-planner-fallback"},
+        ).json()
+        search = client.get(f"/api/v1/searches/{created['search_id']}").json()
+        events = client.get(f"/api/v1/searches/{created['search_id']}/events").text
+
+    assert search["status"] == SearchStatus.WAITING_FOR_HUMAN.value
+    assert search["round_index"] == 1
+    assert search["stop_reason"] == "planner_fallback_exhausted"
+    assert fake_generator.call_count == 2
+    assert provider.call_count == 2
+    assert events.count("event: search.planner.ready") == 2
+    assert search["round_history"][0]["planner_fallback_used"] is True
+    assert search["round_history"][1]["planner_fallback_attempts"] == 1
+    recovered = app.state.container.search_runner.initial_state(created["search_id"])
+    assert recovered["planner_fallback_attempts"] == 1
+
+
+def test_fallback_recovery_does_not_depend_on_planned_categories(
+    tmp_path, project_payload, search_payload, fake_generator
+) -> None:
+    provider = FailingPlannerProvider()
+    settings = Settings(data_dir=tmp_path / "planner-fallback-recovery", run_inline=True)
+    app = create_app(
+        settings,
+        image_generator=fake_generator,
+        critic_service=SelectedBlockingCritic(),
+        stop_policy=ContinueOncePolicy(),
+        planner_provider=provider,
+    )
+    with TestClient(app) as client:
+        project = _project(client, project_payload)
+        created = client.post(
+            f"/api/v1/projects/{project['project_id']}/searches",
+            json={**search_payload, "max_rounds": 2, "candidate_count": 2},
+            headers={"Idempotency-Key": "fallback-recovery-without-categories"},
+        ).json()
+
+    store = app.state.container.app_store
+    search = store.get_search(created["search_id"])
+    history = [dict(item) for item in search.round_history]
+    history[0].pop("planned_categories", None)
+    store.update_search(created["search_id"], round_history=history)
+    recovered = app.state.container.search_runner.initial_state(created["search_id"])
+    assert recovered["planner_fallback_attempts"] == 1
 
 
 def test_losing_blocking_candidate_does_not_create_selected_directive(

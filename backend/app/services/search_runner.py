@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnableConfig
 
 from app.domain.assets import SourceManifest
 from app.domain.candidates import CandidateResponse
+from app.domain.directives import DirectivePolicy, stable_directives_hash
 from app.domain.errors import SourceManifestMismatchError
 from app.domain.searches import SearchStatus
 from app.graphs.checkpointer import sqlite_checkpointer
@@ -22,6 +23,7 @@ from app.persistence.app_store import AppStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
 from app.services.critic_service import DeterministicCriticService
 from app.services.generator_service import GeneratorService
+from app.services.planner_service import FeedbackPlannerService, normalize_active_directives
 from app.services.stop_policy import DeterministicStopPolicy
 
 
@@ -35,6 +37,7 @@ class SearchRunner:
         critic_service: DeterministicCriticService | None = None,
         candidate_ranker: DeterministicCandidateRanker | None = None,
         stop_policy: DeterministicStopPolicy | None = None,
+        planner_service: FeedbackPlannerService | None = None,
     ) -> None:
         self.app_store = app_store
         self.generator_service = generator_service
@@ -42,6 +45,7 @@ class SearchRunner:
         self.critic_service = critic_service
         self.candidate_ranker = candidate_ranker
         self.stop_policy = stop_policy
+        self.planner_service = planner_service
 
     def initial_state(self, search_id: str) -> SearchState:
         search = self.app_store.get_search(search_id)
@@ -50,6 +54,39 @@ class SearchRunner:
             raise SourceManifestMismatchError(
                 "Search and project immutable source manifest hashes differ"
             )
+        planner_policy = (
+            self.planner_service.policy
+            if self.planner_service is not None
+            else DirectivePolicy()
+        )
+        active_directives = normalize_active_directives(
+            search.active_directives,
+            policy=planner_policy,
+        )
+        directive_versions = [
+            value
+            for item in search.round_history
+            for value in [item.get("directive_version")]
+            if isinstance(value, int) and value >= 0
+        ]
+        attempted_categories: list[str] = []
+        planner_fallback_attempts = 0
+        for item in search.round_history:
+            raw_categories = item.get("planned_categories")
+            if isinstance(raw_categories, list):
+                attempted_categories.extend(
+                    category for category in raw_categories if isinstance(category, str)
+                )
+            raw_fallback_attempts = item.get("planner_fallback_attempts")
+            if isinstance(raw_fallback_attempts, int) and not isinstance(
+                raw_fallback_attempts, bool
+            ):
+                planner_fallback_attempts = max(
+                    planner_fallback_attempts,
+                    min(raw_fallback_attempts, 1),
+                )
+            elif item.get("planner_fallback_used") is True:
+                planner_fallback_attempts = 1
         state: SearchState = {
             "schema_version": SEARCH_STATE_SCHEMA_VERSION,
             "search_id": search.search_id,
@@ -60,7 +97,19 @@ class SearchRunner:
             "source_manifest_hash": search.source_manifest_hash,
             "placement": search.placement.model_dump(mode="json"),
             "user_intent": search.user_intent,
-            "active_directives": search.active_directives,
+            "active_directives": [item.model_dump(mode="json") for item in active_directives],
+            "active_directives_hash": stable_directives_hash(active_directives),
+            "directive_policy_version": planner_policy.policy_version,
+            "directive_version": max(directive_versions, default=0),
+            "attempted_directive_categories": attempted_categories,
+            "planner_result": None,
+            "planner_input": None,
+            "selected_evaluation": None,
+            "selected_blocking_issues": [],
+            "planner_proposal": None,
+            "validated_planner_result": None,
+            "planner_round_index": None,
+            "planner_fallback_attempts": planner_fallback_attempts,
             "evaluations": [
                 item.model_dump(mode="json")
                 for item in self.app_store.list_evaluations(search_id)
@@ -210,6 +259,7 @@ class SearchRunner:
                         critic_service=self.critic_service,
                         candidate_ranker=self.candidate_ranker,
                         stop_policy=self.stop_policy,
+                        planner_service=self.planner_service,
                     )
                 ).compile(checkpointer=checkpointer)
                 snapshot = await graph.aget_state(config)

@@ -7,6 +7,12 @@ from langgraph.graph import END, START, StateGraph
 
 from app.domain.assets import SourceManifest
 from app.domain.candidates import CandidateRecord, CandidateResponse
+from app.domain.directives import (
+    DirectiveCategory,
+    PlannerAction,
+    PlannerInput,
+    PlannerResult,
+)
 from app.domain.evaluations import (
     CandidateEvaluation,
     GlobalWinner,
@@ -14,6 +20,7 @@ from app.domain.evaluations import (
     StopDecision,
 )
 from app.domain.searches import PlacementIntent, SearchStatus
+from app.graphs.feedback_planner_subgraph import build_feedback_planner_subgraph
 from app.graphs.state import SearchState, assert_checkpoint_safe
 from app.persistence.app_store import AppStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
@@ -22,13 +29,18 @@ from app.services.generator_service import (
     GenerationRequest,
     GeneratorService,
 )
+from app.services.planner_service import (
+    FeedbackPlannerService,
+    normalize_active_directives,
+)
 from app.services.prompt_compiler import (
     CANONICAL_TEMPLATE_VERSION,
     compile_canonical_prompt,
+    compile_generation_prompt,
 )
 from app.services.stop_policy import DeterministicStopPolicy
 
-SEARCH_STATE_SCHEMA_VERSION = "search-state/v1"
+SEARCH_STATE_SCHEMA_VERSION = "search-state/v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +51,7 @@ class SearchGraphServices:
     critic_service: DeterministicCriticService | None = None
     candidate_ranker: DeterministicCandidateRanker | None = None
     stop_policy: DeterministicStopPolicy | None = None
+    planner_service: FeedbackPlannerService | None = None
 
 
 def _public_evaluation(evaluation: CandidateEvaluation, score: float) -> dict[str, object]:
@@ -64,6 +77,10 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     critic_service = services.critic_service or DeterministicCriticService()
     candidate_ranker = services.candidate_ranker or DeterministicCandidateRanker()
     stop_policy = services.stop_policy or DeterministicStopPolicy(candidate_ranker.policy)
+    planner_service = services.planner_service or FeedbackPlannerService()
+    # Compiled with ``checkpointer=None`` so this subgraph inherits the parent
+    # search checkpointer when it is installed as a graph node below.
+    planner_graph = build_feedback_planner_subgraph(planner_service).compile()
 
     def fenced_update(
         search_id: str,
@@ -115,24 +132,26 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             return {"status": stopped.value}
         manifest = SourceManifest.model_validate(state["source_manifest"])
         placement = PlacementIntent.model_validate(state["placement"])
-        directives = state.get("active_directives", [])
-        directive_text = "\n".join(
-            str(item.get("directive", ""))
-            for item in directives
-            if isinstance(item, dict) and item.get("directive")
+        raw_directives = state.get("active_directives", [])
+        active_directives = normalize_active_directives(
+            raw_directives if isinstance(raw_directives, list) else (),
+            policy=planner_service.policy,
         )
-        intent = state["user_intent"]
-        if directive_text:
-            intent = f"{intent}\nFocused repair directives:\n{directive_text}"
-        prompt, prompt_hash = compile_canonical_prompt(
+        canonical_prompt, canonical_prompt_hash = compile_canonical_prompt(
             placement=placement,
-            user_intent=intent,
+            user_intent=state["user_intent"],
             reference_count=len(manifest.cat_references),
         )
+        generation_prompt, generation_prompt_hash = compile_generation_prompt(
+            canonical_prompt=canonical_prompt,
+            active_directives=active_directives,
+        )
         return {
-            "canonical_prompt": prompt,
-            "canonical_prompt_hash": prompt_hash,
+            "canonical_prompt": canonical_prompt,
+            "canonical_prompt_hash": canonical_prompt_hash,
             "canonical_template_version": CANONICAL_TEMPLATE_VERSION,
+            "generation_prompt": generation_prompt,
+            "generation_prompt_hash": generation_prompt_hash,
         }
 
     async def prepare_round(state: SearchState) -> dict[str, object]:
@@ -161,8 +180,8 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             search_id=state["search_id"],
             source_manifest=manifest,
             placement=PlacementIntent.model_validate(state["placement"]),
-            prompt=state["canonical_prompt"],
-            prompt_hash=state["canonical_prompt_hash"],
+            prompt=state["generation_prompt"],
+            prompt_hash=state["generation_prompt_hash"],
             round_index=state["round_index"],
             candidate_count=state["candidate_count"],
             model=services.generator_service.model,
@@ -259,20 +278,6 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         round_history.sort(
             key=lambda item: cast(int, item.get("round_index", 0))
         )
-        selected_id = (
-            global_winner.candidate_id if global_winner is not None else ranking.winner_id
-        )
-        selected_evaluation = next(
-            (item for item in persisted_evaluations if item.candidate_id == selected_id),
-            None,
-        )
-        active_directives = (
-            [
-                {"directive": issue.suggested_fix or issue.category, "issue_id": issue.issue_id}
-                for issue in (selected_evaluation.blocking_issues if selected_evaluation else ())
-                if issue.suggested_fix
-            ][:3]
-        )
         transition_events: list[tuple[str, str, dict[str, object]]] = [
             (
                 f"round:{state['round_index']}:winner",
@@ -319,7 +324,6 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             global_winner_id=global_winner.candidate_id if global_winner else None,
             global_winner_score=global_winner.score if global_winner else None,
             round_history=round_history,
-            active_directives=active_directives,
             stop_reason=decision.reason,
             events=transition_events,
         ):
@@ -332,10 +336,198 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             "round_winner_id": ranking.winner_id,
             "global_winner_id": global_winner.candidate_id if global_winner else None,
             "global_winner_score": global_winner.score if global_winner else None,
-            "active_directives": active_directives,
             "stop_action": decision.action.value,
             "stop_reason": decision.reason,
         }
+
+    async def prepare_feedback_planner(state: SearchState) -> dict[str, object]:
+        """Project one selected winner into the bounded child-graph contract."""
+
+        stopped = is_stopped(state["search_id"])
+        if stopped is not None:
+            return {"status": stopped.value}
+        selected_candidate_id = state.get("global_winner_id") or state.get("round_winner_id")
+        if not isinstance(selected_candidate_id, str):
+            return {
+                "stop_action": PlannerAction.HUMAN_REVIEW.value,
+                "stop_reason": "planner_selection_unavailable",
+                "planner_input": None,
+            }
+        raw_active_directives = state.get("active_directives", [])
+        active_directives = normalize_active_directives(
+            raw_active_directives if isinstance(raw_active_directives, list) else (),
+            policy=planner_service.policy,
+        )
+        raw_attempted_categories = state.get("attempted_directive_categories", [])
+        attempted_categories: list[DirectiveCategory] = []
+        if isinstance(raw_attempted_categories, list):
+            for category in raw_attempted_categories:
+                if not isinstance(category, str):
+                    continue
+                try:
+                    attempted_categories.append(DirectiveCategory(category))
+                except ValueError:
+                    continue
+        selected_evaluation = next(
+            (
+                evaluation
+                for evaluation in services.app_store.list_evaluations(state["search_id"])
+                if evaluation.candidate_id == selected_candidate_id
+            ),
+            None,
+        )
+        planner_input = PlannerInput(
+            search_id=state["search_id"],
+            round_index=state["round_index"],
+            selected_candidate_id=selected_candidate_id,
+            global_winner_id=(
+                state["global_winner_id"]
+                if isinstance(state.get("global_winner_id"), str)
+                else None
+            ),
+            canonical_prompt_hash=state["canonical_prompt_hash"],
+            canonical_prompt_summary=(
+                "Immutable-source placement prompt with identity and scene-preservation "
+                "constraints; detailed user text remains outside the planner contract."
+            ),
+            blocking_issues=(),
+            active_directives=active_directives,
+            attempted_categories=tuple(attempted_categories),
+            directive_policy=planner_service.policy,
+            directive_version=state.get("directive_version", 0),
+            fallback_attempts=state.get("planner_fallback_attempts", 0),
+        )
+        payload: dict[str, object] = {
+            "planner_input": planner_input.model_dump(mode="json"),
+            "selected_evaluation": (
+                selected_evaluation.model_dump(mode="json")
+                if selected_evaluation is not None
+                else None
+            ),
+            "selected_blocking_issues": [],
+            "planner_proposal": None,
+            "validated_planner_result": None,
+            "planner_result": None,
+            "planner_round_index": None,
+        }
+        assert_checkpoint_safe(payload, path="feedback_planner.input")
+        return payload
+
+    async def apply_feedback_plan(state: SearchState) -> dict[str, object]:
+        """Persist a child-graph result through the search lease fence."""
+
+        stopped = is_stopped(state["search_id"])
+        if stopped is not None:
+            return {"status": stopped.value}
+        planner_payload = state.get("planner_result")
+        planner_input_payload = state.get("planner_input")
+        if not isinstance(planner_payload, dict) or not isinstance(
+            planner_input_payload, dict
+        ):
+            return {
+                "stop_action": PlannerAction.HUMAN_REVIEW.value,
+                "stop_reason": "planner_result_unavailable",
+            }
+        result = PlannerResult.model_validate(planner_payload)
+        planner_input = PlannerInput.model_validate(planner_input_payload)
+        validated_payload = state.get("validated_planner_result")
+        validated = (
+            PlannerResult.model_validate(validated_payload)
+            if isinstance(validated_payload, dict)
+            else result
+        )
+        directives_payload = [item.model_dump(mode="json") for item in result.directives]
+        current = services.app_store.get_search(state["search_id"])
+        round_history = [dict(item) for item in current.round_history]
+        history_entry = next(
+            (
+                item
+                for item in round_history
+                if item.get("round_index") == state["round_index"]
+            ),
+            None,
+        )
+        if history_entry is None:
+            history_entry = {"round_index": state["round_index"]}
+            round_history.append(history_entry)
+        planned_categories = (
+            [item.category.value for item in validated.directives]
+            if result.action is PlannerAction.CONTINUE
+            else []
+        )
+        fallback_attempts_after = max(
+            planner_input.fallback_attempts,
+            1 if result.fallback_used else 0,
+        )
+        history_entry.update(
+            {
+                "planner_action": result.action.value,
+                "planner_stop_reason": result.stop_reason,
+                "planned_categories": planned_categories,
+                "directive_version": result.directive_version,
+                "directive_policy_version": result.directive_policy_version,
+                "active_directives_hash": result.active_directives_hash,
+                "planner_fallback_used": result.fallback_used,
+                "planner_fallback_attempts": fallback_attempts_after,
+            }
+        )
+        round_history.sort(key=lambda item: cast(int, item.get("round_index", 0)))
+        raw_attempted_categories = state.get("attempted_directive_categories", [])
+        previous_attempts = (
+            [value for value in raw_attempted_categories if isinstance(value, str)]
+            if isinstance(raw_attempted_categories, list)
+            else []
+        )
+        attempted_after = [*previous_attempts, *planned_categories]
+        event_payload: dict[str, object] = {
+            "round_index": state["round_index"],
+            "selected_candidate_id": planner_input.selected_candidate_id,
+            "action": result.action.value,
+            "stop_reason": result.stop_reason,
+            "directive_policy_version": result.directive_policy_version,
+            "directive_version": result.directive_version,
+            "active_directives_hash": result.active_directives_hash,
+            "directives": [
+                {
+                    "directive_id": item.directive_id,
+                    "category": item.category.value,
+                    "priority": item.priority,
+                    "replaces_category": (
+                        item.replaces_category.value if item.replaces_category else None
+                    ),
+                }
+                for item in result.directives
+            ],
+        }
+        if not fenced_update(
+            state["search_id"],
+            active_directives=directives_payload,
+            round_history=round_history,
+            stop_reason=result.stop_reason or state.get("stop_reason"),
+            events=(
+                (
+                    f"round:{state['round_index']}:planner",
+                    "search.planner.ready",
+                    event_payload,
+                ),
+            ),
+        ):
+            latest = services.app_store.get_search(state["search_id"])
+            return {"status": latest.status.value}
+        payload: dict[str, object] = {
+            "round_history": round_history,
+            "active_directives": directives_payload,
+            "active_directives_hash": result.active_directives_hash,
+            "directive_policy_version": result.directive_policy_version,
+            "directive_version": result.directive_version,
+            "attempted_directive_categories": attempted_after,
+            "planner_round_index": state["round_index"],
+            "planner_fallback_attempts": fallback_attempts_after,
+            "stop_action": result.action.value,
+            "stop_reason": result.stop_reason or state.get("stop_reason"),
+        }
+        assert_checkpoint_safe(payload, path="feedback_planner.output")
+        return payload
 
     async def prepare_next_round(state: SearchState) -> dict[str, object]:
         next_round = state["round_index"] + 1
@@ -364,6 +556,13 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             "round_winner_id": None,
             "stop_action": None,
             "stop_reason": None,
+            "planner_input": None,
+            "selected_evaluation": None,
+            "selected_blocking_issues": [],
+            "planner_proposal": None,
+            "validated_planner_result": None,
+            "planner_result": None,
+            "planner_round_index": None,
             "status": SearchStatus.RUNNING.value,
         }
 
@@ -474,12 +673,38 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             return "prepare_next_round"
         return "end"
 
+    def route_after_evaluate(state: SearchState) -> str:
+        persisted_status = services.app_store.get_search(state["search_id"]).status
+        if state.get("status") in {
+            SearchStatus.CANCELLED.value,
+            SearchStatus.ACCEPTED.value,
+        } or persisted_status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
+            return "finalize"
+        if (
+            state.get("stop_action") == PlannerAction.CONTINUE.value
+            and state["round_index"] + 1 < state["max_rounds"]
+        ):
+            return "prepare_feedback_planner"
+        return "finalize"
+
+    def route_after_planner_input(state: SearchState) -> str:
+        persisted_status = services.app_store.get_search(state["search_id"]).status
+        if state.get("status") in {
+            SearchStatus.CANCELLED.value,
+            SearchStatus.ACCEPTED.value,
+        } or persisted_status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
+            return "finalize"
+        return "feedback_planner" if isinstance(state.get("planner_input"), dict) else "finalize"
+
     graph = StateGraph(SearchState)
     graph.add_node("initialize_search", initialize_search)
     graph.add_node("compile_canonical_prompt", compile_prompt)
     graph.add_node("prepare_round", prepare_round)
     graph.add_node("generate_candidates", generate_candidates)
     graph.add_node("evaluate_round", evaluate_round)
+    graph.add_node("prepare_feedback_planner", prepare_feedback_planner)
+    graph.add_node("feedback_planner", planner_graph)
+    graph.add_node("apply_feedback_plan", apply_feedback_plan)
     graph.add_node("prepare_next_round", prepare_next_round)
     graph.add_node("finalize_mock_round", finalize_mock_round)
     graph.add_edge(START, "initialize_search")
@@ -487,7 +712,21 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     graph.add_edge("compile_canonical_prompt", "prepare_round")
     graph.add_edge("prepare_round", "generate_candidates")
     graph.add_edge("generate_candidates", "evaluate_round")
-    graph.add_edge("evaluate_round", "finalize_mock_round")
+    graph.add_conditional_edges(
+        "evaluate_round",
+        route_after_evaluate,
+        {
+            "prepare_feedback_planner": "prepare_feedback_planner",
+            "finalize": "finalize_mock_round",
+        },
+    )
+    graph.add_conditional_edges(
+        "prepare_feedback_planner",
+        route_after_planner_input,
+        {"feedback_planner": "feedback_planner", "finalize": "finalize_mock_round"},
+    )
+    graph.add_edge("feedback_planner", "apply_feedback_plan")
+    graph.add_edge("apply_feedback_plan", "finalize_mock_round")
     graph.add_conditional_edges(
         "finalize_mock_round",
         route_after_finalize,

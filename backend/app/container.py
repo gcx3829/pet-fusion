@@ -16,6 +16,7 @@ from app.services.generator_service import (
     OpenAIImageGenerator,
 )
 from app.services.openai_image_client import OfficialOpenAIImageEditsTransport
+from app.services.planner_service import FeedbackPlannerService, PlannerProvider
 from app.services.search_runner import SearchRunner
 from app.services.stop_policy import DeterministicStopPolicy
 
@@ -38,6 +39,8 @@ class AppContainer:
         critic_service: DeterministicCriticService | None = None,
         candidate_ranker: DeterministicCandidateRanker | None = None,
         stop_policy: DeterministicStopPolicy | None = None,
+        planner_provider: PlannerProvider | None = None,
+        planner_service: FeedbackPlannerService | None = None,
     ) -> AppContainer:
         if image_generator is None:
             if settings.fake_generator:
@@ -76,6 +79,11 @@ class AppContainer:
                 critic_service=critic_service,
                 candidate_ranker=candidate_ranker,
                 stop_policy=stop_policy,
+                planner_service=(
+                    planner_service
+                    if planner_service is not None
+                    else FeedbackPlannerService(provider=planner_provider)
+                ),
             ),
         )
 

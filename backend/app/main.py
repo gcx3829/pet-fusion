@@ -15,6 +15,7 @@ from app.domain.errors import DomainError
 from app.services.candidate_ranker import DeterministicCandidateRanker
 from app.services.critic_service import DeterministicCriticService
 from app.services.generator_service import ImageGenerator
+from app.services.planner_service import FeedbackPlannerService, PlannerProvider
 from app.services.stop_policy import DeterministicStopPolicy
 
 
@@ -25,6 +26,8 @@ def create_app(
     critic_service: DeterministicCriticService | None = None,
     candidate_ranker: DeterministicCandidateRanker | None = None,
     stop_policy: DeterministicStopPolicy | None = None,
+    planner_provider: PlannerProvider | None = None,
+    planner_service: FeedbackPlannerService | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     container = AppContainer.build(
@@ -33,6 +36,8 @@ def create_app(
         critic_service=critic_service,
         candidate_ranker=candidate_ranker,
         stop_policy=stop_policy,
+        planner_provider=planner_provider,
+        planner_service=planner_service,
     )
 
     @asynccontextmanager

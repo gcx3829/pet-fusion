@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 
+from app.domain.directives import PlannerDirective
 from app.domain.searches import PlacementIntent
 
 CANONICAL_TEMPLATE_VERSION = "canonical-prompt/v1"
+ROUND_DIRECTIVES_TEMPLATE_VERSION = "round-directives/v1"
 
 
 def compile_canonical_prompt(
@@ -28,4 +31,30 @@ def compile_canonical_prompt(
             "Return an authentic photograph from the same moment and camera system.",
         ]
     )
+    return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def compile_generation_prompt(
+    *, canonical_prompt: str, active_directives: Sequence[PlannerDirective]
+) -> tuple[str, str]:
+    """Compose one round prompt without mutating the canonical user intent.
+
+    The canonical prompt/hash remains stable for the lifetime of a search. The
+    returned hash covers the exact provider prompt, while directive lineage is
+    independently recorded through ``active_directives_hash``.
+    """
+
+    if not active_directives:
+        prompt = canonical_prompt
+    else:
+        lines = [
+            canonical_prompt,
+            "",
+            f"ROUND-SPECIFIC CORRECTIONS ({ROUND_DIRECTIVES_TEMPLATE_VERSION})",
+            *(
+                f"{index}. {directive.instruction}"
+                for index, directive in enumerate(active_directives, start=1)
+            ),
+        ]
+        prompt = "\n".join(lines)
     return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
