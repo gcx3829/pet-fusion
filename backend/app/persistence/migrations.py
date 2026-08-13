@@ -1,4 +1,4 @@
-MIGRATION_VERSION = 3
+MIGRATION_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -108,4 +108,19 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS candidate_evaluations (
+    evaluation_id TEXT PRIMARY KEY,
+    search_id TEXT NOT NULL REFERENCES search_runs(search_id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    round_index INTEGER NOT NULL,
+    rubric_version TEXT NOT NULL,
+    evaluation_json TEXT NOT NULL,
+    score REAL CHECK (score IS NULL OR (score >= 0 AND score <= 100)),
+    created_at TEXT NOT NULL,
+    UNIQUE(candidate_id, rubric_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_evaluations_search
+ON candidate_evaluations(search_id, round_index, candidate_id);
 """

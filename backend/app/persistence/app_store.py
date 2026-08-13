@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 from collections.abc import Iterator, Mapping
@@ -13,6 +14,7 @@ from typing import Any
 from app.domain.assets import AssetRef
 from app.domain.candidates import CandidateRecord
 from app.domain.errors import ConflictError, NotFoundError
+from app.domain.evaluations import CandidateEvaluation
 from app.domain.projects import ProjectRecord
 from app.domain.searches import (
     CreateSearchRequest,
@@ -615,6 +617,86 @@ class AppStore:
                 (request_key,),
             ).fetchone()
         return int(row["attempt_count"]) if row else 0
+
+    def save_evaluation(
+        self,
+        search_id: str,
+        evaluation: CandidateEvaluation,
+        *,
+        score: float | None = None,
+    ) -> None:
+        """Persist one structured evaluation idempotently; image bytes are never stored."""
+
+        if score is not None and (not math.isfinite(score) or not 0 <= score <= 100):
+            raise ValueError("evaluation score must be finite and between 0 and 100")
+        if evaluation.source_manifest_hash is None:
+            raise ConflictError("Persisted evaluations require a source manifest hash")
+
+        evaluation_id = hashlib.sha256(
+            f"{search_id}:{evaluation.candidate_id}:{evaluation.rubric_version}".encode()
+        ).hexdigest()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            candidate_row = connection.execute(
+                """
+                SELECT c.search_id, c.round_index, s.source_manifest_hash
+                FROM candidates AS c
+                JOIN search_runs AS s ON s.search_id = c.search_id
+                WHERE c.candidate_id = ?
+                """,
+                (evaluation.candidate_id,),
+            ).fetchone()
+            if candidate_row is None:
+                connection.rollback()
+                raise NotFoundError(
+                    f"Candidate {evaluation.candidate_id} was not found"
+                )
+            if str(candidate_row["search_id"]) != search_id:
+                connection.rollback()
+                raise ConflictError("Evaluation candidate does not belong to search")
+            if int(candidate_row["round_index"]) != evaluation.round_index:
+                connection.rollback()
+                raise ConflictError("Evaluation round does not match candidate lineage")
+            if (
+                str(candidate_row["source_manifest_hash"])
+                != evaluation.source_manifest_hash
+            ):
+                connection.rollback()
+                raise ConflictError("Evaluation source manifest does not match search")
+            connection.execute(
+                """
+                INSERT INTO candidate_evaluations(
+                    evaluation_id, search_id, candidate_id, round_index,
+                    rubric_version, evaluation_json, score, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id, rubric_version) DO UPDATE SET
+                    evaluation_json = excluded.evaluation_json,
+                    score = excluded.score
+                """,
+                (
+                    evaluation_id,
+                    search_id,
+                    evaluation.candidate_id,
+                    evaluation.round_index,
+                    evaluation.rubric_version,
+                    evaluation.model_dump_json(),
+                    score,
+                    utcnow().isoformat(),
+                ),
+            )
+            connection.commit()
+
+    def list_evaluations(self, search_id: str) -> list[CandidateEvaluation]:
+        self.get_search(search_id)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT evaluation_json FROM candidate_evaluations
+                WHERE search_id = ? ORDER BY round_index, candidate_id
+                """,
+                (search_id,),
+            ).fetchall()
+        return [CandidateEvaluation.model_validate_json(row["evaluation_json"]) for row in rows]
 
     def claim_next_search(self, *, worker_id: str, lease_seconds: int) -> str | None:
         now = utcnow()
