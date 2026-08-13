@@ -24,12 +24,19 @@ class SearchState(TypedDict, total=False):
     canonical_prompt_hash: str
     canonical_template_version: str
     active_directives: list[dict[str, object]]
+    evaluations: list[dict[str, object]]
+    round_history: list[dict[str, object]]
     round_index: int
     max_rounds: int
+    review_each_round: bool
     candidate_count: int
     current_candidates: list[dict[str, object]]
+    round_winner_id: str | None
     global_winner_id: str | None
+    global_winner_score: float | None
+    stop_action: str | None
     stop_reason: str | None
+    interrupt_payload: dict[str, object] | None
     error: dict[str, object] | None
 
 

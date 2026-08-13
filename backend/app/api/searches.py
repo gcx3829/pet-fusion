@@ -88,26 +88,68 @@ async def get_search(search_id: str, container: ContainerDependency) -> SearchRe
 async def resume_search(
     search_id: str,
     request: ResumeSearchRequest,
+    background_tasks: BackgroundTasks,
     container: ContainerDependency,
 ) -> SearchResponse:
     search = container.app_store.get_search(search_id)
-    if request.action != "cancel":
-        raise UnsupportedMilestoneActionError(
-            "The mocked vertical slice supports only the cancel resume action"
+    if request.action == "cancel":
+        if search.status in {SearchStatus.ACCEPTED, SearchStatus.FAILED}:
+            raise ConflictError(f"Cannot cancel a search with status {search.status.value}")
+        container.app_store.cancel_search(search_id)
+        refreshed = container.app_store.get_search(search_id)
+        if refreshed.status in {SearchStatus.ACCEPTED, SearchStatus.FAILED}:
+            raise ConflictError(f"Cannot cancel a search with status {refreshed.status.value}")
+        container.app_store.emit_event(
+            search_id=search_id,
+            event_key="search:cancelled",
+            event_type="search.cancelled",
+            payload={"reason": "cancelled_by_user"},
         )
-    if search.status in {SearchStatus.ACCEPTED, SearchStatus.FAILED}:
-        raise ConflictError(f"Cannot cancel a search with status {search.status.value}")
-    if search.status is not SearchStatus.CANCELLED:
-        container.app_store.update_search(
-            search_id,
-            status=SearchStatus.CANCELLED,
-            stop_reason="cancelled_by_user",
-            clear_lease=True,
+        return SearchResponse.from_record(container.app_store.get_search(search_id))
+
+    if request.action == "accept_global_winner":
+        if search.status is SearchStatus.ACCEPTED:
+            return SearchResponse.from_record(search)
+        if search.status is not SearchStatus.WAITING_FOR_HUMAN:
+            raise ConflictError(
+                f"Cannot accept a search with status {search.status.value}"
+            )
+        if search.global_winner_id is None:
+            raise ConflictError("Cannot accept without a global winner")
+        if not any(
+            candidate.candidate_id == search.global_winner_id for candidate in search.candidates
+        ):
+            raise ConflictError("Global winner is not a candidate in this search")
+        if not container.app_store.accept_search(search_id):
+            refreshed = container.app_store.get_search(search_id)
+            if refreshed.status is SearchStatus.ACCEPTED:
+                return SearchResponse.from_record(refreshed)
+            raise ConflictError(
+                f"Cannot accept a search with status {refreshed.status.value}"
+            )
+        container.app_store.emit_event(
+            search_id=search_id,
+            event_key="search:accepted",
+            event_type="search.accepted",
+            payload={
+                "global_winner_id": search.global_winner_id,
+                "global_winner_score": search.global_winner_score,
+            },
         )
-    container.app_store.emit_event(
-        search_id=search_id,
-        event_key="search:cancelled",
-        event_type="search.cancelled",
-        payload={"reason": "cancelled_by_user"},
+        return SearchResponse.from_record(container.app_store.get_search(search_id))
+
+    if request.action == "continue_one_round":
+        if search.status is not SearchStatus.WAITING_FOR_HUMAN:
+            raise ConflictError(
+                f"Continue is only valid from waiting_for_human, got {search.status.value}"
+            )
+        if not container.app_store.queue_next_round(search_id):
+            raise ConflictError("Search has reached its maximum configured rounds")
+        queued = container.app_store.get_search(search_id)
+        if container.settings.run_inline:
+            background_tasks.add_task(_run_inline_search, container, search_id)
+        return SearchResponse.from_record(queued)
+
+    raise UnsupportedMilestoneActionError(
+        "The mocked vertical slice supports accept_global_winner, continue_one_round, and cancel"
     )
-    return SearchResponse.from_record(container.app_store.get_search(search_id))

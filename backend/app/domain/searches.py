@@ -70,9 +70,13 @@ class SearchRunRecord(BaseModel):
     budget_usd: float | None
     review_each_round: bool
     round_index: int = 0
+    round_winner_id: str | None = None
     candidates: list[CandidateRecord] = Field(default_factory=list)
     global_winner_id: str | None = None
+    global_winner_score: float | None = None
+    round_history: list[dict[str, object]] = Field(default_factory=list)
     active_directives: list[dict[str, object]] = Field(default_factory=list)
+    interrupt_payload: dict[str, object] | None = None
     stop_reason: str | None = None
     error: dict[str, object] | None = None
     created_at: datetime
@@ -105,10 +109,14 @@ class SearchResponse(BaseModel):
     project_id: str
     status: SearchStatus
     round_index: int
+    round_winner_id: str | None
     candidate_count: int
     candidates: list[CandidateResponse]
     global_winner_id: str | None
+    global_winner_score: float | None
+    round_history: list[dict[str, object]]
     active_directives: list[dict[str, object]]
+    interrupt_payload: dict[str, object] | None
     stop_reason: str | None
     error: dict[str, object] | None
     created_at: datetime
@@ -122,10 +130,14 @@ class SearchResponse(BaseModel):
             project_id=search.project_id,
             status=search.status,
             round_index=search.round_index,
+            round_winner_id=search.round_winner_id,
             candidate_count=search.candidate_count,
             candidates=[CandidateResponse.from_record(item) for item in search.candidates],
             global_winner_id=search.global_winner_id,
+            global_winner_score=search.global_winner_score,
+            round_history=search.round_history,
             active_directives=search.active_directives,
+            interrupt_payload=search.interrupt_payload,
             stop_reason=search.stop_reason,
             error=search.error,
             created_at=search.created_at,

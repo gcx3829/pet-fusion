@@ -5,7 +5,7 @@ import json
 import math
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -70,6 +70,16 @@ class AppStore:
                 connection.execute(
                     "ALTER TABLE search_runs ADD COLUMN idempotency_fingerprint TEXT"
                 )
+            for column, definition in (
+                ("round_winner_id", "TEXT"),
+                ("global_winner_score", "REAL"),
+                ("round_history_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("interrupt_payload_json", "TEXT"),
+            ):
+                if column not in search_columns:
+                    connection.execute(
+                        f"ALTER TABLE search_runs ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_search_runs_idempotency "
                 "ON search_runs(project_id, idempotency_key) "
@@ -293,11 +303,19 @@ class AppStore:
             budget_usd=row["budget_usd"],
             review_each_round=bool(row["review_each_round"]),
             round_index=row["round_index"],
+            round_winner_id=row["round_winner_id"],
             candidates=[
                 CandidateRecord.model_validate_json(item["record_json"]) for item in candidate_rows
             ],
             global_winner_id=row["global_winner_id"],
+            global_winner_score=row["global_winner_score"],
+            round_history=json.loads(row["round_history_json"] or "[]"),
             active_directives=json.loads(row["active_directives_json"]),
+            interrupt_payload=(
+                json.loads(row["interrupt_payload_json"])
+                if row["interrupt_payload_json"]
+                else None
+            ),
             stop_reason=row["stop_reason"],
             error=json.loads(row["error_json"]) if row["error_json"] else None,
             created_at=row["created_at"],
@@ -310,18 +328,48 @@ class AppStore:
         *,
         status: SearchStatus | None = None,
         round_index: int | None = None,
+        round_winner_id: str | None = None,
         global_winner_id: str | None = None,
+        global_winner_score: float | None = None,
+        round_history: Sequence[Mapping[str, object]] | None = None,
+        active_directives: Sequence[Mapping[str, object]] | None = None,
+        interrupt_payload: Mapping[str, object] | None = None,
+        clear_interrupt_payload: bool = False,
+        clear_round_winner: bool = False,
+        clear_global_winner: bool = False,
+        clear_stop_reason: bool = False,
+        clear_state_summary: bool = False,
+        clear_active_directives: bool = False,
         stop_reason: str | None = None,
         error: Mapping[str, object] | None = None,
         state_summary: Mapping[str, object] | None = None,
         clear_lease: bool = False,
-    ) -> None:
+        expected_statuses: Sequence[SearchStatus] | None = None,
+        expected_lease_owner: str | None = None,
+    ) -> bool:
         assignments = ["updated_at = ?"]
         values: list[Any] = [utcnow().isoformat()]
         optional = {
             "status": status.value if status else None,
             "round_index": round_index,
+            "round_winner_id": round_winner_id,
             "global_winner_id": global_winner_id,
+            "global_winner_score": global_winner_score,
+            "round_history_json": (
+                json.dumps(round_history, separators=(",", ":"))
+                if round_history is not None
+                else None
+            ),
+            "active_directives_json": (
+                json.dumps(active_directives, separators=(",", ":"))
+                if active_directives is not None
+                else None
+            ),
+            "interrupt_payload_json": (
+                json.dumps(interrupt_payload, separators=(",", ":"))
+                if interrupt_payload is not None
+                else None
+            ),
             "stop_reason": stop_reason,
             "error_json": json.dumps(error, separators=(",", ":")) if error else None,
             "state_summary_json": (
@@ -334,15 +382,52 @@ class AppStore:
                 values.append(value)
         if clear_lease:
             assignments.extend(["lease_owner = NULL", "lease_until = NULL"])
+        if clear_interrupt_payload:
+            assignments.append("interrupt_payload_json = NULL")
+        if clear_round_winner:
+            assignments.append("round_winner_id = NULL")
+        if clear_global_winner:
+            assignments.extend(["global_winner_id = NULL", "global_winner_score = NULL"])
+        if clear_stop_reason:
+            assignments.append("stop_reason = NULL")
+        if clear_state_summary:
+            assignments.append("state_summary_json = NULL")
+        if clear_active_directives:
+            assignments.append("active_directives_json = '[]'")
+        where = ["search_id = ?"]
+        if expected_statuses is not None:
+            if not expected_statuses:
+                return False
+            placeholders = ", ".join("?" for _ in expected_statuses)
+            where.insert(0, f"status IN ({placeholders})")
+            values.extend(item.value for item in expected_statuses)
+            if expected_lease_owner is None:
+                where.insert(1, "lease_owner IS NULL")
+            else:
+                where.insert(1, "lease_owner = ?")
+                values.append(expected_lease_owner)
         values.append(search_id)
         with self._connection() as connection:
             cursor = connection.execute(
-                f"UPDATE search_runs SET {', '.join(assignments)} WHERE search_id = ?",
+                f"UPDATE search_runs SET {', '.join(assignments)} WHERE {' AND '.join(where)}",
                 values,
             )
             connection.commit()
         if cursor.rowcount == 0:
+            if expected_statuses is None:
+                raise NotFoundError(f"Search {search_id} was not found")
+            return False
+        return True
+
+    def get_search_lease_owner(self, search_id: str) -> str | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT lease_owner FROM search_runs WHERE search_id = ?",
+                (search_id,),
+            ).fetchone()
+        if row is None:
             raise NotFoundError(f"Search {search_id} was not found")
+        return str(row["lease_owner"]) if row["lease_owner"] is not None else None
 
     def add_candidate(self, search_id: str, candidate: CandidateRecord) -> None:
         self.register_asset(candidate.raw_asset)
@@ -748,6 +833,61 @@ class AppStore:
                     search_id,
                     now.isoformat(),
                 ),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def queue_next_round(self, search_id: str) -> bool:
+        """Atomically move one human-reviewed search to its next round."""
+
+        now = utcnow().isoformat()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE search_runs
+                SET status = 'queued', round_index = round_index + 1,
+                    round_winner_id = NULL, stop_reason = NULL,
+                    state_summary_json = NULL, interrupt_payload_json = NULL,
+                    lease_owner = NULL, lease_until = NULL, updated_at = ?
+                WHERE search_id = ? AND status = 'waiting_for_human'
+                  AND round_index + 1 < max_rounds
+                """,
+                (now, search_id),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def accept_search(self, search_id: str) -> bool:
+        """Atomically accept only a waiting search with a persisted winner."""
+
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE search_runs
+                SET status = 'accepted', stop_reason = 'accepted_global_winner',
+                    interrupt_payload_json = NULL, lease_owner = NULL,
+                    lease_until = NULL, updated_at = ?
+                WHERE search_id = ? AND status = 'waiting_for_human'
+                  AND global_winner_id IS NOT NULL
+                """,
+                (utcnow().isoformat(), search_id),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def cancel_search(self, search_id: str) -> bool:
+        """Atomically cancel any non-terminal search; terminal repeats are no-ops."""
+
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE search_runs
+                SET status = 'cancelled', stop_reason = 'cancelled_by_user',
+                    lease_owner = NULL, lease_until = NULL, updated_at = ?
+                WHERE search_id = ?
+                  AND status IN ('queued', 'running', 'waiting_for_human')
+                """,
+                (utcnow().isoformat(), search_id),
             )
             connection.commit()
         return cursor.rowcount == 1

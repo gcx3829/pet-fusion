@@ -12,16 +12,28 @@ from app.api import assets, events, projects, searches
 from app.config import Settings, get_settings
 from app.container import AppContainer
 from app.domain.errors import DomainError
+from app.services.candidate_ranker import DeterministicCandidateRanker
+from app.services.critic_service import DeterministicCriticService
 from app.services.generator_service import ImageGenerator
+from app.services.stop_policy import DeterministicStopPolicy
 
 
 def create_app(
     settings: Settings | None = None,
     *,
     image_generator: ImageGenerator | None = None,
+    critic_service: DeterministicCriticService | None = None,
+    candidate_ranker: DeterministicCandidateRanker | None = None,
+    stop_policy: DeterministicStopPolicy | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
-    container = AppContainer.build(resolved_settings, image_generator=image_generator)
+    container = AppContainer.build(
+        resolved_settings,
+        image_generator=image_generator,
+        critic_service=critic_service,
+        candidate_ranker=candidate_ranker,
+        stop_policy=stop_policy,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

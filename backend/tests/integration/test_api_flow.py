@@ -55,8 +55,8 @@ def test_mocked_vertical_slice_through_api_and_sse(
     assert search_response.status_code == 200
     search = search_response.json()
     assert search["status"] == "waiting_for_human"
-    assert search["stop_reason"] == "mock_round_complete"
-    assert search["global_winner_id"] is None
+    assert search["stop_reason"] in {"accept_threshold", "no_meaningful_defect", "max_rounds"}
+    assert search["global_winner_id"] is not None
     assert search["round_index"] == 0
     assert len(search["candidates"]) == 3
     assert fake_generator.call_count == 1
@@ -91,7 +91,14 @@ def test_mocked_vertical_slice_through_api_and_sse(
         "round.candidate.ready",
         "round.candidate.ready",
         "round.candidate.ready",
+        "round.evaluation.ready",
+        "round.evaluation.ready",
+        "round.evaluation.ready",
+        "round.winner.updated",
+        "search.global_winner.updated",
+        "search.stop.decided",
         "search.waiting_for_human",
+        "search.interrupted",
     ]
     data_lines = [
         json.loads(line.removeprefix("data: "))
@@ -133,8 +140,8 @@ def test_resume_cancel_is_idempotent_and_other_actions_are_explicitly_unavailabl
         f"/api/v1/searches/{created['search_id']}/resume",
         json={"action": "continue_one_round"},
     )
-    assert unavailable.status_code == 422
-    assert unavailable.json()["error"]["code"] == "ACTION_NOT_AVAILABLE"
+    assert unavailable.status_code == 409
+    assert unavailable.json()["error"]["code"] == "CONFLICT"
 
     first = client.post(
         f"/api/v1/searches/{created['search_id']}/resume", json={"action": "cancel"}

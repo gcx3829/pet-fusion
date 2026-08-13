@@ -6,12 +6,15 @@ from app.config import Settings
 from app.domain.errors import ConfigurationError
 from app.persistence.app_store import AppStore
 from app.services.asset_store import AssetStore
+from app.services.candidate_ranker import DeterministicCandidateRanker
+from app.services.critic_service import DeterministicCriticService
 from app.services.generator_service import (
     DeterministicFakeImageGenerator,
     GeneratorService,
     ImageGenerator,
 )
 from app.services.search_runner import SearchRunner
+from app.services.stop_policy import DeterministicStopPolicy
 
 
 @dataclass(slots=True)
@@ -29,6 +32,9 @@ class AppContainer:
         settings: Settings,
         *,
         image_generator: ImageGenerator | None = None,
+        critic_service: DeterministicCriticService | None = None,
+        candidate_ranker: DeterministicCandidateRanker | None = None,
+        stop_policy: DeterministicStopPolicy | None = None,
     ) -> AppContainer:
         if image_generator is None:
             if not settings.fake_generator:
@@ -53,6 +59,9 @@ class AppContainer:
                 app_store=app_store,
                 generator_service=generator_service,
                 checkpoint_path=settings.resolved_checkpoint_db_path,
+                critic_service=critic_service,
+                candidate_ranker=candidate_ranker,
+                stop_policy=stop_policy,
             ),
         )
 

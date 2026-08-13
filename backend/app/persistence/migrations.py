@@ -1,4 +1,4 @@
-MIGRATION_VERSION = 4
+MIGRATION_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -48,8 +48,12 @@ CREATE TABLE IF NOT EXISTS search_runs (
     budget_usd REAL,
     review_each_round INTEGER NOT NULL,
     round_index INTEGER NOT NULL DEFAULT 0,
+    round_winner_id TEXT,
     global_winner_id TEXT,
+    global_winner_score REAL,
+    round_history_json TEXT NOT NULL DEFAULT '[]',
     active_directives_json TEXT NOT NULL DEFAULT '[]',
+    interrupt_payload_json TEXT,
     stop_reason TEXT,
     error_json TEXT,
     state_summary_json TEXT,
