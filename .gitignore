@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+dist/
+.vite/
+coverage/
+
+# Secrets and local state
+.env
+.env.*
+!.env.example
+data/*
+!data/.gitkeep
+*.sqlite3
+*.db
+
+# Test and build artifacts
+.coverage
+htmlcov/
+*.egg-info/
+playwright-report/
+test-results/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
