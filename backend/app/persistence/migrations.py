@@ -1,4 +1,4 @@
-MIGRATION_VERSION = 5
+MIGRATION_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -82,6 +82,40 @@ CREATE TABLE IF NOT EXISTS candidates (
 
 CREATE INDEX IF NOT EXISTS idx_candidates_search
 ON candidates(search_id, round_index, variant_index);
+
+CREATE TABLE IF NOT EXISTS exports (
+    export_key TEXT PRIMARY KEY,
+    search_id TEXT NOT NULL REFERENCES search_runs(search_id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    source_manifest_hash TEXT NOT NULL,
+    global_winner_id TEXT NOT NULL,
+    global_winner_score REAL CHECK (
+        global_winner_score IS NULL
+        OR (global_winner_score >= 0 AND global_winner_score <= 100)
+    ),
+    format TEXT NOT NULL CHECK (format IN ('png', 'jpeg')),
+    jpeg_quality INTEGER CHECK (
+        (format = 'png' AND jpeg_quality IS NULL)
+        OR (format = 'jpeg' AND jpeg_quality BETWEEN 60 AND 100)
+    ),
+    copy_exif INTEGER NOT NULL CHECK (copy_exif IN (0, 1)),
+    copy_icc INTEGER NOT NULL CHECK (copy_icc IN (0, 1)),
+    asset_id TEXT NOT NULL,
+    asset_sha256 TEXT NOT NULL,
+    asset_path TEXT NOT NULL,
+    asset_mime_type TEXT NOT NULL CHECK (asset_mime_type IN ('image/png', 'image/jpeg')),
+    asset_width INTEGER NOT NULL CHECK (asset_width > 0),
+    asset_height INTEGER NOT NULL CHECK (asset_height > 0),
+    metadata_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_exports_search_created
+ON exports(search_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_exports_asset
+ON exports(asset_id);
 
 CREATE TABLE IF NOT EXISTS search_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

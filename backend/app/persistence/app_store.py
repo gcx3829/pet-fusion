@@ -15,6 +15,7 @@ from app.domain.assets import AssetRef
 from app.domain.candidates import CandidateRecord
 from app.domain.errors import ConflictError, NotFoundError
 from app.domain.evaluations import CandidateEvaluation
+from app.domain.exports import ExportResult
 from app.domain.projects import ProjectRecord
 from app.domain.searches import (
     CreateSearchRequest,
@@ -120,6 +121,16 @@ class AppStore:
             row = connection.execute(
                 "SELECT * FROM assets WHERE asset_id = ?", (asset_id,)
             ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    """
+                    SELECT asset_id, asset_sha256 AS sha256, asset_path AS path,
+                           asset_mime_type AS mime_type, asset_width AS width,
+                           asset_height AS height
+                    FROM exports WHERE asset_id = ?
+                    """,
+                    (asset_id,),
+                ).fetchone()
         if row is None:
             raise NotFoundError(f"Asset {asset_id} was not found")
         return AssetRef(
@@ -130,6 +141,146 @@ class AppStore:
             width=row["width"],
             height=row["height"],
         )
+
+    @staticmethod
+    def _export_from_row(row: sqlite3.Row) -> ExportResult:
+        return ExportResult.model_validate_json(row["result_json"])
+
+    def find_export(self, export_key: str) -> ExportResult | None:
+        """Return a content-addressed export if it has already been recorded."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM exports WHERE export_key = ?", (export_key,)
+            ).fetchone()
+        return self._export_from_row(row) if row is not None else None
+
+    def get_export(self, *, search_id: str, export_key: str) -> ExportResult:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT result_json FROM exports
+                WHERE search_id = ? AND export_key = ?
+                """,
+                (search_id, export_key),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Export {export_key} was not found for search {search_id}")
+        return self._export_from_row(row)
+
+    def record_export(self, result: ExportResult) -> ExportResult:
+        """Durably persist one final delivery asset with content-addressed replay.
+
+        This repository check repeats the accepted-global-winner rules at the
+        write boundary, so a stale service resolution cannot turn a changed search
+        state into an externally visible export.
+        """
+
+        metadata = result.metadata
+        if metadata.accepted_global_winner_id != result.candidate_id:
+            raise ConflictError("Export metadata does not match its candidate lineage")
+        if result.format == "png" and result.jpeg_quality is not None:
+            raise ConflictError("PNG exports cannot persist a JPEG quality")
+        if result.format == "jpeg" and result.jpeg_quality is None:
+            raise ConflictError("JPEG exports require a bounded quality")
+        expected_mime_type = "image/png" if result.format == "png" else "image/jpeg"
+        if result.asset.mime_type != expected_mime_type:
+            raise ConflictError("Export asset MIME type does not match the requested format")
+
+        now = utcnow().isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                "SELECT result_json FROM exports WHERE export_key = ?", (result.export_key,)
+            ).fetchone()
+
+            search_row = connection.execute(
+                """
+                SELECT status, source_manifest_hash, global_winner_id, global_winner_score
+                FROM search_runs WHERE search_id = ?
+                """,
+                (result.search_id,),
+            ).fetchone()
+            candidate_row = connection.execute(
+                "SELECT search_id, record_json FROM candidates WHERE candidate_id = ?",
+                (result.candidate_id,),
+            ).fetchone()
+            if search_row is None or candidate_row is None:
+                connection.rollback()
+                raise NotFoundError("Export search or candidate was not found")
+            if str(search_row["status"]) != SearchStatus.ACCEPTED.value:
+                connection.rollback()
+                raise ConflictError("Only an accepted search can be exported")
+            if str(candidate_row["search_id"]) != result.search_id:
+                connection.rollback()
+                raise ConflictError("Export candidate does not belong to its search")
+            persisted_candidate = CandidateRecord.model_validate_json(
+                candidate_row["record_json"]
+            )
+            if (
+                persisted_candidate.source_manifest_hash != result.source_manifest_hash
+                or persisted_candidate.raw_asset != result.composite.raw_candidate
+                or persisted_candidate.crop_mapping != result.composite.crop_mapping
+            ):
+                connection.rollback()
+                raise ConflictError("Export candidate lineage changed before persistence")
+            if persisted_candidate.composite is not None and (
+                persisted_candidate.composite.mask != result.composite.mask
+                or not persisted_candidate.composite.outside_mask_exact
+            ):
+                connection.rollback()
+                raise ConflictError("Export composite lineage changed before persistence")
+            if str(search_row["source_manifest_hash"]) != result.source_manifest_hash:
+                connection.rollback()
+                raise ConflictError("Export source manifest lineage does not match the search")
+            if str(search_row["global_winner_id"] or "") != result.candidate_id:
+                connection.rollback()
+                raise ConflictError("Only the historical global winner can be exported")
+            if metadata.global_winner_score != search_row["global_winner_score"]:
+                connection.rollback()
+                raise ConflictError("Export global winner score does not match the search")
+            if existing_row is not None:
+                existing = self._export_from_row(existing_row)
+                if existing != result:
+                    connection.rollback()
+                    raise ConflictError("Export key collision with a different export payload")
+                connection.commit()
+                return existing
+
+            connection.execute(
+                """
+                INSERT INTO exports(
+                    export_key, search_id, candidate_id, source_manifest_hash,
+                    global_winner_id, global_winner_score, format, jpeg_quality,
+                    copy_exif, copy_icc, asset_id, asset_sha256, asset_path,
+                    asset_mime_type, asset_width, asset_height, metadata_json,
+                    result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.export_key,
+                    result.search_id,
+                    result.candidate_id,
+                    result.source_manifest_hash,
+                    metadata.accepted_global_winner_id,
+                    metadata.global_winner_score,
+                    result.format,
+                    result.jpeg_quality,
+                    int(result.copied_exif),
+                    int(result.copied_icc),
+                    result.asset.asset_id,
+                    result.asset.sha256,
+                    result.asset.path,
+                    result.asset.mime_type,
+                    result.asset.width,
+                    result.asset.height,
+                    metadata.model_dump_json(),
+                    result.model_dump_json(),
+                    now,
+                ),
+            )
+            connection.commit()
+        return result
 
     def create_project(self, project: ProjectRecord) -> None:
         manifest = project.source_manifest

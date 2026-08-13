@@ -8,6 +8,7 @@ from app.persistence.app_store import AppStore
 from app.services.asset_store import AssetStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
 from app.services.critic_service import CriticProvider
+from app.services.export_service import ExportService
 from app.services.generator_service import (
     FAKE_IMAGE_MODEL,
     DeterministicFakeImageGenerator,
@@ -31,6 +32,7 @@ class AppContainer:
     image_generator: ImageGenerator
     generator_service: GeneratorService
     search_runner: SearchRunner
+    export_service: ExportService
 
     @classmethod
     def build(
@@ -87,6 +89,7 @@ class AppContainer:
             asset_store=asset_store,
             image_generator=image_generator,
             generator_service=generator_service,
+            export_service=ExportService(app_store=app_store, asset_store=asset_store),
             search_runner=SearchRunner(
                 app_store=app_store,
                 generator_service=generator_service,

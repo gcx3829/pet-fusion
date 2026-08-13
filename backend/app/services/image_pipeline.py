@@ -157,11 +157,46 @@ class CompositeFloorService:
         )
 
     def _load_mask(self, mask: Mask, *, size: tuple[int, int]) -> Image.Image:
-        self.asset_store.assert_intact(mask.asset)
+        self.asset_store.assert_png_lineage_asset(mask.asset)
         if (mask.asset.width, mask.asset.height) != size:
             raise ValueError("composite mask dimensions do not match the background")
         with Image.open(mask.asset.filesystem_path) as opened:
             return opened.convert("L")
+
+    def assert_mask_matches_placement(
+        self,
+        *,
+        source_background: AssetRef,
+        placement: PlacementIntent,
+        mask: Mask,
+    ) -> None:
+        """Verify a persisted mask is the deterministic floor for this placement.
+
+        The stored ``outside_mask_exact`` flag is an audit result, not authority for
+        the mask boundary. Reconstructing the expected alpha grid prevents a stale
+        or corrupted mask from silently widening the editable region at export.
+        """
+
+        self.asset_store.assert_png_lineage_asset(source_background)
+        expected_box = normalized_placement_to_pixel_box(
+            placement,
+            width=source_background.width,
+            height=source_background.height,
+        )
+        if mask.allowed_box != expected_box:
+            raise ValueError("composite mask does not match the accepted placement")
+        actual = self._load_mask(
+            mask,
+            size=(source_background.width, source_background.height),
+        )
+        expected = self._full_resolution_mask(
+            width=source_background.width,
+            height=source_background.height,
+            allowed_box=expected_box,
+            feather_radius_px=mask.feather_radius_px,
+        )
+        if ImageChops.difference(actual, expected).getbbox() is not None:
+            raise ValueError("composite mask pixels do not match their declared boundary")
 
     @staticmethod
     def _candidate_on_full_canvas(
@@ -227,8 +262,8 @@ class CompositeFloorService:
     ) -> CompositeResult:
         """Create a full-resolution protected PNG from a raw generated candidate."""
 
-        self.asset_store.assert_intact(source_background)
-        self.asset_store.assert_intact(raw_candidate)
+        self.asset_store.assert_png_lineage_asset(source_background)
+        self.asset_store.assert_png_lineage_asset(raw_candidate)
         resolved_mask = mask or self.create_mask(
             source_background=source_background,
             placement=placement,

@@ -12,7 +12,7 @@ async def get_asset(asset_id: str, container: ContainerDependency) -> FileRespon
     container.asset_store.assert_intact(asset)
     return FileResponse(
         path=asset.path,
-        media_type="image/png",
+        media_type=asset.mime_type,
         headers={
             "ETag": f'"sha256-{asset.sha256}"',
             "Cache-Control": "private, max-age=31536000, immutable",

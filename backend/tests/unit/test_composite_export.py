@@ -1,27 +1,47 @@
 from __future__ import annotations
 
+import concurrent.futures
 import io
+import sqlite3
 
 import pytest
 from PIL import Image
 
 from app.container import AppContainer
 from app.domain.candidates import CandidateRecord
-from app.domain.compositing import CropMapping, CropPadding, FloatBox, PixelBox
-from app.domain.errors import ConflictError
+from app.domain.compositing import (
+    CompositeResult,
+    CropMapping,
+    CropPadding,
+    FloatBox,
+    Mask,
+    PixelBox,
+)
+from app.domain.errors import ConflictError, SourceManifestMismatchError
 from app.domain.exports import ExportRequest
 from app.domain.projects import ProjectRecord
 from app.domain.searches import CreateSearchRequest, PlacementIntent, SearchStatus
 from app.graphs.state import assert_checkpoint_safe
-from app.persistence.app_store import utcnow
+from app.persistence.app_store import AppStore, utcnow
+from app.persistence.migrations import MIGRATION_VERSION
 from app.services.export_service import ExportService
 from app.services.generator_service import GeneratedImage, GenerationRequest
 from app.services.image_pipeline import CompositeFloorService, normalized_placement_to_pixel_box
 
 
-def _png_bytes(image: Image.Image, *, icc_profile: bytes | None = None) -> bytes:
+def _png_bytes(
+    image: Image.Image,
+    *,
+    icc_profile: bytes | None = None,
+    exif: bytes | None = None,
+) -> bytes:
     output = io.BytesIO()
-    image.save(output, format="PNG", icc_profile=icc_profile)
+    save_options: dict[str, object] = {"format": "PNG"}
+    if icc_profile is not None:
+        save_options["icc_profile"] = icc_profile
+    if exif is not None:
+        save_options["exif"] = exif
+    image.save(output, **save_options)  # type: ignore[arg-type]
     return output.getvalue()
 
 
@@ -69,6 +89,39 @@ def test_composite_floor_keeps_outside_mask_pixels_exact(tmp_path) -> None:
         assert protected_rgb.getpixel((4, 4)) == (250, 3, 90)
     assert result.outside_mask_exact is True
     assert_checkpoint_safe(result.model_dump(mode="json"))
+
+
+def test_export_schema_migrates_an_existing_application_database(tmp_path) -> None:
+    database = tmp_path / "existing.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (5, 'fixture')"
+        )
+    store = AppStore(database)
+    store.initialize()
+
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]: row[2]
+            for row in connection.execute("PRAGMA table_info(exports)").fetchall()
+        }
+        versions = {
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+    assert {
+        "export_key",
+        "search_id",
+        "candidate_id",
+        "format",
+        "jpeg_quality",
+        "asset_mime_type",
+        "result_json",
+    } <= columns.keys()
+    assert MIGRATION_VERSION in versions
 
 
 def test_composite_exactness_detects_rgb_and_alpha_regressions() -> None:
@@ -147,12 +200,19 @@ def test_crop_mapping_and_normalized_placement_round_trip() -> None:
     assert restored.height == pytest.approx(full_box.height)
 
 
-def _accepted_winner(settings, fake_generator) -> tuple[AppContainer, CandidateRecord]:
+def _accepted_winner(
+    settings,
+    fake_generator,
+    *,
+    background_bytes: bytes | None = None,
+) -> tuple[AppContainer, CandidateRecord]:
     container = AppContainer.build(settings, image_generator=fake_generator)
     container.initialize()
     source_image = Image.new("RGB", (16, 12), (20, 30, 40))
     raw_image = Image.new("RGB", (16, 12), (220, 30, 60))
-    background = container.asset_store.put_image_bytes(_png_bytes(source_image))
+    background = container.asset_store.put_image_bytes(
+        background_bytes or _png_bytes(source_image)
+    )
     reference = container.asset_store.put_image_bytes(_png_bytes(Image.new("RGB", (4, 4))))
     raw = container.asset_store.put_image_bytes(_png_bytes(raw_image))
     from app.domain.assets import SourceManifest
@@ -218,9 +278,20 @@ def test_export_is_content_addressed_idempotent_and_rejects_invalid_lineage(
     assert first.asset.filesystem_path.is_file()
     assert first.composite.outside_mask_exact is True
     assert first.copied_exif is False
+    assert_checkpoint_safe(first.model_dump(mode="json"))
     assert first.export_key == service.export_global_winner(
         ExportRequest(search_id="search-export", candidate_id=candidate.candidate_id)
     ).export_key
+    no_metadata_copy = service.export_global_winner(
+        ExportRequest(search_id="search-export", copy_icc=False, copy_exif=False)
+    )
+    assert no_metadata_copy.export_key != first.export_key
+    # No source profile exists in this fixture, so distinct requested delivery
+    # options are allowed to reference the same content-addressed bytes.
+    assert no_metadata_copy.asset == first.asset
+    assert container.app_store.get_export(
+        search_id="search-export", export_key=no_metadata_copy.export_key
+    ) == no_metadata_copy
     with pytest.raises(ConflictError, match="historical global winner"):
         service.export_global_winner(
             ExportRequest(search_id="search-export", candidate_id="candidate-loser")
@@ -232,6 +303,94 @@ def test_export_is_content_addressed_idempotent_and_rejects_invalid_lineage(
         service.export_global_winner(command)
 
 
+def test_concurrent_export_requests_persist_one_replayable_record(
+    settings, fake_generator
+) -> None:
+    container, _candidate = _accepted_winner(settings, fake_generator)
+    service = ExportService(app_store=container.app_store, asset_store=container.asset_store)
+    command = ExportRequest(search_id="search-export", format="jpeg", jpeg_quality=91)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(
+            executor.map(
+                lambda _index: service.export_global_winner(command),
+                range(16),
+            )
+        )
+
+    assert len({item.export_key for item in results}) == 1
+    assert len({item.asset.sha256 for item in results}) == 1
+    with sqlite3.connect(container.app_store.path) as connection:
+        assert connection.execute("SELECT count(*) FROM exports").fetchone() == (1,)
+
+
+def test_export_rejects_a_composite_mask_that_widens_the_placement(
+    settings, fake_generator
+) -> None:
+    container, candidate = _accepted_winner(settings, fake_generator)
+    search = container.app_store.get_search("search-export")
+    project = container.app_store.get_project(search.project_id)
+    widened_mask_asset = container.asset_store.put_image_bytes(
+        _png_bytes(Image.new("L", (16, 12), 255))
+    )
+    allowed_box = normalized_placement_to_pixel_box(
+        search.placement,
+        width=project.source_manifest.background.width,
+        height=project.source_manifest.background.height,
+    )
+    widened_mask = Mask(
+        asset=widened_mask_asset,
+        allowed_box=allowed_box,
+        feather_radius_px=2,
+    )
+    polluted = candidate.model_copy(
+        update={
+            "composite": CompositeResult(
+                source_manifest_hash=search.source_manifest_hash,
+                source_background=project.source_manifest.background,
+                raw_candidate=candidate.raw_asset,
+                protected_asset=candidate.protected_asset,
+                mask=widened_mask,
+                outside_mask_exact=True,
+            )
+        }
+    )
+    container.app_store.add_candidate(search.search_id, polluted)
+
+    with pytest.raises(ConflictError, match="mask"):
+        container.export_service.export_global_winner(
+            ExportRequest(search_id=search.search_id)
+        )
+
+
+def test_export_assets_cannot_reenter_internal_candidate_lineage(
+    settings, fake_generator
+) -> None:
+    container, candidate = _accepted_winner(settings, fake_generator)
+    exported = container.export_service.export_global_winner(
+        ExportRequest(search_id="search-export")
+    )
+    assert exported.asset.asset_id.startswith("exp_")
+    assert "exports" in exported.asset.filesystem_path.parts
+    polluted = candidate.model_copy(
+        update={
+            "raw_asset": exported.asset,
+            "protected_asset": exported.asset,
+            "composite": None,
+        }
+    )
+    with sqlite3.connect(container.app_store.path) as connection:
+        connection.execute(
+            "UPDATE candidates SET record_json = ? WHERE candidate_id = ?",
+            (polluted.model_dump_json(), polluted.candidate_id),
+        )
+
+    with pytest.raises(SourceManifestMismatchError, match="internal PNG"):
+        container.export_service.export_global_winner(
+            ExportRequest(search_id="search-export")
+        )
+
+
 def test_export_rejects_searches_that_are_not_accepted(settings, fake_generator) -> None:
     container, _candidate = _accepted_winner(settings, fake_generator)
     container.app_store.update_search(
@@ -241,6 +400,154 @@ def test_export_rejects_searches_that_are_not_accepted(settings, fake_generator)
         ExportService(
             app_store=container.app_store, asset_store=container.asset_store
         ).export_global_winner(ExportRequest(search_id="search-export"))
+
+
+def test_jpeg_export_copies_requested_metadata_and_is_content_addressed(
+    settings, fake_generator
+) -> None:
+    icc_profile = b"fixture-icc-profile"
+    exif = Image.Exif()
+    exif[270] = "pet-fusion-export-fixture"
+    background = _png_bytes(
+        Image.new("RGB", (16, 12), (20, 30, 40)),
+        icc_profile=icc_profile,
+        exif=exif.tobytes(),
+    )
+    container, candidate = _accepted_winner(
+        settings,
+        fake_generator,
+        background_bytes=background,
+    )
+    service = ExportService(app_store=container.app_store, asset_store=container.asset_store)
+
+    png_copy = service.export_global_winner(
+        ExportRequest(search_id="search-export", format="png")
+    )
+    assert png_copy.copied_icc is True
+    assert png_copy.copied_exif is True
+    with Image.open(png_copy.asset.filesystem_path) as image:
+        assert image.format == "PNG"
+        assert image.info.get("icc_profile") == icc_profile
+        assert image.getexif().get(270) == "pet-fusion-export-fixture"
+
+    copied = service.export_global_winner(
+        ExportRequest(search_id="search-export", format="jpeg", jpeg_quality=82)
+    )
+    replay = service.export_global_winner(
+        ExportRequest(
+            search_id="search-export",
+            candidate_id=candidate.candidate_id,
+            format="jpeg",
+            jpeg_quality=82,
+        )
+    )
+    assert copied == replay
+    assert copied.format == "jpeg"
+    assert copied.jpeg_quality == 82
+    assert copied.asset.mime_type == "image/jpeg"
+    assert copied.asset.filesystem_path.suffix == ".jpg"
+    assert copied.copied_icc is True
+    assert copied.copied_exif is True
+    with Image.open(copied.asset.filesystem_path) as image:
+        assert image.format == "JPEG"
+        assert image.info.get("icc_profile") == icc_profile
+        assert image.getexif().get(270) == "pet-fusion-export-fixture"
+
+    without_metadata = service.export_global_winner(
+        ExportRequest(
+            search_id="search-export",
+            format="jpeg",
+            jpeg_quality=82,
+            copy_icc=False,
+            copy_exif=False,
+        )
+    )
+    assert without_metadata.export_key != copied.export_key
+    assert without_metadata.asset != copied.asset
+    assert without_metadata.copied_icc is False
+    assert without_metadata.copied_exif is False
+    with Image.open(without_metadata.asset.filesystem_path) as image:
+        assert image.info.get("icc_profile") is None
+        assert image.getexif().get(270) is None
+
+    different_quality = service.export_global_winner(
+        ExportRequest(search_id="search-export", format="jpeg", jpeg_quality=83)
+    )
+    assert different_quality.export_key != copied.export_key
+    assert different_quality.asset.sha256 != copied.asset.sha256
+
+
+def test_export_bakes_orientation_and_updates_exif_pixel_dimensions(
+    settings, fake_generator
+) -> None:
+    source = Image.new("RGB", (12, 16), (20, 30, 40))
+    exif = Image.Exif()
+    exif[270] = "oriented-source"
+    exif[274] = 6
+    exif[40962] = 12
+    exif[40963] = 16
+    encoded = io.BytesIO()
+    source.save(encoded, format="JPEG", quality=100, subsampling=0, exif=exif)
+    container, _candidate = _accepted_winner(
+        settings,
+        fake_generator,
+        background_bytes=encoded.getvalue(),
+    )
+
+    exported = container.export_service.export_global_winner(
+        ExportRequest(search_id="search-export", format="jpeg", jpeg_quality=90)
+    )
+    with Image.open(exported.asset.filesystem_path) as image:
+        delivered_exif = image.getexif()
+        assert image.size == (16, 12)
+        assert delivered_exif.get(274) is None
+        assert delivered_exif.get(40962) == 16
+        assert delivered_exif.get(40963) == 12
+        assert delivered_exif.get(270) == "oriented-source"
+
+
+def test_jpeg_export_flattens_transparent_source_pixels_to_a_white_matte(
+    settings, fake_generator
+) -> None:
+    transparent = _png_bytes(Image.new("RGBA", (16, 12), (255, 0, 0, 0)))
+    container, _candidate = _accepted_winner(
+        settings,
+        fake_generator,
+        background_bytes=transparent,
+    )
+
+    exported = container.export_service.export_global_winner(
+        ExportRequest(search_id="search-export", format="jpeg", jpeg_quality=100)
+    )
+    with Image.open(exported.asset.filesystem_path) as image:
+        red, green, blue = image.convert("RGB").getpixel((0, 0))
+    assert red >= 250
+    assert green >= 250
+    assert blue >= 250
+
+
+def test_incompatible_source_icc_is_not_attached_to_rgb_delivery(
+    settings, fake_generator
+) -> None:
+    source = Image.new("CMYK", (16, 12), (0, 20, 40, 0))
+    encoded = io.BytesIO()
+    source.save(
+        encoded,
+        format="JPEG",
+        icc_profile=b"fixture-cmyk-profile",
+    )
+    container, _candidate = _accepted_winner(
+        settings,
+        fake_generator,
+        background_bytes=encoded.getvalue(),
+    )
+
+    exported = container.export_service.export_global_winner(
+        ExportRequest(search_id="search-export", format="jpeg", jpeg_quality=90)
+    )
+    assert exported.copied_icc is False
+    with Image.open(exported.asset.filesystem_path) as image:
+        assert image.info.get("icc_profile") is None
 
 
 async def test_non_full_provider_canvas_is_protected_replayed_and_exported(
