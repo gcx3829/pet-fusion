@@ -16,6 +16,11 @@ from app.services.generator_service import (
     ImageGenerator,
     OpenAIImageGenerator,
 )
+from app.services.local_fix_service import (
+    DeterministicFakeLocalFixProvider,
+    LocalFixProvider,
+    LocalFixService,
+)
 from app.services.openai_critic_client import OfficialOpenAICriticProvider
 from app.services.openai_image_client import OfficialOpenAIImageEditsTransport
 from app.services.planner_service import FeedbackPlannerService, PlannerProvider
@@ -33,6 +38,7 @@ class AppContainer:
     generator_service: GeneratorService
     search_runner: SearchRunner
     export_service: ExportService
+    local_fix_service: LocalFixService
 
     @classmethod
     def build(
@@ -46,6 +52,7 @@ class AppContainer:
         stop_policy: DeterministicStopPolicy | None = None,
         planner_provider: PlannerProvider | None = None,
         planner_service: FeedbackPlannerService | None = None,
+        local_fix_provider: LocalFixProvider | None = None,
     ) -> AppContainer:
         if image_generator is None:
             if settings.fake_generator:
@@ -90,6 +97,15 @@ class AppContainer:
             image_generator=image_generator,
             generator_service=generator_service,
             export_service=ExportService(app_store=app_store, asset_store=asset_store),
+            local_fix_service=LocalFixService(
+                provider=(
+                    local_fix_provider
+                    if local_fix_provider is not None
+                    else DeterministicFakeLocalFixProvider()
+                ),
+                app_store=app_store,
+                asset_store=asset_store,
+            ),
             search_runner=SearchRunner(
                 app_store=app_store,
                 generator_service=generator_service,

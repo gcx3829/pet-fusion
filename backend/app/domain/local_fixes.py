@@ -9,9 +9,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.domain.assets import AssetRef, SourceManifest
-from app.domain.candidates import CandidateRecord
-from app.domain.compositing import CompositeResult, Mask
+from app.domain.assets import AssetRef, PublicAssetRef, SourceManifest
+from app.domain.candidates import CandidateRecord, CandidateResponse
+from app.domain.compositing import CompositeResult, Mask, PixelBox
 from app.domain.searches import PlacementIntent
 
 _HORIZONTAL_WHITESPACE = re.compile(r"[ \t]+")
@@ -57,6 +57,53 @@ class LocalFixOutcome(StrEnum):
 
     APPLIED = "applied"
     FALLBACK = "fallback"
+
+
+class LocalFixMaskSubmission(BaseModel):
+    """Public tight-mask reference or a deterministic structural mask request.
+
+    Clients may name an existing mask asset or submit only the bounded box and
+    feather used to construct a server-side PNG mask. Neither form can include a
+    server path, digest, or image bytes. The Local Fix service verifies the final
+    stored mask's bytes and pixel support before it can reach a provider.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["local-fix-mask-submission/v1"] = "local-fix-mask-submission/v1"
+    asset_id: str | None = Field(
+        default=None,
+        pattern=r"^ast_[0-9a-f]{32}$",
+    )
+    coordinate_space: Literal["full_resolution"] = "full_resolution"
+    allowed_box: PixelBox
+    feather_radius_px: int = Field(default=0, ge=0, le=4096)
+
+
+class LocalFixSubmission(BaseModel):
+    """HTTP input for one Local Fix without untrusted lineage fields.
+
+    The server derives source manifest, base depth, and optional prior-result
+    lineage from durable records.  Omitting ``candidate_id`` intentionally means
+    the accepted historical global winner.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["local-fix-submission/v1"] = "local-fix-submission/v1"
+    candidate_id: str | None = Field(
+        default=None,
+        pattern=r"^cand_(?:local_)?[0-9a-f]{28,64}$",
+    )
+    tight_mask: LocalFixMaskSubmission
+    instruction: str = Field(min_length=1, max_length=240)
+
+    @field_validator("instruction", mode="before")
+    @classmethod
+    def validate_single_instruction(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return normalize_local_fix_instruction(value)
 
 
 class LocalFixRequest(BaseModel):
@@ -199,3 +246,58 @@ class LocalFixResult(BaseModel):
         if self.fallback_candidate.generation_depth != self.generation_depth:
             raise ValueError("Fallback depth must remain at the base candidate depth")
         return self
+
+
+class LocalFixResponse(BaseModel):
+    """API-safe projection of a checkpoint-safe Local Fix result.
+
+    The internal result intentionally retains filesystem-backed ``AssetRef``
+    values for graph recovery.  This response preserves the same lineage and
+    outcome information while exposing assets only through authenticated API
+    URLs, matching the existing candidate and export response boundaries.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["local-fix-response/v1"] = "local-fix-response/v1"
+    fix_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: LocalFixOutcome
+    outcome: LocalFixOutcome
+    request_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    search_id: str = Field(min_length=1, max_length=120)
+    source_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    root_candidate_id: str = Field(min_length=1, max_length=120)
+    base_candidate_id: str = Field(min_length=1, max_length=120)
+    instruction_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generation_depth: int = Field(ge=0, le=2)
+    asset: PublicAssetRef
+    asset_url: str
+    candidate: CandidateResponse | None = None
+    fallback_candidate: CandidateResponse
+    failure_code: str | None = Field(default=None, max_length=120)
+
+    @classmethod
+    def from_result(cls, result: LocalFixResult) -> LocalFixResponse:
+        visible_candidate = result.candidate or result.fallback_candidate
+        public_asset = PublicAssetRef.from_internal(visible_candidate.protected_asset)
+        return cls(
+            fix_id=result.request_key,
+            status=result.outcome,
+            outcome=result.outcome,
+            request_key=result.request_key,
+            search_id=result.search_id,
+            source_manifest_hash=result.source_manifest_hash,
+            root_candidate_id=result.root_candidate_id,
+            base_candidate_id=result.base_candidate_id,
+            instruction_hash=result.instruction_hash,
+            generation_depth=result.generation_depth,
+            asset=public_asset,
+            asset_url=public_asset.asset_url,
+            candidate=(
+                CandidateResponse.from_record(result.candidate)
+                if result.candidate is not None
+                else None
+            ),
+            fallback_candidate=CandidateResponse.from_record(result.fallback_candidate),
+            failure_code=result.failure_code,
+        )

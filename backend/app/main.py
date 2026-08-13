@@ -8,13 +8,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import assets, events, exports, projects, searches
+from app.api import assets, events, exports, local_fixes, projects, searches
 from app.config import Settings, get_settings
 from app.container import AppContainer
 from app.domain.errors import DomainError
 from app.services.candidate_ranker import DeterministicCandidateRanker
 from app.services.critic_service import DeterministicCriticService
 from app.services.generator_service import ImageGenerator
+from app.services.local_fix_service import LocalFixProvider
 from app.services.planner_service import FeedbackPlannerService, PlannerProvider
 from app.services.stop_policy import DeterministicStopPolicy
 
@@ -28,6 +29,7 @@ def create_app(
     stop_policy: DeterministicStopPolicy | None = None,
     planner_provider: PlannerProvider | None = None,
     planner_service: FeedbackPlannerService | None = None,
+    local_fix_provider: LocalFixProvider | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     container = AppContainer.build(
@@ -38,6 +40,7 @@ def create_app(
         stop_policy=stop_policy,
         planner_provider=planner_provider,
         planner_service=planner_service,
+        local_fix_provider=local_fix_provider,
     )
 
     @asynccontextmanager
@@ -99,6 +102,7 @@ def create_app(
 
     app.include_router(projects.router, prefix="/api/v1")
     app.include_router(searches.router, prefix="/api/v1")
+    app.include_router(local_fixes.router, prefix="/api/v1")
     app.include_router(exports.router, prefix="/api/v1")
     app.include_router(events.router, prefix="/api/v1")
     app.include_router(assets.router, prefix="/api/v1")

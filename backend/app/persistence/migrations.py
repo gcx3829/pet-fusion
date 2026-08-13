@@ -1,4 +1,4 @@
-MIGRATION_VERSION = 6
+MIGRATION_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -146,6 +146,9 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_provider_calls_search_operation
+ON provider_calls(search_id, operation, status, updated_at);
 
 CREATE TABLE IF NOT EXISTS candidate_evaluations (
     evaluation_id TEXT PRIMARY KEY,

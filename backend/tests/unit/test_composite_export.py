@@ -112,6 +112,10 @@ def test_export_schema_migrates_an_existing_application_database(tmp_path) -> No
             row[0]
             for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
         }
+        provider_indexes = {
+            row[1]
+            for row in connection.execute("PRAGMA index_list(provider_calls)").fetchall()
+        }
     assert {
         "export_key",
         "search_id",
@@ -121,6 +125,7 @@ def test_export_schema_migrates_an_existing_application_database(tmp_path) -> No
         "asset_mime_type",
         "result_json",
     } <= columns.keys()
+    assert "idx_provider_calls_search_operation" in provider_indexes
     assert MIGRATION_VERSION in versions
 
 

@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.domain.assets import AssetRef
 from app.domain.candidates import CandidateRecord
 from app.domain.compositing import Mask
-from app.domain.errors import ConflictError
+from app.domain.errors import ConflictError, SourceManifestMismatchError
 from app.domain.local_fixes import (
     LocalFixOutcome,
     LocalFixRequest,
@@ -30,7 +30,7 @@ from app.services.asset_store import AssetStore
 from app.services.image_pipeline import CompositeFloorService
 
 FAKE_LOCAL_FIX_MODEL = "fake-gpt-image-2-local-fix"
-LOCAL_FIX_SCHEMA_VERSION = "local-fix/v1"
+LOCAL_FIX_SCHEMA_VERSION = "local-fix/v2"
 LOCAL_FIX_PROVIDER_LEASE_SECONDS = 5
 LOCAL_FIX_PROVIDER_WAIT_SECONDS = 30.0
 LOCAL_FIX_PROVIDER_POLL_SECONDS = 0.02
@@ -135,7 +135,13 @@ class LocalFixService:
             "root_candidate_id": resolution.root_candidate_id,
             "base_candidate_id": request.base_candidate_id,
             "base_protected_sha256": resolution.base_candidate.protected_asset.sha256,
-            "tight_mask_sha256": request.tight_mask.asset.sha256,
+            "tight_mask": {
+                "asset_id": request.tight_mask.asset.asset_id,
+                "sha256": request.tight_mask.asset.sha256,
+                "coordinate_space": request.tight_mask.coordinate_space,
+                "allowed_box": request.tight_mask.allowed_box.model_dump(mode="json"),
+                "feather_radius_px": request.tight_mask.feather_radius_px,
+            },
             "instruction_hash": self.instruction_hash(request.instruction),
             "base_generation_depth": request.generation_depth,
             "target_generation_depth": request.generation_depth + 1,
@@ -196,7 +202,10 @@ class LocalFixService:
     ) -> Image.Image:
         """Load one intact mask and prove its pixel support matches its metadata."""
 
-        self.asset_store.assert_intact(mask.asset)
+        # This validation belongs in the service, not only in the HTTP adapter:
+        # the graph is independently invokable and must reject delivery JPEGs or
+        # arbitrary filesystem-backed assets before a paid provider sees them.
+        self.asset_store.assert_png_lineage_asset(mask.asset)
         if (mask.asset.width, mask.asset.height) != expected_size:
             raise ConflictError(f"Local Fix {label} dimensions do not match the source")
         if mask.allowed_box.right > expected_size[0] or mask.allowed_box.bottom > expected_size[1]:
@@ -209,13 +218,23 @@ class LocalFixService:
         support = pixels.getbbox()
         if support is None:
             raise ConflictError(f"Local Fix {label} must contain an editable pixel")
+        declared_support = (
+            mask.allowed_box.x,
+            mask.allowed_box.y,
+            mask.allowed_box.right,
+            mask.allowed_box.bottom,
+        )
         if (
-            support[0] < mask.allowed_box.x
-            or support[1] < mask.allowed_box.y
-            or support[2] > mask.allowed_box.right
-            or support[3] > mask.allowed_box.bottom
+            support[0] < declared_support[0]
+            or support[1] < declared_support[1]
+            or support[2] > declared_support[2]
+            or support[3] > declared_support[3]
         ):
             raise ConflictError(f"Local Fix {label} pixels exceed the declared bounds")
+        if support != declared_support:
+            raise ConflictError(
+                f"Local Fix {label} bounds must tightly match its editable pixels"
+            )
         return pixels
 
     def _validate_base_composite_lineage(self, resolution: LocalFixResolution) -> None:
@@ -223,7 +242,7 @@ class LocalFixService:
 
         composite = resolution.base_candidate.composite
         if composite is None:
-            return
+            raise ConflictError("Local Fix requires a composite-protected base candidate")
         if composite.source_background != resolution.source_manifest.background:
             raise ConflictError(
                 "Local Fix candidate composite does not match the source background"
@@ -236,6 +255,16 @@ class LocalFixService:
             raise ConflictError("Local Fix candidate composite does not match protected lineage")
         if not composite.outside_mask_exact:
             raise ConflictError("Local Fix base candidate lacks verified background protection")
+        try:
+            self.composite_floor.assert_mask_matches_placement(
+                source_background=resolution.source_manifest.background,
+                placement=resolution.placement,
+                mask=composite.mask,
+            )
+        except ValueError as exc:
+            raise ConflictError(
+                "Local Fix candidate composite floor does not match the accepted placement"
+            ) from exc
         with (
             Image.open(resolution.source_manifest.background.filesystem_path) as source,
             Image.open(resolution.base_candidate.protected_asset.filesystem_path) as protected,
@@ -249,6 +278,64 @@ class LocalFixService:
                 raise ConflictError(
                     "Local Fix base candidate changed pixels outside its composite floor"
                 )
+
+    def _assert_candidate_assets_intact(self, candidate: CandidateRecord) -> None:
+        assets = [candidate.raw_asset, candidate.protected_asset]
+        if candidate.composite is not None:
+            assets.extend(
+                [
+                    candidate.composite.source_background,
+                    candidate.composite.raw_candidate,
+                    candidate.composite.protected_asset,
+                    candidate.composite.mask.asset,
+                ]
+            )
+        for asset in assets:
+            self.asset_store.assert_png_lineage_asset(asset)
+
+    def sanitize_persisted_result(self, result: LocalFixResult) -> LocalFixResult:
+        """Return only an audit result whose referenced PNG lineage is still usable.
+
+        A corrupt applied result is conservatively projected to its durable rollback
+        candidate, matching replay behavior.  A corrupt rollback cannot be made safe
+        and is reported as a conflict instead of exposing broken asset URLs.
+        """
+
+        try:
+            self._assert_candidate_assets_intact(result.fallback_candidate)
+        except (SourceManifestMismatchError, OSError) as exc:
+            raise ConflictError("Local Fix rollback assets are unavailable") from exc
+        if result.outcome is LocalFixOutcome.FALLBACK:
+            return result
+        try:
+            if result.candidate is None or result.provider_raw_asset is None:
+                raise SourceManifestMismatchError("Local Fix applied audit is incomplete")
+            self._assert_candidate_assets_intact(result.candidate)
+            self.asset_store.assert_png_lineage_asset(result.provider_raw_asset)
+            for composite in (result.tight_composite, result.composite):
+                if composite is None:
+                    raise SourceManifestMismatchError("Local Fix composite audit is incomplete")
+                for asset in (
+                    composite.source_background,
+                    composite.raw_candidate,
+                    composite.protected_asset,
+                    composite.mask.asset,
+                ):
+                    self.asset_store.assert_png_lineage_asset(asset)
+        except (SourceManifestMismatchError, OSError):
+            return LocalFixResult(
+                outcome=LocalFixOutcome.FALLBACK,
+                request_key=result.request_key,
+                search_id=result.search_id,
+                source_manifest_hash=result.source_manifest_hash,
+                root_candidate_id=result.root_candidate_id,
+                base_candidate_id=result.base_candidate_id,
+                instruction_hash=result.instruction_hash,
+                generation_depth=result.fallback_candidate.generation_depth,
+                fallback_candidate=result.fallback_candidate,
+                failure_code="provider_audit_invalid",
+            )
+        return result
 
     def resolve(
         self,
@@ -284,6 +371,9 @@ class LocalFixService:
             root_candidate_id = base_candidate.candidate_id
             root_candidate = base_candidate
         else:
+            sanitized_previous = self.sanitize_persisted_result(previous_result)
+            if sanitized_previous != previous_result:
+                raise ConflictError("Local Fix continuation audit assets are unavailable")
             if (
                 previous_result.search_id != request.search_id
                 or previous_result.source_manifest_hash != request.source_manifest_hash
@@ -316,17 +406,12 @@ class LocalFixService:
             raise ConflictError("Local Fix generation depth does not match the base candidate")
         if base_candidate.generation_depth + 1 > 2:
             raise ConflictError("Local Fix generation depth cannot exceed 2")
-        self.asset_store.assert_intact(manifest.background)
-        self.asset_store.assert_intact(base_candidate.raw_asset)
-        self.asset_store.assert_intact(base_candidate.protected_asset)
-        outer_composite_mask = (
-            root_candidate.composite.mask
-            if root_candidate.composite is not None
-            else self.composite_floor.create_mask(
-                source_background=manifest.background,
-                placement=search.placement,
-            )
-        )
+        self.asset_store.assert_png_lineage_asset(manifest.background)
+        self.asset_store.assert_png_lineage_asset(base_candidate.raw_asset)
+        self.asset_store.assert_png_lineage_asset(base_candidate.protected_asset)
+        if root_candidate.composite is None:
+            raise ConflictError("Local Fix root candidate lacks a composite floor")
+        outer_composite_mask = root_candidate.composite.mask
         self.app_store.register_asset(outer_composite_mask.asset)
         resolution = LocalFixResolution(
             request=request,
@@ -414,7 +499,7 @@ class LocalFixService:
         if result.composite is not None:
             assets.extend([result.composite.protected_asset, result.composite.mask.asset])
         for asset in assets:
-            self.asset_store.assert_intact(asset)
+            self.asset_store.assert_png_lineage_asset(asset)
             self.app_store.register_asset(asset)
         return result
 
@@ -454,7 +539,13 @@ class LocalFixService:
             "root_candidate_id": resolution.root_candidate_id,
             "base_candidate_id": request.base_candidate_id,
             "base_protected_asset_id": resolution.base_candidate.protected_asset.asset_id,
-            "tight_mask_asset_id": request.tight_mask.asset.asset_id,
+            "tight_mask": {
+                "asset_id": request.tight_mask.asset.asset_id,
+                "sha256": request.tight_mask.asset.sha256,
+                "coordinate_space": request.tight_mask.coordinate_space,
+                "allowed_box": request.tight_mask.allowed_box.model_dump(mode="json"),
+                "feather_radius_px": request.tight_mask.feather_radius_px,
+            },
             "instruction_hash": self.instruction_hash(request.instruction),
             "base_generation_depth": request.generation_depth,
             "target_generation_depth": request.generation_depth + 1,
@@ -501,10 +592,8 @@ class LocalFixService:
                 if closed:
                     return abandoned
             if asyncio.get_running_loop().time() >= deadline:
-                return self._fallback(
-                    resolution=resolution,
-                    request_key=request_key,
-                    failure_code="provider_call_timeout",
+                raise ConflictError(
+                    "An identical Local Fix request is still in progress"
                 )
             await asyncio.sleep(LOCAL_FIX_PROVIDER_POLL_SECONDS)
 

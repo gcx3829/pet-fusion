@@ -9,7 +9,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.domain.assets import AssetRef
 from app.domain.candidates import CandidateRecord
@@ -24,6 +24,9 @@ from app.domain.searches import (
     SearchStatus,
 )
 from app.persistence.migrations import MIGRATION_VERSION, SCHEMA_SQL
+
+if TYPE_CHECKING:
+    from app.domain.local_fixes import LocalFixResult
 
 
 def utcnow() -> datetime:
@@ -714,6 +717,7 @@ class AppStore:
         now_value = utcnow()
         now = now_value.isoformat()
         lease_until = (now_value + timedelta(seconds=lease_seconds)).isoformat()
+        request_json = json.dumps(request_payload, separators=(",", ":"), sort_keys=True)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -727,19 +731,28 @@ class AppStore:
                     request_key,
                     operation,
                     search_id,
-                    json.dumps(request_payload, separators=(",", ":"), sort_keys=True),
+                    request_json,
                     now,
                     now,
                 ),
             )
             row = connection.execute(
                 """
-                SELECT status, response_json, lease_until, attempt_count
+                SELECT operation, search_id, status, response_json, lease_until,
+                       attempt_count
                 FROM provider_calls WHERE request_key = ?
                 """,
                 (request_key,),
             ).fetchone()
             assert row is not None
+            if (
+                str(row["operation"]) != operation
+                or str(row["search_id"]) != search_id
+            ):
+                connection.rollback()
+                raise ConflictError(
+                    "Provider request key belongs to a different operation or search"
+                )
             status = str(row["status"])
             claimed = False
             stale_running = status == "running" and (
@@ -811,6 +824,83 @@ class AppStore:
             return None
         response = json.loads(row["response_json"]) if row["response_json"] else None
         return str(row["status"]), response
+
+    def get_local_fix_result(self, *, search_id: str, fix_id: str) -> LocalFixResult:
+        """Load one completed Local Fix result from the existing provider audit.
+
+        Local Fix output is deliberately not inserted into the automatic-search
+        candidate history.  The completed provider-call audit is therefore the
+        durable source of truth for replay and for a subsequent depth-2 fix.  Its
+        payload contains only structured references, never image bytes.
+        """
+
+        from app.domain.local_fixes import LocalFixResult
+
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT status, response_json FROM provider_calls
+                WHERE request_key = ? AND search_id = ? AND operation = 'local_fix'
+                """,
+                (fix_id, search_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Local Fix {fix_id} was not found for search {search_id}")
+        if row["status"] != "completed" or row["response_json"] is None:
+            raise ConflictError("Local Fix has not completed yet")
+        try:
+            payload = json.loads(row["response_json"])
+            result_payload = payload.get("result") if isinstance(payload, dict) else None
+            if not isinstance(result_payload, dict):
+                raise ValueError("missing result")
+            result = LocalFixResult.model_validate(result_payload)
+        except (TypeError, ValueError):
+            raise ConflictError("Local Fix audit has an invalid response") from None
+        if result.request_key != fix_id or result.search_id != search_id:
+            raise ConflictError("Local Fix audit does not match the requested resource")
+        return result
+
+    def find_applied_local_fix_by_candidate(
+        self, *, search_id: str, candidate_id: str
+    ) -> LocalFixResult | None:
+        """Find the durable Local Fix result that produced a continuation base.
+
+        A depth-1 output is intentionally absent from ``candidates`` so it cannot
+        influence Search.  Continuations recover that output exclusively from a
+        completed Local Fix audit belonging to the same search.
+        """
+
+        from app.domain.local_fixes import LocalFixOutcome, LocalFixResult
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT request_key, response_json FROM provider_calls
+                WHERE search_id = ? AND operation = 'local_fix' AND status = 'completed'
+                ORDER BY updated_at DESC
+                """,
+                (search_id,),
+            ).fetchall()
+        for row in rows:
+            if row["response_json"] is None:
+                continue
+            try:
+                payload = json.loads(row["response_json"])
+                result_payload = payload.get("result") if isinstance(payload, dict) else None
+                if not isinstance(result_payload, dict):
+                    continue
+                result = LocalFixResult.model_validate(result_payload)
+            except (TypeError, ValueError):
+                continue
+            if (
+                result.outcome is LocalFixOutcome.APPLIED
+                and result.candidate is not None
+                and result.request_key == str(row["request_key"])
+                and result.search_id == search_id
+                and result.candidate.candidate_id == candidate_id
+            ):
+                return result
+        return None
 
     def renew_search_lease(
         self, *, search_id: str, worker_id: str, lease_seconds: int

@@ -13,7 +13,7 @@ from app.config import Settings
 from app.container import AppContainer
 from app.domain.assets import SourceManifest
 from app.domain.compositing import Mask, PixelBox
-from app.domain.errors import ConflictError
+from app.domain.errors import ConflictError, SourceManifestMismatchError
 from app.domain.local_fixes import LocalFixOutcome, LocalFixRequest, LocalFixResult
 from app.domain.projects import ProjectRecord
 from app.domain.searches import CreateSearchRequest, PlacementIntent, SearchStatus
@@ -369,6 +369,93 @@ async def test_local_fix_rejects_mask_pixels_outside_declared_tight_box(
             .compile()
             .ainvoke({"request": request.model_dump(mode="json")}, version="v1")
         )
+    assert provider.call_count == 0
+
+
+async def test_local_fix_service_rejects_delivery_asset_mask_before_provider(
+    settings: Settings,
+) -> None:
+    container, manifest, _command, search_id = await _accepted_search(settings)
+    provider = DeterministicFakeLocalFixProvider()
+    service = LocalFixService(
+        provider=provider,
+        app_store=container.app_store,
+        asset_store=container.asset_store,
+    )
+    base = container.app_store.get_search(search_id).candidates[0]
+    box = PixelBox(x=28, y=20, width=18, height=18)
+    pixels = Image.new("L", (manifest.background.width, manifest.background.height), 0)
+    pixels.paste(255, (box.x, box.y, box.right, box.bottom))
+    delivery_asset = container.asset_store.put_export_bytes(
+        _png_bytes(pixels),
+        mime_type="image/png",
+    )
+    request = LocalFixRequest(
+        search_id=search_id,
+        base_candidate_id=base.candidate_id,
+        source_manifest_hash=manifest.manifest_hash,
+        tight_mask=Mask(
+            asset=delivery_asset,
+            allowed_box=box,
+            feather_radius_px=0,
+        ),
+        instruction="Refine only the selected cat eye edge.",
+        generation_depth=0,
+    )
+
+    with pytest.raises(SourceManifestMismatchError, match="not an internal PNG"):
+        service.resolve(request)
+    assert provider.call_count == 0
+
+
+async def test_local_fix_rejects_tampered_outer_floor_before_provider(
+    settings: Settings,
+) -> None:
+    container, manifest, _command, search_id = await _accepted_search(settings)
+    provider = DeterministicFakeLocalFixProvider()
+    service = LocalFixService(
+        provider=provider,
+        app_store=container.app_store,
+        asset_store=container.asset_store,
+    )
+    base = container.app_store.get_search(search_id).candidates[0]
+    assert base.composite is not None
+    original_box = base.composite.mask.allowed_box
+    expanded_box = PixelBox(
+        x=max(0, original_box.x - 1),
+        y=max(0, original_box.y - 1),
+        width=min(manifest.background.width, original_box.right + 1)
+        - max(0, original_box.x - 1),
+        height=min(manifest.background.height, original_box.bottom + 1)
+        - max(0, original_box.y - 1),
+    )
+    expanded_mask = service.composite_floor.create_mask_for_box(
+        source_background=manifest.background,
+        allowed_box=expanded_box,
+        feather_radius_px=base.composite.mask.feather_radius_px,
+    )
+    container.app_store.register_asset(expanded_mask.asset)
+    tampered = base.model_copy(
+        update={
+            "composite": base.composite.model_copy(update={"mask": expanded_mask}),
+        }
+    )
+    container.app_store.add_candidate(search_id, tampered)
+    request = LocalFixRequest(
+        search_id=search_id,
+        base_candidate_id=base.candidate_id,
+        source_manifest_hash=manifest.manifest_hash,
+        tight_mask=_tight_mask(
+            container,
+            background_size=(manifest.background.width, manifest.background.height),
+            box=PixelBox(x=28, y=20, width=18, height=18),
+        ),
+        instruction="Refine only the selected cat eye edge.",
+        generation_depth=0,
+    )
+
+    with pytest.raises(ConflictError, match="accepted placement"):
+        service.resolve(request)
     assert provider.call_count == 0
 
 

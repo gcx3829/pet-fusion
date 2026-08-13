@@ -135,14 +135,35 @@ class CompositeFloorService:
         placement: PlacementIntent,
         feather_radius_px: int = 2,
     ) -> Mask:
-        if feather_radius_px < 0:
-            raise ValueError("feather_radius_px must be non-negative")
-        self.asset_store.assert_intact(source_background)
         allowed_box = normalized_placement_to_pixel_box(
             placement,
             width=source_background.width,
             height=source_background.height,
         )
+        return self.create_mask_for_box(
+            source_background=source_background,
+            allowed_box=allowed_box,
+            feather_radius_px=feather_radius_px,
+        )
+
+    def create_mask_for_box(
+        self,
+        *,
+        source_background: AssetRef,
+        allowed_box: PixelBox,
+        feather_radius_px: int = 0,
+    ) -> Mask:
+        """Store a deterministic full-resolution mask for one bounded box.
+
+        Local Fix uses this narrow primitive for a user-drawn rectangle when the
+        browser has not already uploaded a raster alpha mask.  The caller still
+        has to pass the resulting asset through Local Fix lineage validation; this
+        helper only creates a checkpoint-safe asset reference.
+        """
+
+        if feather_radius_px < 0:
+            raise ValueError("feather_radius_px must be non-negative")
+        self.asset_store.assert_intact(source_background)
         image = self._full_resolution_mask(
             width=source_background.width,
             height=source_background.height,

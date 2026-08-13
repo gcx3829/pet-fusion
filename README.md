@@ -100,7 +100,7 @@ OpenAI      GPT Image 2 + GPT-5.6 系列多模态模型
 → local Composite Floor 回贴、全分辨率导出 JPEG/PNG、ICC/EXIF 尽力保留
 ```
 
-Local Fix 已实现为独立、一次一调用的 LangGraph 后端图和服务：它只允许 `generation_depth` 从 0 到 2，保留回退候选，并且不会回流到自动 Search。它尚未暴露为 HTTP 接口或前端操作。默认配置不会调用 OpenAI，也不需要 API key；mock 候选用于验证资产、状态、恢复边界和前后端数据流，不代表最终生成质量。
+Local Fix 已实现为独立、一次一调用的 LangGraph 后端图、服务和 HTTP API：它只允许 `generation_depth` 从 0 到 2，保留回退候选，并且不会回流到自动 Search。API 可引用已存 PNG mask，或只提交 full-resolution 的结构化矩形以由后端创建受校验 mask；相同语义请求会复用 SQLite provider-call audit。默认配置不会调用 OpenAI，也不需要 API key；mock 候选用于验证资产、状态、恢复边界和前后端数据流，不代表最终生成质量。
 
 ## 当前实现结构
 
@@ -216,6 +216,8 @@ OPENAI_BASE_URL=
 6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、继续一轮或取消；
 7. `POST /searches/{search_id}/export`：只导出已接受搜索的历史 Global Winner，可选 PNG/JPEG、JPEG 质量与 ICC/EXIF 复制策略；
 8. `GET /searches/{search_id}/exports/{export_key}`：读取幂等、内容寻址的导出记录。
+9. `POST /searches/{search_id}/local-fixes`：对已接受搜索的历史候选（省略 `candidate_id` 时为 Global Winner）执行一次 isolated Local Fix；mask 可为内部 PNG asset ID 或结构化 full-resolution box，结果包含可重放 `request_key`；
+10. `GET /searches/{search_id}/local-fixes/{fix_id}`：读取 SQLite provider-call audit 中的 Local Fix 结果。
 
 浏览器在开发模式下通过 Vite 的 `/api` 代理访问后端，因此不会接触服务端密钥。
 `scripts/dev.sh` 会根据 `PET_FUSION_API_HOST` 和 `PET_FUSION_API_PORT` 自动配置 Vite 代理；也可用 `VITE_DEV_API_TARGET=http://host:port ./scripts/dev.sh` 显式覆盖。需要让浏览器跨域直连时，则在 `frontend/.env.local` 中设置 `VITE_API_BASE_URL`。
@@ -224,7 +226,7 @@ OPENAI_BASE_URL=
 
 - 默认仍使用确定性的 mock generator；`FAKE_GENERATOR=0` 时真实 GPT Image 2 provider 路径已接通，但尚未用真实凭据或中转站完成联调；
 - Critic 默认仍为离线确定性实现；`FAKE_CRITIC=0` 的 GPT-5.6 Terra Responses Structured Outputs 路径已接通但尚未用真实凭据或中转站完成联调。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
-- Composite Floor、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Local Fix 的独立后端图、深度保护和回退已实现，但还没有 FastAPI route、真实 edit transport 或前端审片/导出操作；
+- Composite Floor、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Local Fix 已有独立后端图、深度保护、回退、SQLite replay 与 FastAPI route；尚无真实 edit transport、前端审片或导出操作；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
 - 前端已覆盖首个 Search 工作流，不是通用节点编辑器，也暂不包含 Local Fix、导出体验或完整人工 interrupt/resume 操作。
 

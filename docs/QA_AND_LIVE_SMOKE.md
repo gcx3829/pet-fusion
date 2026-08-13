@@ -88,7 +88,7 @@ cd ..
 | 自动 Search | 显式 LangGraph、Critic/Planner 子图、Ranker、Global Winner、rebase、checkpoint | 真实凭据联调、生产队列与跨主机协调 |
 | Critic / Planner | fake Critic 与可选 live Critic transport；确定性 Planner policy | GPT-5.6 Luna Planner transport、Sol escalation |
 | 背景保护 / 导出 | Composite Floor、原始分辨率回贴、PNG/JPEG、ICC/EXIF 尽力保留、Export API | 前端导出体验与真实摄影文件集验证 |
-| Local Fix | 独立后端图、tight mask、0→2 深度保护、幂等回退 | FastAPI route、真实 edit transport、前端入口 |
+| Local Fix | 独立后端图、tight mask、0→2 深度保护、SQLite 幂等回退与 FastAPI route | 真实 edit transport、前端入口 |
 | 基准 | 离线架构和回归测试 | 按实施指南准备 5 只宠物 / 15 张旅行照的盲评集，比较单轮、rebase search 与连续 I2I，并记录成本、轮数和摄影师偏好 |
 
 这些限制不会改变 immutable source、PNG lineage、历史 Global Winner、Composite Floor 和 Local Fix 深度上限等架构约束。
