@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Severity(StrEnum):
@@ -15,6 +15,46 @@ class Severity(StrEnum):
     BLOCKING = "blocking"
     WARNING = "warning"
     INFO = "info"
+
+
+class CriticCategory(StrEnum):
+    """Closed issue taxonomy normalized before policy code sees provider output."""
+
+    CAT_IDENTITY = "cat_identity"
+    POSE_GEOMETRY = "pose_geometry"
+    PERSPECTIVE_SCALE = "perspective_scale"
+    LIGHTING_COLOR = "lighting_color"
+    OPTICAL_CONSISTENCY = "optical_consistency"
+    PHYSICAL_INTEGRATION = "physical_integration"
+    SCENE_PRESERVATION = "scene_preservation"
+    ASSET_INTEGRITY = "asset_integrity"
+    UNCLASSIFIED = "unclassified"
+
+
+_CRITIC_CATEGORY_ALIASES: dict[str, CriticCategory] = {
+    "identity": CriticCategory.CAT_IDENTITY,
+    "cat_identity": CriticCategory.CAT_IDENTITY,
+    "coat_pattern": CriticCategory.CAT_IDENTITY,
+    "fur_identity": CriticCategory.CAT_IDENTITY,
+    "pose": CriticCategory.POSE_GEOMETRY,
+    "pose_geometry": CriticCategory.POSE_GEOMETRY,
+    "anatomy": CriticCategory.POSE_GEOMETRY,
+    "perspective": CriticCategory.PERSPECTIVE_SCALE,
+    "perspective_scale": CriticCategory.PERSPECTIVE_SCALE,
+    "scale": CriticCategory.PERSPECTIVE_SCALE,
+    "lighting": CriticCategory.LIGHTING_COLOR,
+    "lighting_color": CriticCategory.LIGHTING_COLOR,
+    "color": CriticCategory.LIGHTING_COLOR,
+    "optics": CriticCategory.OPTICAL_CONSISTENCY,
+    "optical_consistency": CriticCategory.OPTICAL_CONSISTENCY,
+    "sharpness": CriticCategory.OPTICAL_CONSISTENCY,
+    "physical_integration": CriticCategory.PHYSICAL_INTEGRATION,
+    "integration": CriticCategory.PHYSICAL_INTEGRATION,
+    "contact_shadow": CriticCategory.PHYSICAL_INTEGRATION,
+    "scene_preservation": CriticCategory.SCENE_PRESERVATION,
+    "background": CriticCategory.SCENE_PRESERVATION,
+    "asset_integrity": CriticCategory.ASSET_INTEGRITY,
+}
 
 
 MIN_BLOCKING_CONFIDENCE = 0.75
@@ -28,12 +68,22 @@ class CriticIssue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     issue_id: str = Field(min_length=1, max_length=120)
-    category: str = Field(min_length=1, max_length=80)
+    category: CriticCategory
     severity: Severity
     region: str | None = Field(default=None, max_length=120)
     evidence: str = Field(min_length=1, max_length=500)
     suggested_fix: str | None = Field(default=None, max_length=300)
     confidence: float = Field(ge=0, le=1)
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def normalize_category(cls, value: object) -> CriticCategory:
+        if isinstance(value, CriticCategory):
+            return value
+        if not isinstance(value, str):
+            return CriticCategory.UNCLASSIFIED
+        normalized = "_".join(value.strip().casefold().replace("-", " ").split())
+        return _CRITIC_CATEGORY_ALIASES.get(normalized, CriticCategory.UNCLASSIFIED)
 
 
 class DimensionScores(BaseModel):

@@ -1,0 +1,148 @@
+"""Build bounded, checkpoint-safe image references for Critic invocations."""
+
+from __future__ import annotations
+
+import io
+import math
+from typing import Literal
+
+from PIL import Image, ImageDraw
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.domain.assets import AssetRef, SourceManifest
+from app.domain.candidates import CandidateRecord
+from app.domain.searches import PlacementIntent
+from app.persistence.app_store import AppStore
+from app.services.asset_store import AssetStore
+
+CRITIC_PROXY_SCHEMA_VERSION: Literal["critic-proxy/v1"] = "critic-proxy/v1"
+DEFAULT_CRITIC_PROXY_MAX_SIDE = 1536
+DEFAULT_CRITIC_REFERENCE_LIMIT = 3
+
+
+class CriticProxyBundle(BaseModel):
+    """Asset-only inputs for a single, independent candidate Critic call."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["critic-proxy/v1"] = CRITIC_PROXY_SCHEMA_VERSION
+    candidate_id: str = Field(min_length=1, max_length=120)
+    source_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    background_proxy: AssetRef
+    placement_overlay_proxy: AssetRef
+    reference_proxies: tuple[AssetRef, ...] = Field(min_length=1, max_length=3)
+    protected_candidate_proxy: AssetRef
+
+    @property
+    def is_checkpoint_safe(self) -> bool:
+        """The bundle contains only references to local PNG assets, never pixels."""
+
+        return True
+
+
+class CriticProxyBuilder:
+    """Create reproducible bounded proxies without changing source or candidates.
+
+    These derivatives are content-addressed assets. Replaying a graph node therefore
+    returns the same references and does not mutate immutable source assets or the
+    candidate's raw/protected lineage.
+    """
+
+    def __init__(
+        self,
+        *,
+        asset_store: AssetStore,
+        app_store: AppStore,
+        max_side: int = DEFAULT_CRITIC_PROXY_MAX_SIDE,
+        reference_limit: int = DEFAULT_CRITIC_REFERENCE_LIMIT,
+    ) -> None:
+        if max_side <= 0:
+            raise ValueError("Critic proxy max_side must be positive")
+        if not 1 <= reference_limit <= 3:
+            raise ValueError("Critic proxy reference_limit must be between 1 and 3")
+        self.asset_store = asset_store
+        self.app_store = app_store
+        self.max_side = max_side
+        self.reference_limit = reference_limit
+
+    @staticmethod
+    def _png_bytes(image: Image.Image) -> bytes:
+        output = io.BytesIO()
+        image.save(output, format="PNG", compress_level=9, optimize=False)
+        return output.getvalue()
+
+    def _store_proxy(self, image: Image.Image) -> AssetRef:
+        asset = self.asset_store.put_image_bytes(self._png_bytes(image))
+        self.app_store.register_asset(asset)
+        return asset
+
+    def _proxy_asset(self, asset: AssetRef) -> AssetRef:
+        self.asset_store.assert_intact(asset)
+        with Image.open(asset.filesystem_path) as opened:
+            mode: Literal["RGB", "RGBA"] = "RGBA" if "A" in opened.getbands() else "RGB"
+            image = opened.convert(mode)
+        longest_side = max(image.size)
+        if longest_side > self.max_side:
+            scale = self.max_side / longest_side
+            target_size = (
+                max(1, math.floor(image.width * scale)),
+                max(1, math.floor(image.height * scale)),
+            )
+            image = image.resize(target_size, Image.Resampling.LANCZOS)
+        return self._store_proxy(image)
+
+    def _placement_overlay(
+        self, background_proxy: AssetRef, placement: PlacementIntent
+    ) -> AssetRef:
+        self.asset_store.assert_intact(background_proxy)
+        with Image.open(background_proxy.filesystem_path) as opened:
+            image = opened.convert("RGBA")
+        left = max(0, min(image.width - 1, math.floor(placement.x * image.width)))
+        top = max(0, min(image.height - 1, math.floor(placement.y * image.height)))
+        right = max(
+            left,
+            min(image.width - 1, math.ceil((placement.x + placement.width) * image.width) - 1),
+        )
+        bottom = max(
+            top,
+            min(
+                image.height - 1,
+                math.ceil((placement.y + placement.height) * image.height) - 1,
+            ),
+        )
+        line_width = max(1, round(min(image.size) / 256))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((left, top, right, bottom), outline=(255, 196, 72, 255), width=line_width)
+        return self._store_proxy(image.convert("RGB"))
+
+    def build(
+        self,
+        *,
+        source_manifest: SourceManifest,
+        candidate: CandidateRecord,
+        placement: PlacementIntent,
+    ) -> CriticProxyBundle:
+        """Create the fixed-proxy view for one protected candidate.
+
+        Critic inputs deliberately refer to ``protected_asset``.  The raw generator
+        output is never handed to a Critic or used as a later search input.
+        """
+
+        source_manifest.assert_integrity()
+        if candidate.source_manifest_hash != source_manifest.manifest_hash:
+            raise ValueError("Candidate source manifest does not match Critic source manifest")
+        background_proxy = self._proxy_asset(source_manifest.background)
+        references = tuple(
+            self._proxy_asset(reference)
+            for reference in source_manifest.cat_references[: self.reference_limit]
+        )
+        candidate_proxy = self._proxy_asset(candidate.protected_asset)
+        overlay_proxy = self._placement_overlay(background_proxy, placement)
+        return CriticProxyBundle(
+            candidate_id=candidate.candidate_id,
+            source_manifest_hash=source_manifest.manifest_hash,
+            background_proxy=background_proxy,
+            placement_overlay_proxy=overlay_proxy,
+            reference_proxies=references,
+            protected_candidate_proxy=candidate_proxy,
+        )

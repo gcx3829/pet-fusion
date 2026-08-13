@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -122,6 +123,18 @@ class SelectedBlockingCritic(DeterministicCriticService):
                 "recommended_action": "regenerate",
             }
         )
+
+
+class FailOneCritic(DeterministicCriticService):
+    def __init__(self) -> None:
+        self.call_counts: dict[int, int] = {}
+
+    def evaluate(self, request: CriticInput) -> CandidateEvaluation:
+        variant_index = request.candidate.variant_index
+        self.call_counts[variant_index] = self.call_counts.get(variant_index, 0) + 1
+        if variant_index == 1:
+            raise RuntimeError("fixture candidate critic failure")
+        return super().evaluate(request)
 
 
 def _project(client: TestClient, project_payload) -> dict[str, object]:
@@ -398,6 +411,59 @@ def test_losing_blocking_candidate_does_not_create_selected_directive(
         search = client.get(f"/api/v1/searches/{created['search_id']}").json()
     assert search["global_winner_id"] == search["round_winner_id"]
     assert search["active_directives"] == []
+
+
+@pytest.mark.parametrize(
+    ("candidate_count", "expected_stop_reason"),
+    [(2, "critic_evaluations_insufficient"), (3, None)],
+)
+def test_one_critic_failure_is_isolated_and_bounded(
+    tmp_path,
+    project_payload,
+    search_payload,
+    fake_generator,
+    candidate_count: int,
+    expected_stop_reason: str | None,
+) -> None:
+    critic = FailOneCritic()
+    settings = Settings(
+        data_dir=tmp_path / f"critic-failure-{candidate_count}",
+        run_inline=True,
+    )
+    app = create_app(
+        settings,
+        image_generator=fake_generator,
+        critic_service=critic,
+    )
+    with TestClient(app) as client:
+        project = _project(client, project_payload)
+        created = client.post(
+            f"/api/v1/projects/{project['project_id']}/searches",
+            json={**search_payload, "candidate_count": candidate_count},
+            headers={"Idempotency-Key": f"critic-failure-{candidate_count}"},
+        ).json()
+        search = client.get(f"/api/v1/searches/{created['search_id']}").json()
+
+    assert search["status"] == SearchStatus.WAITING_FOR_HUMAN.value
+    if expected_stop_reason is None:
+        assert search["stop_reason"] != "critic_evaluations_insufficient"
+    else:
+        assert search["stop_reason"] == expected_stop_reason
+    assert critic.call_counts[1] == 2
+    assert all(
+        count == 1 for variant, count in critic.call_counts.items() if variant != 1
+    )
+    evaluations = app.state.container.app_store.list_evaluations(created["search_id"])
+    failed_id = next(
+        candidate["candidate_id"]
+        for candidate in search["candidates"]
+        if candidate["variant_index"] == 1
+    )
+    failed = next(item for item in evaluations if item.candidate_id == failed_id)
+    assert failed.scores.cat_identity == 0
+    assert "evaluation_unavailable" in failed.hard_constraint_failures
+    if candidate_count == 3:
+        assert search["global_winner_id"] != failed_id
 
 
 def test_cancel_fences_waiting_state_and_events_in_one_transaction(

@@ -553,8 +553,12 @@ class AppStore:
         request_payload: dict[str, object],
         owner_id: str,
         lease_seconds: int,
+        max_attempts: int | None = None,
     ) -> tuple[bool, str, dict[str, object] | None]:
         """Atomically reserve a provider side effect for exactly one caller."""
+
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("provider max_attempts must be positive")
 
         now_value = utcnow()
         now = now_value.isoformat()
@@ -579,7 +583,7 @@ class AppStore:
             )
             row = connection.execute(
                 """
-                SELECT status, response_json, lease_until
+                SELECT status, response_json, lease_until, attempt_count
                 FROM provider_calls WHERE request_key = ?
                 """,
                 (request_key,),
@@ -590,7 +594,10 @@ class AppStore:
             stale_running = status == "running" and (
                 row["lease_until"] is None or str(row["lease_until"]) < now
             )
-            if status in {"reserved", "failed_retryable"} or stale_running:
+            attempts_available = max_attempts is None or int(row["attempt_count"]) < max_attempts
+            if attempts_available and (
+                status in {"reserved", "failed_retryable"} or stale_running
+            ):
                 cursor = connection.execute(
                     """
                     UPDATE provider_calls
@@ -681,7 +688,7 @@ class AppStore:
         response: Mapping[str, object],
         *,
         owner_id: str,
-    ) -> None:
+    ) -> bool:
         parameters: list[object] = [
             json.dumps(response, separators=(",", ":"), sort_keys=True),
             utcnow().isoformat(),
@@ -689,7 +696,7 @@ class AppStore:
             owner_id,
         ]
         with self._connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE provider_calls SET status = 'completed', response_json = ?,
                     error_json = NULL, lease_owner = NULL, lease_until = NULL,
@@ -699,6 +706,7 @@ class AppStore:
                 parameters,
             )
             connection.commit()
+        return cursor.rowcount == 1
 
     def fail_provider_call(
         self, request_key: str, message: str, *, owner_id: str

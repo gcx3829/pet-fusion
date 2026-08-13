@@ -203,6 +203,8 @@ def test_fake_critic_is_reproducible_and_uses_asset_references(tmp_path) -> None
             pose="sitting",
             facing="left",
         ),
+        canonical_prompt="test prompt",
+        canonical_prompt_hash="f" * 64,
     )
     service = DeterministicCriticService()
     first = service.evaluate(request)

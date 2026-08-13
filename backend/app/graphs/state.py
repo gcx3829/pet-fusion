@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
+
+from app.graphs.reducers import CriticEvaluationBucket, merge_evaluations_by_candidate
 
 
 class SearchState(TypedDict, total=False):
@@ -38,6 +40,10 @@ class SearchState(TypedDict, total=False):
     validated_planner_result: dict[str, object] | None
     planner_round_index: int | None
     planner_fallback_attempts: int
+    critic_proxy_inputs: dict[str, dict[str, object]]
+    evaluations_by_candidate: Annotated[
+        CriticEvaluationBucket, merge_evaluations_by_candidate
+    ]
     evaluations: list[dict[str, object]]
     round_history: list[dict[str, object]]
     round_index: int

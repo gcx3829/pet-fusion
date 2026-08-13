@@ -186,12 +186,13 @@ ruff → mypy → pytest → TypeScript typecheck → Vitest → Vite production
 
 ```dotenv
 FAKE_GENERATOR=1
+FAKE_CRITIC=1
 RUN_INLINE=0
 OPENAI_API_KEY=
 OPENAI_BASE_URL=
 ```
 
-默认 `FAKE_GENERATOR=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把它设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图和 1～5 张参考图；`OPENAI_BASE_URL` 可选，用于你自行管理的 OpenAI-compatible endpoint，留空即官方端点。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64 或完整 prompt。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
+默认 `FAKE_GENERATOR=1` 且 `FAKE_CRITIC=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把 `FAKE_GENERATOR` 设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图和 1～5 张参考图；把 `FAKE_CRITIC` 设为 `0` 后，会通过官方 Responses API 的 Pydantic Structured Outputs 独立评价每张 protected candidate。两个开关可分别启用。`OPENAI_BASE_URL` 可选，用于你自行管理的 OpenAI-compatible endpoint，留空即官方端点。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64、endpoint 原文或完整 prompt。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
 
 ## 已实现的 API 流程
 
@@ -209,8 +210,8 @@ OPENAI_BASE_URL=
 ## 当前限制
 
 - 默认仍使用确定性的 mock generator；`FAKE_GENERATOR=0` 时真实 GPT Image 2 provider 路径已接通，但尚未用项目外的真实凭据完成联调；
-- Critic 和 Feedback Planner 目前仍是离线确定性实现；确定性 Ranker、跨轮 Global Winner、停止策略和人工 review/resume 已接通，真实多模态 Critic/Planner 仍待实现；
-- composite floor、全分辨率回贴、ICC/EXIF 导出和 Local Fix 尚未实现；
+- Critic 默认仍为离线确定性实现；`FAKE_CRITIC=0` 的 GPT-5.6 Terra Responses Structured Outputs 路径已接通但尚未用真实凭据联调。Feedback Planner 仍是离线实现；
+- composite floor、全分辨率回贴和 ICC/EXIF groundwork 已实现；生产导出 API、JPEG 导出和 Local Fix 尚未实现；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
 - 前端已覆盖首个工作流，不是通用节点编辑器，也暂不包含完整人工 interrupt/resume 与导出体验。
 

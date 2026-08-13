@@ -40,6 +40,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("FAKE_GENERATOR", "PET_FUSION_FAKE_GENERATOR"),
     )
+    fake_critic: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("FAKE_CRITIC", "PET_FUSION_FAKE_CRITIC"),
+    )
     openai_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("OPENAI_API_KEY", "PET_FUSION_OPENAI_API_KEY"),
@@ -62,6 +66,13 @@ class Settings(BaseSettings):
     openai_image_size: Literal["auto", "1024x1024", "1536x1024", "1024x1536"] = Field(
         default="auto",
         validation_alias=AliasChoices("OPENAI_IMAGE_SIZE", "PET_FUSION_OPENAI_IMAGE_SIZE"),
+    )
+    openai_critic_model: str = Field(
+        default="gpt-5.6-terra",
+        min_length=1,
+        validation_alias=AliasChoices(
+            "OPENAI_CRITIC_MODEL", "PET_FUSION_OPENAI_CRITIC_MODEL"
+        ),
     )
     cors_origins: str = Field(
         default="http://localhost:5173",

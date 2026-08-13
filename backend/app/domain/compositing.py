@@ -153,4 +153,3 @@ class CompositeResult(BaseModel):
     mask: Mask
     crop_mapping: CropMapping | None = None
     outside_mask_exact: bool
-

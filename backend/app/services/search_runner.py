@@ -13,6 +13,7 @@ from app.domain.directives import DirectivePolicy, stable_directives_hash
 from app.domain.errors import SourceManifestMismatchError
 from app.domain.searches import SearchStatus
 from app.graphs.checkpointer import sqlite_checkpointer
+from app.graphs.reducers import empty_evaluation_bucket
 from app.graphs.search_graph import (
     SEARCH_STATE_SCHEMA_VERSION,
     SearchGraphServices,
@@ -21,9 +22,10 @@ from app.graphs.search_graph import (
 from app.graphs.state import SearchState, assert_checkpoint_safe
 from app.persistence.app_store import AppStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
-from app.services.critic_service import DeterministicCriticService
+from app.services.critic_service import CriticProvider
 from app.services.generator_service import GeneratorService
 from app.services.planner_service import FeedbackPlannerService, normalize_active_directives
+from app.services.proxy_builder import CriticProxyBuilder
 from app.services.stop_policy import DeterministicStopPolicy
 
 
@@ -34,7 +36,8 @@ class SearchRunner:
         app_store: AppStore,
         generator_service: GeneratorService,
         checkpoint_path: Path,
-        critic_service: DeterministicCriticService | None = None,
+        critic_service: CriticProvider | None = None,
+        critic_proxy_builder: CriticProxyBuilder | None = None,
         candidate_ranker: DeterministicCandidateRanker | None = None,
         stop_policy: DeterministicStopPolicy | None = None,
         planner_service: FeedbackPlannerService | None = None,
@@ -43,6 +46,7 @@ class SearchRunner:
         self.generator_service = generator_service
         self.checkpoint_path = checkpoint_path.resolve()
         self.critic_service = critic_service
+        self.critic_proxy_builder = critic_proxy_builder
         self.candidate_ranker = candidate_ranker
         self.stop_policy = stop_policy
         self.planner_service = planner_service
@@ -55,9 +59,7 @@ class SearchRunner:
                 "Search and project immutable source manifest hashes differ"
             )
         planner_policy = (
-            self.planner_service.policy
-            if self.planner_service is not None
-            else DirectivePolicy()
+            self.planner_service.policy if self.planner_service is not None else DirectivePolicy()
         )
         active_directives = normalize_active_directives(
             search.active_directives,
@@ -110,9 +112,10 @@ class SearchRunner:
             "validated_planner_result": None,
             "planner_round_index": None,
             "planner_fallback_attempts": planner_fallback_attempts,
+            "critic_proxy_inputs": {},
+            "evaluations_by_candidate": empty_evaluation_bucket(search.round_index),
             "evaluations": [
-                item.model_dump(mode="json")
-                for item in self.app_store.list_evaluations(search_id)
+                item.model_dump(mode="json") for item in self.app_store.list_evaluations(search_id)
             ],
             "round_history": search.round_history,
             "round_index": search.round_index,
@@ -192,9 +195,7 @@ class SearchRunner:
                     return
                 return
 
-    async def _watch_lease(
-        self, *, search_id: str, worker_id: str, lease_seconds: int
-    ) -> None:
+    async def _watch_lease(self, *, search_id: str, worker_id: str, lease_seconds: int) -> None:
         interval = max(0.5, lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
@@ -216,9 +217,7 @@ class SearchRunner:
                 lease_seconds=lease_seconds,
             )
         )
-        done, _ = await asyncio.wait(
-            {run_task, lease_task}, return_when=asyncio.FIRST_COMPLETED
-        )
+        done, _ = await asyncio.wait({run_task, lease_task}, return_when=asyncio.FIRST_COMPLETED)
         if run_task in done:
             lease_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -232,14 +231,10 @@ class SearchRunner:
             raise RuntimeError("Search worker lease ended unexpectedly")
         raise RuntimeError("Search runner stopped without a completed task")
 
-    async def run_search(
-        self, search_id: str, *, worker_id: str | None = None
-    ) -> SearchState:
+    async def run_search(self, search_id: str, *, worker_id: str | None = None) -> SearchState:
         search = self.app_store.get_search(search_id)
         resolved_worker_id = (
-            worker_id
-            if worker_id is not None
-            else self.app_store.get_search_lease_owner(search_id)
+            worker_id if worker_id is not None else self.app_store.get_search_lease_owner(search_id)
         )
         if search.status.is_stream_terminal:
             return self.initial_state(search_id) | {
@@ -257,6 +252,7 @@ class SearchRunner:
                         generator_service=self.generator_service,
                         lease_owner=resolved_worker_id,
                         critic_service=self.critic_service,
+                        critic_proxy_builder=self.critic_proxy_builder,
                         candidate_ranker=self.candidate_ranker,
                         stop_policy=self.stop_policy,
                         planner_service=self.planner_service,
@@ -270,28 +266,25 @@ class SearchRunner:
                         checkpoint_state.get("source_manifest")
                     )
                     if (
-                        checkpoint_state.get("schema_version")
-                        != SEARCH_STATE_SCHEMA_VERSION
+                        checkpoint_state.get("schema_version") != SEARCH_STATE_SCHEMA_VERSION
                         or checkpoint_state.get("search_id") != search.search_id
                         or checkpoint_state.get("project_id") != search.project_id
                         or checkpoint_state.get("source_manifest_hash")
                         != search.source_manifest_hash
                         or checkpoint_manifest != project.source_manifest
-                        or project.source_manifest.manifest_hash
-                        != search.source_manifest_hash
+                        or project.source_manifest.manifest_hash != search.source_manifest_hash
                     ):
                         raise SourceManifestMismatchError(
                             "Checkpoint conflicts with immutable search source state"
                         )
                 if snapshot.values:
                     checkpoint_state = cast(SearchState, snapshot.values)
-                    if (
-                        search.status is SearchStatus.RUNNING
-                        and checkpoint_state.get("round_index") not in {
-                            search.round_index,
-                            search.round_index - 1,
-                        }
-                    ):
+                    if search.status is SearchStatus.RUNNING and checkpoint_state.get(
+                        "round_index"
+                    ) not in {
+                        search.round_index,
+                        search.round_index - 1,
+                    }:
                         raise SourceManifestMismatchError(
                             "Checkpoint round does not match the running search"
                         )
@@ -314,9 +307,7 @@ class SearchRunner:
                     await graph.ainvoke(graph_input, config=config, version="v1"),
                 )
                 assert_checkpoint_safe(result)
-                self._reconcile_completed_state(
-                    search_id, result, worker_id=resolved_worker_id
-                )
+                self._reconcile_completed_state(search_id, result, worker_id=resolved_worker_id)
                 return result
         except Exception as exc:
             error: dict[str, object] = {

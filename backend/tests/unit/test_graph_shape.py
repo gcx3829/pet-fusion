@@ -21,7 +21,8 @@ def test_explicit_state_graph_has_evaluation_round_nodes(settings: Settings) -> 
         "compile_canonical_prompt",
         "prepare_round",
         "generate_candidates",
-        "evaluate_round",
+        "critic_subgraph",
+        "rank_round",
         "prepare_feedback_planner",
         "feedback_planner",
         "apply_feedback_plan",
@@ -30,6 +31,11 @@ def test_explicit_state_graph_has_evaluation_round_nodes(settings: Settings) -> 
     }
     xray_nodes = set(graph.compile().get_graph(xray=True).nodes)
     assert {
+        "critic_subgraph:build_critic_inputs",
+        "critic_subgraph:fan_out_candidate_evaluations",
+        "critic_subgraph:evaluate_candidate",
+        "critic_subgraph:collect_evaluations",
+        "critic_subgraph:normalize_critic_findings",
         "feedback_planner:select_actionable_blocking_issues",
         "feedback_planner:plan_directives",
         "feedback_planner:validate_directive_budget",

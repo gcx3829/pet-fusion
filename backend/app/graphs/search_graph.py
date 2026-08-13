@@ -17,14 +17,17 @@ from app.domain.evaluations import (
     CandidateEvaluation,
     GlobalWinner,
     RoundRanking,
+    StopAction,
     StopDecision,
 )
 from app.domain.searches import PlacementIntent, SearchStatus
+from app.graphs.critic_subgraph import build_critic_subgraph
 from app.graphs.feedback_planner_subgraph import build_feedback_planner_subgraph
+from app.graphs.reducers import empty_evaluation_bucket
 from app.graphs.state import SearchState, assert_checkpoint_safe
 from app.persistence.app_store import AppStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
-from app.services.critic_service import CriticInput, DeterministicCriticService
+from app.services.critic_service import CriticProvider, DeterministicCriticService
 from app.services.generator_service import (
     GenerationRequest,
     GeneratorService,
@@ -38,9 +41,10 @@ from app.services.prompt_compiler import (
     compile_canonical_prompt,
     compile_generation_prompt,
 )
+from app.services.proxy_builder import CriticProxyBuilder
 from app.services.stop_policy import DeterministicStopPolicy
 
-SEARCH_STATE_SCHEMA_VERSION = "search-state/v2"
+SEARCH_STATE_SCHEMA_VERSION = "search-state/v3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +52,8 @@ class SearchGraphServices:
     app_store: AppStore
     generator_service: GeneratorService
     lease_owner: str | None = None
-    critic_service: DeterministicCriticService | None = None
+    critic_service: CriticProvider | None = None
+    critic_proxy_builder: CriticProxyBuilder | None = None
     candidate_ranker: DeterministicCandidateRanker | None = None
     stop_policy: DeterministicStopPolicy | None = None
     planner_service: FeedbackPlannerService | None = None
@@ -81,6 +86,19 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     # Compiled with ``checkpointer=None`` so this subgraph inherits the parent
     # search checkpointer when it is installed as a graph node below.
     planner_graph = build_feedback_planner_subgraph(planner_service).compile()
+    critic_proxy_builder = services.critic_proxy_builder or CriticProxyBuilder(
+        asset_store=services.generator_service.asset_store,
+        app_store=services.app_store,
+    )
+    # The nested subgraph inherits the parent durable checkpoint when the root
+    # graph is compiled with one; it writes only asset references and structured
+    # keyed evaluations into the parent state.
+    critic_graph = build_critic_subgraph(
+        app_store=services.app_store,
+        proxy_builder=critic_proxy_builder,
+        critic_provider=critic_service,
+        candidate_ranker=candidate_ranker,
+    ).compile()
 
     def fenced_update(
         search_id: str,
@@ -199,31 +217,32 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         assert_checkpoint_safe(candidate_payloads, path="current_candidates")
         return {"current_candidates": candidate_payloads}
 
-    async def evaluate_round(state: SearchState) -> dict[str, object]:
+    async def rank_round(state: SearchState) -> dict[str, object]:
         current = services.app_store.get_search(state["search_id"])
         if current.status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
             return {"status": current.status.value, "current_candidates": []}
-        manifest = SourceManifest.model_validate(state["source_manifest"])
-        placement = PlacementIntent.model_validate(state["placement"])
         candidates = [CandidateRecord.model_validate(item) for item in state["current_candidates"]]
-        evaluations: list[CandidateEvaluation] = []
-        scores: dict[str, float] = {}
-        for candidate in candidates:
-            evaluation = critic_service.evaluate(
-                CriticInput(candidate=candidate, source_manifest=manifest, placement=placement)
+        evaluations = [
+            CandidateEvaluation.model_validate(item) for item in state.get("evaluations", [])
+        ]
+        evaluation_by_candidate = {
+            evaluation.candidate_id: evaluation for evaluation in evaluations
+        }
+        missing = [
+            candidate.candidate_id
+            for candidate in candidates
+            if candidate.candidate_id not in evaluation_by_candidate
+        ]
+        if missing:
+            raise RuntimeError(
+                "Critic subgraph did not produce evaluations for current candidates: "
+                + ", ".join(missing)
             )
-            scored = candidate_ranker.score(evaluation)
-            services.app_store.save_evaluation(
-                state["search_id"], evaluation, score=scored.score
-            )
-            evaluations.append(evaluation)
-            scores[candidate.candidate_id] = scored.score
-            services.app_store.emit_event(
-                search_id=state["search_id"],
-                event_key=f"round:{state['round_index']}:evaluation:{candidate.candidate_id}",
-                event_type="round.evaluation.ready",
-                payload={"evaluation": _public_evaluation(evaluation, scored.score)},
-            )
+        evaluations = [evaluation_by_candidate[candidate.candidate_id] for candidate in candidates]
+        scores = {
+            evaluation.candidate_id: candidate_ranker.score(evaluation).score
+            for evaluation in evaluations
+        }
 
         ranking: RoundRanking = candidate_ranker.rank_round(
             evaluations, round_index=state["round_index"]
@@ -247,12 +266,32 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         )
         global_winner = candidate_ranker.update_global_winner(current_global, ranking)
         persisted_evaluations = services.app_store.list_evaluations(state["search_id"])
-        decision: StopDecision = stop_policy.decide(
-            ranking=ranking,
-            evaluations=persisted_evaluations,
-            global_winner=global_winner,
-            max_rounds=state["max_rounds"],
-        )
+        unavailable = [
+            evaluation
+            for evaluation in evaluations
+            if "evaluation_unavailable" in evaluation.hard_constraint_failures
+        ]
+        available_count = len(evaluations) - len(unavailable)
+        if unavailable and available_count < 2:
+            decision = StopDecision(
+                action=StopAction.HUMAN_REVIEW,
+                reason="critic_evaluations_insufficient",
+                round_index=state["round_index"],
+                global_winner_id=(global_winner.candidate_id if global_winner else None),
+                global_winner_score=(global_winner.score if global_winner else None),
+                eligible=False,
+                detail=(
+                    "Fewer than two candidates have usable Critic evaluations after "
+                    "bounded provider retries."
+                ),
+            )
+        else:
+            decision = stop_policy.decide(
+                ranking=ranking,
+                evaluations=persisted_evaluations,
+                global_winner=global_winner,
+                max_rounds=state["max_rounds"],
+            )
         history_entry: dict[str, object] = {
             "round_index": state["round_index"],
             "candidate_ids": [candidate.candidate_id for candidate in candidates],
@@ -275,9 +314,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             ),
             history_entry,
         ]
-        round_history.sort(
-            key=lambda item: cast(int, item.get("round_index", 0))
-        )
+        round_history.sort(key=lambda item: cast(int, item.get("round_index", 0)))
         transition_events: list[tuple[str, str, dict[str, object]]] = [
             (
                 f"round:{state['round_index']}:winner",
@@ -295,15 +332,11 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
                     "round_index": state["round_index"],
                     "action": decision.action.value,
                     "reason": decision.reason,
-                    "global_winner_id": (
-                        global_winner.candidate_id if global_winner else None
-                    ),
+                    "global_winner_id": (global_winner.candidate_id if global_winner else None),
                 },
             ),
         ]
-        if current.global_winner_id != (
-            global_winner.candidate_id if global_winner else None
-        ):
+        if current.global_winner_id != (global_winner.candidate_id if global_winner else None):
             transition_events.insert(
                 1,
                 (
@@ -311,9 +344,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
                     "search.global_winner.updated",
                     {
                         "round_index": state["round_index"],
-                        "global_winner_id": (
-                            global_winner.candidate_id if global_winner else None
-                        ),
+                        "global_winner_id": (global_winner.candidate_id if global_winner else None),
                         "global_winner_score": global_winner.score if global_winner else None,
                     },
                 ),
@@ -421,9 +452,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             return {"status": stopped.value}
         planner_payload = state.get("planner_result")
         planner_input_payload = state.get("planner_input")
-        if not isinstance(planner_payload, dict) or not isinstance(
-            planner_input_payload, dict
-        ):
+        if not isinstance(planner_payload, dict) or not isinstance(planner_input_payload, dict):
             return {
                 "stop_action": PlannerAction.HUMAN_REVIEW.value,
                 "stop_reason": "planner_result_unavailable",
@@ -440,11 +469,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         current = services.app_store.get_search(state["search_id"])
         round_history = [dict(item) for item in current.round_history]
         history_entry = next(
-            (
-                item
-                for item in round_history
-                if item.get("round_index") == state["round_index"]
-            ),
+            (item for item in round_history if item.get("round_index") == state["round_index"]),
             None,
         )
         if history_entry is None:
@@ -552,6 +577,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         return {
             "round_index": next_round,
             "current_candidates": [],
+            "evaluations_by_candidate": empty_evaluation_bucket(next_round),
             "evaluations": [],
             "round_winner_id": None,
             "stop_action": None,
@@ -594,9 +620,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             "blocking_issues": [
                 issue_id
                 for evaluation in state.get("evaluations", [])
-                for issue_id in cast(
-                    list[object], evaluation.get("hard_constraint_failures", [])
-                )
+                for issue_id in cast(list[object], evaluation.get("hard_constraint_failures", []))
             ],
             "allowed_actions": allowed_actions,
         }
@@ -701,7 +725,8 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     graph.add_node("compile_canonical_prompt", compile_prompt)
     graph.add_node("prepare_round", prepare_round)
     graph.add_node("generate_candidates", generate_candidates)
-    graph.add_node("evaluate_round", evaluate_round)
+    graph.add_node("critic_subgraph", critic_graph)
+    graph.add_node("rank_round", rank_round)
     graph.add_node("prepare_feedback_planner", prepare_feedback_planner)
     graph.add_node("feedback_planner", planner_graph)
     graph.add_node("apply_feedback_plan", apply_feedback_plan)
@@ -711,9 +736,10 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     graph.add_edge("initialize_search", "compile_canonical_prompt")
     graph.add_edge("compile_canonical_prompt", "prepare_round")
     graph.add_edge("prepare_round", "generate_candidates")
-    graph.add_edge("generate_candidates", "evaluate_round")
+    graph.add_edge("generate_candidates", "critic_subgraph")
+    graph.add_edge("critic_subgraph", "rank_round")
     graph.add_conditional_edges(
-        "evaluate_round",
+        "rank_round",
         route_after_evaluate,
         {
             "prepare_feedback_planner": "prepare_feedback_planner",
