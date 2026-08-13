@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 
+from PIL import Image
+
 from app.container import AppContainer
 from app.domain.assets import SourceManifest
 from app.domain.projects import ProjectRecord
@@ -86,6 +88,16 @@ async def test_same_request_key_reuses_outputs_without_second_provider_call(
 
     assert first == second
     assert fake_generator.call_count == 1
+    assert all(candidate.raw_asset != candidate.protected_asset for candidate in first)
+    assert all(candidate.composite is not None for candidate in first)
+    for candidate in first:
+        assert candidate.composite is not None
+        with Image.open(background.filesystem_path) as source, Image.open(
+            candidate.protected_asset.filesystem_path
+        ) as protected, Image.open(candidate.composite.mask.asset.filesystem_path) as mask:
+            assert container.generator_service.composite_floor.outside_mask_is_exact(
+                background=source, protected=protected, mask=mask
+            )
     request_key = container.generator_service.build_request_key(request)
     assert container.app_store.provider_attempt_count(request_key) == 1
 

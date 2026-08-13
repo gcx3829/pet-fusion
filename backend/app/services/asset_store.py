@@ -51,6 +51,12 @@ class AssetStore:
                 opened.load()
                 image = ImageOps.exif_transpose(opened)
                 icc_profile = opened.info.get("icc_profile")
+                exif = image.getexif()
+                # Orientation has already been baked into the normalized pixel grid.
+                # Retaining the original orientation tag would rotate an export again.
+                if 274 in exif:
+                    del exif[274]
+                exif_bytes = exif.tobytes() if len(exif) else None
                 has_alpha = image.mode in {"RGBA", "LA"} or (
                     image.mode == "P" and "transparency" in image.info
                 )
@@ -68,6 +74,8 @@ class AssetStore:
         }
         if isinstance(icc_profile, bytes) and len(icc_profile) <= 4 * 1024 * 1024:
             save_options["icc_profile"] = icc_profile
+        if exif_bytes is not None and len(exif_bytes) <= 4 * 1024 * 1024:
+            save_options["exif"] = exif_bytes
         normalized.save(output, **save_options)
         png_bytes = output.getvalue()
         digest = hashlib.sha256(png_bytes).hexdigest()

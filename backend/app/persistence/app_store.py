@@ -454,6 +454,8 @@ class AppStore:
     def add_candidate(self, search_id: str, candidate: CandidateRecord) -> None:
         self.register_asset(candidate.raw_asset)
         self.register_asset(candidate.protected_asset)
+        if candidate.composite is not None:
+            self.register_asset(candidate.composite.mask.asset)
         with self._connection() as connection:
             connection.execute(
                 """

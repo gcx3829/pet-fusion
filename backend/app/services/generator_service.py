@@ -14,12 +14,14 @@ from uuid import uuid4
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.assets import SourceManifest
+from app.domain.assets import AssetRef, SourceManifest
 from app.domain.candidates import CandidateRecord, CandidateResponse
+from app.domain.compositing import CropMapping, CropPadding, PixelBox
 from app.domain.errors import SourceManifestMismatchError
 from app.domain.searches import PlacementIntent
 from app.persistence.app_store import AppStore
 from app.services.asset_store import AssetStore
+from app.services.image_pipeline import CompositeFloorService
 from app.services.openai_image_client import (
     OpenAIImageEditResult,
     OpenAIImageEditsTransport,
@@ -201,6 +203,7 @@ class GeneratorService:
         model: str = FAKE_IMAGE_MODEL,
         quality: str = "medium",
         size: str | None = None,
+        composite_floor: CompositeFloorService | None = None,
     ) -> None:
         self.provider = provider
         self.asset_store = asset_store
@@ -208,6 +211,33 @@ class GeneratorService:
         self.model = model
         self.quality = quality
         self.size = size
+        self.composite_floor = composite_floor or CompositeFloorService(asset_store)
+
+    @staticmethod
+    def _crop_mapping_for_output(
+        *,
+        source_manifest: SourceManifest,
+        output_asset: AssetRef,
+    ) -> CropMapping | None:
+        """Describe how a provider canvas rebases to the immutable full background.
+
+        GPT Image may produce a canvas independent of the source dimensions. Until
+        crop planning is introduced, the whole immutable background is the stable
+        crop and the provider canvas maps onto it without padding. Full-size output
+        intentionally returns ``None`` to preserve the direct-pixel path.
+        """
+
+        background = source_manifest.background
+        if (output_asset.width, output_asset.height) == (background.width, background.height):
+            return None
+        return CropMapping(
+            full_width=background.width,
+            full_height=background.height,
+            crop_box=PixelBox(x=0, y=0, width=background.width, height=background.height),
+            canvas_width=output_asset.width,
+            canvas_height=output_asset.height,
+            padding=CropPadding(),
+        )
 
     @staticmethod
     def build_request_key(request: GenerationRequest) -> str:
@@ -394,9 +424,27 @@ class GeneratorService:
                     "Image generator returned a different number of candidates than requested"
                 )
             candidates: list[CandidateRecord] = []
+            composite_mask = await asyncio.to_thread(
+                self.composite_floor.create_mask,
+                source_background=request.source_manifest.background,
+                placement=request.placement,
+            )
             for output in sorted(generated, key=lambda item: item.variant_index):
-                asset = await asyncio.to_thread(
+                raw_asset = await asyncio.to_thread(
                     self.asset_store.put_image_bytes, output.png_bytes
+                )
+                crop_mapping = self._crop_mapping_for_output(
+                    source_manifest=request.source_manifest,
+                    output_asset=raw_asset,
+                )
+                composite = await asyncio.to_thread(
+                    self.composite_floor.protect_candidate,
+                    source_manifest_hash=request.source_manifest.manifest_hash,
+                    source_background=request.source_manifest.background,
+                    raw_candidate=raw_asset,
+                    placement=request.placement,
+                    crop_mapping=crop_mapping,
+                    mask=composite_mask,
                 )
                 candidate_seed = (
                     f"{request.search_id}:{request.round_index}:{output.variant_index}:"
@@ -409,8 +457,11 @@ class GeneratorService:
                     candidate_id=candidate_id,
                     round_index=request.round_index,
                     variant_index=output.variant_index,
-                    raw_asset=asset,
-                    protected_asset=asset,
+                    raw_asset=raw_asset,
+                    protected_asset=composite.protected_asset,
+                    source_manifest_hash=request.source_manifest.manifest_hash,
+                    crop_mapping=crop_mapping,
+                    composite=composite,
                     prompt_hash=request.prompt_hash,
                     request_key=request_key,
                     generation_depth=0,
