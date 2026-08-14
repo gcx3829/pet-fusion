@@ -180,7 +180,7 @@ def test_resume_cancel_is_idempotent_and_other_actions_are_explicitly_unavailabl
 
     unavailable = client.post(
         f"/api/v1/searches/{created['search_id']}/resume",
-        json={"action": "continue_one_round"},
+        json={"action": "continue_one_round", "reviewed_round_index": 0},
     )
     assert unavailable.status_code == 409
     assert unavailable.json()["error"]["code"] == "CONFLICT"

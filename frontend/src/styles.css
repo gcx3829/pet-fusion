@@ -1940,6 +1940,28 @@ summary:focus-visible,
   line-height: 1.45;
 }
 
+.prompt-human-feedback {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border-left: 2px solid var(--cyan);
+  background: rgba(141, 174, 176, 0.06);
+}
+
+.prompt-human-feedback span {
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 0.48rem;
+  letter-spacing: 0.08em;
+}
+
+.prompt-human-feedback p {
+  margin: 0;
+  color: var(--paper-muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
 .prompt-block {
   border: 1px solid var(--line);
   background: rgba(23, 20, 17, 0.42);
@@ -2084,6 +2106,48 @@ summary:focus-visible,
 .review-copy ul { padding-left: 18px; margin: 8px 0 0; color: var(--paper-muted); font-size: 0.68rem; }
 .review-copy .review-error { margin-top: 8px; color: var(--danger); }
 
+.review-feedback {
+  display: grid;
+  grid-column: 2 / -1;
+  gap: 6px;
+  padding: 12px 13px;
+  border: 1px solid rgba(141, 174, 176, 0.24);
+  background: rgba(18, 26, 27, 0.72);
+}
+
+.review-feedback label {
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.review-feedback textarea {
+  min-height: 58px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--line-bright);
+  color: var(--paper);
+  background: rgba(255, 255, 255, 0.03);
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.review-feedback textarea:focus {
+  outline: 1px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.review-feedback small {
+  color: var(--paper-faint);
+  font-size: 0.6rem;
+  line-height: 1.4;
+}
+
+.review-feedback + .review-actions { grid-column: 2 / -1; }
+
 .review-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2209,6 +2273,8 @@ summary:focus-visible,
   .timeline-footer span { border-right: 0; border-bottom: 1px solid var(--line); }
   .timeline-footer span:last-child { border-bottom: 0; }
   .human-review { grid-template-columns: 42px 1fr; padding: 17px 15px; gap: 12px; }
+  .review-feedback,
+  .review-feedback + .review-actions { grid-column: 1 / -1; }
   .review-icon { width: 42px; height: 42px; }
   .review-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .review-actions .primary-button { grid-column: 1 / -1; justify-content: center; }

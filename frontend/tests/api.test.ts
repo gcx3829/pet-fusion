@@ -205,6 +205,35 @@ describe("API client", () => {
     });
   });
 
+  it("继续搜索时提交所选候选与人工反馈，并立即返回新的状态", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      search_id: "search-01",
+      status: "queued",
+      round_index: 1,
+      candidates: [],
+      prompt_history: [],
+      active_directives: [],
+    }));
+
+    const snapshot = await resumeSearch(
+      "search-01",
+      "continue_one_round",
+      "candidate-raw",
+      "猫再小一点，保留当前眼睛和毛色。",
+      0,
+    );
+
+    expect(snapshot.status).toBe("queued");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      action: "continue_one_round",
+      updated_user_intent: null,
+      selected_candidate_id: "candidate-raw",
+      human_feedback: "猫再小一点，保留当前眼睛和毛色。",
+      reviewed_round_index: 0,
+    });
+  });
+
   it("显示 FastAPI detail，而不是吞掉服务端错误", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ detail: "参考图数量必须为 1 到 5" }, 422));
     await expect(startSearch("project", placement, "意图", {

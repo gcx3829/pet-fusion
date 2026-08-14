@@ -22,6 +22,7 @@ const connectionLabels: Record<EventConnectionState, string> = {
 const eventLabels: Record<string, { title: string; tone: string }> = {
   "search.queued": { title: "搜索任务进入队列", tone: "neutral" },
   "search.started": { title: "搜索图开始执行", tone: "active" },
+  "round.queued": { title: "人工反馈已提交，下一轮排队", tone: "active" },
   "round.generation.started": { title: "从不可变原片生成候选", tone: "active" },
   "round.candidate.ready": { title: "一张候选已显影", tone: "candidate" },
   "round.critic.started": { title: "独立摄影审片开始", tone: "active" },

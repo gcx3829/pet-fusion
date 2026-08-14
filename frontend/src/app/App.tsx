@@ -75,6 +75,7 @@ export function App() {
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [search, setSearch] = useState<SearchRecord | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
+  const [eventRevision, setEventRevision] = useState(0);
   const searchIdempotencyKey = useRef<string | null>(null);
   const backgroundUrl = useObjectUrl(draft.background);
 
@@ -82,7 +83,7 @@ export function App() {
     if (!search) return;
     void queryClient.invalidateQueries({ queryKey: ["search", search.search_id] });
   }, [queryClient, search]);
-  const { events, connectionState } = useSearchEvents(search, invalidateSearch);
+  const { events, connectionState } = useSearchEvents(search, invalidateSearch, eventRevision);
 
   const searchQuery = useQuery({
     queryKey: ["search", search?.search_id],
@@ -121,11 +122,37 @@ export function App() {
   });
 
   const resumeMutation = useMutation({
-    mutationFn: ({ action, candidateId }: { action: ResumeAction; candidateId?: string }) => {
+    mutationFn: ({
+      action,
+      candidateId,
+      humanFeedback,
+    }: {
+      action: ResumeAction;
+      candidateId?: string;
+      humanFeedback?: string;
+    }) => {
       if (!search) throw new Error("没有可恢复的搜索");
-      return resumeSearch(search.search_id, action, candidateId);
+      return resumeSearch(
+        search.search_id,
+        action,
+        candidateId,
+        humanFeedback,
+        snapshot?.round_index,
+      );
     },
-    onSuccess: () => invalidateSearch(),
+    onSuccess: (nextSnapshot) => {
+      setSelectedCandidateId(null);
+      queryClient.setQueryData(["search", nextSnapshot.search_id], nextSnapshot);
+      setEventRevision((revision) => revision + 1);
+      setSearch((current) => current
+        ? {
+            ...current,
+            status: nextSnapshot.status,
+            events_url: nextSnapshot.events_url ?? current.events_url,
+          }
+        : current);
+      void queryClient.invalidateQueries({ queryKey: ["search", nextSnapshot.search_id] });
+    },
   });
 
   const snapshot = searchQuery.data;
@@ -147,6 +174,7 @@ export function App() {
     setProject(null);
     setSearch(null);
     setSelectedCandidateId(null);
+    setEventRevision(0);
     searchIdempotencyKey.current = null;
     submitMutation.reset();
     resumeMutation.reset();
@@ -248,7 +276,11 @@ export function App() {
                 isPending={resumeMutation.isPending}
                 error={errorMessage(resumeMutation.error)}
                 selectedCandidateId={selectedCandidateId}
-                onAction={(action, candidateId) => resumeMutation.mutate({ action, candidateId })}
+                onAction={(action, candidateId, humanFeedback) => resumeMutation.mutate({
+                  action,
+                  candidateId,
+                  humanFeedback,
+                })}
               />
             )}
 

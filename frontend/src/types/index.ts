@@ -164,6 +164,8 @@ export interface PromptHistoryEntry {
   canonical_template_version?: string;
   active_directives: ActiveDirective[];
   active_directives_hash?: string;
+  human_feedback?: string;
+  human_selected_candidate_id?: string;
   tuned: boolean;
 }
 

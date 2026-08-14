@@ -12,10 +12,36 @@ from app.domain.searches import (
     CreateSearchResponse,
     ResumeSearchRequest,
     SearchResponse,
+    SearchRunRecord,
     SearchStatus,
 )
 
 router = APIRouter(tags=["searches"])
+
+
+def _normalized_feedback(request: ResumeSearchRequest) -> str | None:
+    for value in (request.human_feedback, request.updated_user_intent):
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
+def _is_applied_manual_resume(
+    search: SearchRunRecord,
+    *,
+    reviewed_round_index: int,
+    selected_candidate_id: str | None,
+    human_feedback: str | None,
+) -> bool:
+    if search.round_index <= reviewed_round_index:
+        return False
+    return any(
+        item.get("round_index") == reviewed_round_index
+        and item.get("human_resume_applied") is True
+        and item.get("human_selected_candidate_id") == selected_candidate_id
+        and item.get("human_feedback") == human_feedback
+        for item in search.round_history
+    )
 
 
 def _search_response(container: object, search_id: str) -> SearchResponse:
@@ -142,11 +168,45 @@ async def resume_search(
         return _search_response(container, search_id)
 
     if request.action == "continue_one_round":
+        reviewed_round_index = request.reviewed_round_index
+        if reviewed_round_index is None:  # guarded by request validation
+            raise ConflictError("Continue requires reviewed_round_index")
+        human_feedback = _normalized_feedback(request)
+        if _is_applied_manual_resume(
+            search,
+            reviewed_round_index=reviewed_round_index,
+            selected_candidate_id=request.selected_candidate_id,
+            human_feedback=human_feedback,
+        ):
+            return _search_response(container, search_id)
         if search.status is not SearchStatus.WAITING_FOR_HUMAN:
             raise ConflictError(
                 f"Continue is only valid from waiting_for_human, got {search.status.value}"
             )
-        if not container.app_store.queue_next_round(search_id):
+        if search.round_index != reviewed_round_index:
+            raise ConflictError(
+                f"Reviewed round {reviewed_round_index} is stale; current round is "
+                f"{search.round_index}"
+            )
+        if request.selected_candidate_id is not None and not any(
+            candidate.candidate_id == request.selected_candidate_id
+            for candidate in search.candidates
+        ):
+            raise ConflictError("Selected candidate is not a candidate in this search")
+        if not container.app_store.queue_next_round(
+            search_id,
+            reviewed_round_index=reviewed_round_index,
+            selected_candidate_id=request.selected_candidate_id,
+            human_feedback=human_feedback,
+        ):
+            refreshed = container.app_store.get_search(search_id)
+            if _is_applied_manual_resume(
+                refreshed,
+                reviewed_round_index=reviewed_round_index,
+                selected_candidate_id=request.selected_candidate_id,
+                human_feedback=human_feedback,
+            ):
+                return _search_response(container, search_id)
             raise ConflictError("Search has reached its maximum configured rounds")
         if container.settings.run_inline:
             background_tasks.add_task(_run_inline_search, container, search_id)

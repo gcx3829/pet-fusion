@@ -1431,23 +1431,99 @@ class AppStore:
             connection.commit()
         return cursor.rowcount == 1
 
-    def queue_next_round(self, search_id: str) -> bool:
-        """Atomically move one human-reviewed search to its next round."""
+    def queue_next_round(
+        self,
+        search_id: str,
+        *,
+        reviewed_round_index: int,
+        selected_candidate_id: str | None = None,
+        human_feedback: str | None = None,
+    ) -> bool:
+        """Atomically queue a human-reviewed round with its review context."""
 
         now = utcnow().isoformat()
+        feedback = human_feedback.strip() if human_feedback else None
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT round_index, round_history_json
+                FROM search_runs
+                WHERE search_id = ? AND status = 'waiting_for_human'
+                  AND round_index = ?
+                  AND round_index + 1 < max_rounds
+                """,
+                (search_id, reviewed_round_index),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+
+            round_history = json.loads(row["round_history_json"] or "[]")
+            if not isinstance(round_history, list):
+                round_history = []
+            current_round = int(row["round_index"])
+            current_entry = next(
+                (
+                    item
+                    for item in round_history
+                    if isinstance(item, dict) and item.get("round_index") == current_round
+                ),
+                None,
+            )
+            if current_entry is None:
+                current_entry = {"round_index": current_round}
+                round_history.append(current_entry)
+            current_entry["human_resume_applied"] = True
+            current_entry["human_selected_candidate_id"] = selected_candidate_id
+            current_entry["human_feedback"] = feedback
+            round_history.sort(
+                key=lambda item: int(item.get("round_index", 0))
+                if isinstance(item, dict)
+                else 0
+            )
             cursor = connection.execute(
                 """
                 UPDATE search_runs
                 SET status = 'queued', round_index = round_index + 1,
                     round_winner_id = NULL, stop_reason = NULL,
                     state_summary_json = NULL, interrupt_payload_json = NULL,
-                    lease_owner = NULL, lease_until = NULL, updated_at = ?
+                    lease_owner = NULL, lease_until = NULL,
+                    round_history_json = ?, updated_at = ?
                 WHERE search_id = ? AND status = 'waiting_for_human'
+                  AND round_index = ?
                   AND round_index + 1 < max_rounds
                 """,
-                (now, search_id),
+                (
+                    json.dumps(round_history, separators=(",", ":")),
+                    now,
+                    search_id,
+                    reviewed_round_index,
+                ),
             )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO search_events(
+                        search_id, event_key, type, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        search_id,
+                        f"search:round:{current_round + 1}:queued",
+                        "round.queued",
+                        json.dumps(
+                            {
+                                "round_index": current_round + 1,
+                                "selected_candidate_id": selected_candidate_id,
+                                "has_human_feedback": bool(feedback),
+                            },
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now,
+                    ),
+                )
             connection.commit()
         return cursor.rowcount == 1
 

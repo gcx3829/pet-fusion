@@ -6,35 +6,40 @@ from collections.abc import Sequence
 from app.domain.directives import PlannerDirective
 from app.domain.searches import PlacementIntent
 
-CANONICAL_TEMPLATE_VERSION = "canonical-prompt/v1"
+CANONICAL_TEMPLATE_VERSION = "canonical-prompt/v2"
 ROUND_DIRECTIVES_TEMPLATE_VERSION = "round-directives/v1"
 
 
 def compile_canonical_prompt(
-    *, placement: PlacementIntent, user_intent: str, reference_count: int
+    *,
+    placement: PlacementIntent,
+    user_intent: str,
+    reference_count: int,
 ) -> tuple[str, str]:
     contact = placement.contact_surface or "the visible local surface"
-    prompt = "\n".join(
-        [
-            f"TEMPLATE VERSION: {CANONICAL_TEMPLATE_VERSION}",
-            "ROLE OF INPUTS",
-            "- Image 1 is the immutable original travel photograph and base scene.",
-            f"- Images 2..{reference_count + 1} show the same cat.",
-            "TASK",
-            "Add that exact cat in the intended placement area indicated by the "
-            "provided guidance mask.",
-            f"Pose: {placement.pose}. Facing: {placement.facing}. Contact: {contact}.",
-            f"User intent: {user_intent}",
-            "Preserve identity, perspective, local light, optics, physical contact, "
-            "and all unrelated scene content.",
-            "Return an authentic photograph from the same moment and camera system.",
-        ]
-    )
+    lines = [
+        f"TEMPLATE VERSION: {CANONICAL_TEMPLATE_VERSION}",
+        "ROLE OF INPUTS",
+        "- Image 1 is the immutable original travel photograph and base scene.",
+        f"- Images 2..{reference_count + 1} show the same cat.",
+        "TASK",
+        "Add that exact cat in the intended placement area indicated by the "
+        "provided guidance mask.",
+        f"Pose: {placement.pose}. Facing: {placement.facing}. Contact: {contact}.",
+        f"User intent: {user_intent}",
+        "Preserve identity, perspective, local light, optics, physical contact, "
+        "and all unrelated scene content.",
+        "Return an authentic photograph from the same moment and camera system.",
+    ]
+    prompt = "\n".join(lines)
     return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def compile_generation_prompt(
-    *, canonical_prompt: str, active_directives: Sequence[PlannerDirective]
+    *,
+    canonical_prompt: str,
+    active_directives: Sequence[PlannerDirective],
+    human_feedback: str | None = None,
 ) -> tuple[str, str]:
     """Compose one round prompt without mutating the canonical user intent.
 
@@ -43,17 +48,26 @@ def compile_generation_prompt(
     independently recorded through ``active_directives_hash``.
     """
 
-    if not active_directives:
-        prompt = canonical_prompt
-    else:
-        lines = [
-            canonical_prompt,
-            "",
-            f"ROUND-SPECIFIC CORRECTIONS ({ROUND_DIRECTIVES_TEMPLATE_VERSION})",
-            *(
-                f"{index}. {directive.instruction}"
-                for index, directive in enumerate(active_directives, start=1)
-            ),
-        ]
-        prompt = "\n".join(lines)
+    lines = [canonical_prompt]
+    if active_directives:
+        lines.extend(
+            [
+                "",
+                f"ROUND-SPECIFIC CORRECTIONS ({ROUND_DIRECTIVES_TEMPLATE_VERSION})",
+                *(
+                    f"{index}. {directive.instruction}"
+                    for index, directive in enumerate(active_directives, start=1)
+                ),
+            ]
+        )
+    feedback = human_feedback.strip() if human_feedback else ""
+    if feedback:
+        lines.extend(
+            [
+                "",
+                "PHOTOGRAPHER FEEDBACK FOR THIS ROUND",
+                f"- {feedback}",
+            ]
+        )
+    prompt = "\n".join(lines)
     return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()

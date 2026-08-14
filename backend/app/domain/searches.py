@@ -72,6 +72,8 @@ class PromptHistoryEntry(BaseModel):
     canonical_template_version: str = Field(min_length=1, max_length=120)
     active_directives: list[dict[str, object]] = Field(default_factory=list)
     active_directives_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    human_feedback: str | None = Field(default=None, max_length=2000)
+    human_selected_candidate_id: str | None = Field(default=None, max_length=120)
     tuned: bool = False
 
 
@@ -229,4 +231,12 @@ class ResumeSearchRequest(BaseModel):
         "cancel",
     ]
     updated_user_intent: str | None = Field(default=None, min_length=1, max_length=2000)
+    human_feedback: str | None = Field(default=None, min_length=1, max_length=2000)
     selected_candidate_id: str | None = Field(default=None, min_length=1, max_length=120)
+    reviewed_round_index: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def require_reviewed_round_for_continue(self) -> ResumeSearchRequest:
+        if self.action == "continue_one_round" and self.reviewed_round_index is None:
+            raise ValueError("reviewed_round_index is required for continue_one_round")
+        return self

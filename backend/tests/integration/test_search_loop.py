@@ -167,7 +167,7 @@ def test_continue_rebases_to_original_manifest_and_keeps_historical_global_winne
 
     continued = client.post(
         f"/api/v1/searches/{search_id}/resume",
-        json={"action": "continue_one_round"},
+        json={"action": "continue_one_round", "reviewed_round_index": 0},
     )
     assert continued.status_code == 200, continued.text
     second = client.get(f"/api/v1/searches/{search_id}").json()
@@ -195,6 +195,62 @@ def test_continue_rebases_to_original_manifest_and_keeps_historical_global_winne
     assert events.count("event: round.evaluation.ready") == 4
     assert "event: search.global_winner.updated" in events
     assert "data:image" not in events.lower()
+
+
+def test_manual_resume_carries_selected_candidate_and_feedback_into_next_prompt(
+    client: TestClient, project_payload, search_payload, fake_generator
+) -> None:
+    project = _project(client, project_payload)
+    created = client.post(
+        f"/api/v1/projects/{project['project_id']}/searches",
+        json={**search_payload, "max_rounds": 3, "candidate_count": 2},
+        headers={"Idempotency-Key": "manual-feedback-search"},
+    ).json()
+    first = client.get(f"/api/v1/searches/{created['search_id']}").json()
+    selected_id = first["global_winner_id"]
+    assert selected_id is not None
+
+    resumed = client.post(
+        f"/api/v1/searches/{created['search_id']}/resume",
+        json={
+            "action": "continue_one_round",
+            "reviewed_round_index": 0,
+            "selected_candidate_id": selected_id,
+            "human_feedback": "猫再小一点, 保留当前眼睛和毛色, 接触面更自然。",
+        },
+    )
+    assert resumed.status_code == 200, resumed.text
+    replayed = client.post(
+        f"/api/v1/searches/{created['search_id']}/resume",
+        json={
+            "action": "continue_one_round",
+            "reviewed_round_index": 0,
+            "selected_candidate_id": selected_id,
+            "human_feedback": "猫再小一点, 保留当前眼睛和毛色, 接触面更自然。",
+        },
+    )
+    assert replayed.status_code == 200, replayed.text
+    second = client.get(f"/api/v1/searches/{created['search_id']}").json()
+    assert second["status"] == "waiting_for_human"
+    assert second["round_index"] == 1
+    assert second["prompt_history"][1]["human_feedback"] == (
+        "猫再小一点, 保留当前眼睛和毛色, 接触面更自然。"
+    )
+    assert second["prompt_history"][1]["human_selected_candidate_id"] == selected_id
+    assert second["prompt_history"][1]["tuned"] is True
+    assert second["prompt_history"][1]["canonical_prompt"] == (
+        first["prompt_history"][0]["canonical_prompt"]
+    )
+    assert second["prompt_history"][1]["canonical_prompt_hash"] == (
+        first["prompt_history"][0]["canonical_prompt_hash"]
+    )
+    assert "PHOTOGRAPHER FEEDBACK FOR THIS ROUND" in (
+        second["prompt_history"][1]["generation_prompt"]
+    )
+    assert "猫再小一点" in second["prompt_history"][1]["generation_prompt"]
+    assert fake_generator.call_count == 2
+    events = client.get(created["events_url"]).text
+    assert "event: round.queued" in events
 
 
 def test_accept_and_cancel_resume_actions_are_idempotent(
@@ -323,7 +379,7 @@ def test_review_each_round_waits_after_planning_and_resume_uses_directive(
 
         continued = client.post(
             f"/api/v1/searches/{created['search_id']}/resume",
-            json={"action": "continue_one_round"},
+            json={"action": "continue_one_round", "reviewed_round_index": 0},
         )
         assert continued.status_code == 200, continued.text
         second = client.get(f"/api/v1/searches/{created['search_id']}").json()

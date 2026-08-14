@@ -13,6 +13,7 @@ export type EventConnectionState =
 const EVENT_TYPES = [
   "search.queued",
   "search.started",
+  "round.queued",
   "round.generation.started",
   "round.candidate.ready",
   "round.critic.started",
@@ -58,6 +59,7 @@ function eventFromMessage(message: MessageEvent<string>, forcedType?: string): S
 export function useSearchEvents(
   search: SearchRecord | null,
   onSearchEvent?: OnSearchEvent,
+  reconnectKey = 0,
 ): {
   events: SearchEvent[];
   connectionState: EventConnectionState;
@@ -65,16 +67,25 @@ export function useSearchEvents(
   const [events, setEvents] = useState<SearchEvent[]>([]);
   const [connectionState, setConnectionState] = useState<EventConnectionState>("idle");
   const onEventRef = useRef(onSearchEvent);
+  const activeSearchIdRef = useRef<string | null>(null);
+  const lastEventIdRef = useRef<number>(0);
 
   useEffect(() => {
     onEventRef.current = onSearchEvent;
   }, [onSearchEvent]);
 
   useEffect(() => {
-    setEvents([]);
     if (!search) {
+      activeSearchIdRef.current = null;
+      lastEventIdRef.current = 0;
+      setEvents([]);
       setConnectionState("idle");
       return;
+    }
+    if (activeSearchIdRef.current !== search.search_id) {
+      activeSearchIdRef.current = search.search_id;
+      lastEventIdRef.current = 0;
+      setEvents([]);
     }
     if (typeof EventSource === "undefined") {
       setConnectionState("unavailable");
@@ -82,13 +93,21 @@ export function useSearchEvents(
     }
 
     setConnectionState("connecting");
-    const source = new EventSource(searchEventsUrl(search));
+    const baseUrl = searchEventsUrl(search);
+    const after = lastEventIdRef.current > 0
+      ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}after=${lastEventIdRef.current}`
+      : baseUrl;
+    const source = new EventSource(after);
     const seenIds = new Set<string>();
 
     const receive = (message: MessageEvent<string>, forcedType?: string) => {
       const event = eventFromMessage(message, forcedType);
       if (!event || seenIds.has(event.id)) return;
       seenIds.add(event.id);
+      const numericId = Number(event.id);
+      if (Number.isSafeInteger(numericId) && numericId > lastEventIdRef.current) {
+        lastEventIdRef.current = numericId;
+      }
       setEvents((current) => [...current.slice(-79), event]);
       onEventRef.current?.(event);
       if (STREAM_END_EVENTS.has(event.type)) {
@@ -111,7 +130,7 @@ export function useSearchEvents(
       namedListeners.forEach(([type, listener]) => source.removeEventListener(type, listener));
       source.close();
     };
-  }, [search?.search_id, search?.events_url]);
+  }, [search?.search_id, search?.events_url, search?.status, reconnectKey]);
 
   return { events, connectionState };
 }

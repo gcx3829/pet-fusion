@@ -164,6 +164,11 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         generation_prompt, generation_prompt_hash = compile_generation_prompt(
             canonical_prompt=canonical_prompt,
             active_directives=active_directives,
+            human_feedback=(
+                state.get("human_feedback")
+                if isinstance(state.get("human_feedback"), str)
+                else None
+            ),
         )
         prompt_history = [
             dict(item)
@@ -182,7 +187,17 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
                     item.model_dump(mode="json") for item in active_directives
                 ],
                 active_directives_hash=stable_directives_hash(active_directives),
-                tuned=bool(active_directives),
+                human_feedback=(
+                    state.get("human_feedback")
+                    if isinstance(state.get("human_feedback"), str)
+                    else None
+                ),
+                human_selected_candidate_id=(
+                    state.get("human_selected_candidate_id")
+                    if isinstance(state.get("human_selected_candidate_id"), str)
+                    else None
+                ),
+                tuned=bool(active_directives or state.get("human_feedback")),
             ).model_dump(mode="json")
         )
         prompt_history.sort(key=lambda item: cast(int, item.get("round_index", 0)))
@@ -625,6 +640,8 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             "planner_input": None,
             "selected_evaluation": None,
             "selected_blocking_issues": [],
+            "human_feedback": None,
+            "human_selected_candidate_id": None,
             "planner_proposal": None,
             "validated_planner_result": None,
             "planner_result": None,

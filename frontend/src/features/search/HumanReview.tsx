@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Icon } from "../../components/Icon";
 import type { ResumeAction, SearchSnapshot } from "../../types";
 
@@ -6,7 +7,7 @@ interface HumanReviewProps {
   isPending: boolean;
   error?: string | null;
   selectedCandidateId?: string | null;
-  onAction: (action: ResumeAction, candidateId?: string) => void;
+  onAction: (action: ResumeAction, candidateId?: string, humanFeedback?: string) => void;
 }
 
 export function HumanReview({
@@ -16,14 +17,19 @@ export function HumanReview({
   selectedCandidateId,
   onAction,
 }: HumanReviewProps) {
+  const [humanFeedback, setHumanFeedback] = useState("");
+  useEffect(() => {
+    setHumanFeedback("");
+  }, [snapshot.round_index]);
   if (snapshot.status !== "waiting_for_human") return null;
   const canAccept = Boolean(snapshot.global_winner_id);
   const allowed = new Set(snapshot.interrupt_payload?.allowed_actions ?? []);
   const canCancel = allowed.has("cancel");
   const canContinue = allowed.has("continue_one_round");
   const canAcceptAction = canAccept && allowed.has("accept_global_winner");
-  const selectedCandidate = selectedCandidateId
-    ? snapshot.candidates.find((candidate) => candidate.candidate_id === selectedCandidateId)
+  const effectiveSelectedCandidateId = selectedCandidateId ?? snapshot.global_winner_id ?? null;
+  const selectedCandidate = effectiveSelectedCandidateId
+    ? snapshot.candidates.find((candidate) => candidate.candidate_id === effectiveSelectedCandidateId)
     : undefined;
   const canAcceptSelected = Boolean(
     selectedCandidate
@@ -49,9 +55,34 @@ export function HumanReview({
         )}
         {error && <p className="review-error" role="alert">{error}</p>}
       </div>
+      {canContinue && (
+        <div className="review-feedback">
+          <label htmlFor="human-feedback">人工反馈（可选，用于下一轮 prompt）</label>
+          <textarea
+            id="human-feedback"
+            value={humanFeedback}
+            maxLength={2000}
+            onChange={(event) => setHumanFeedback(event.target.value)}
+            placeholder="例如：猫再小一些，身体要更贴合窗台；保留当前眼睛和毛色。"
+            disabled={isPending}
+          />
+          <small>
+            选中的 Raw 候选会作为本轮审片锚点；下一轮仍从原始照片和参考图重新生成，不会把候选当底图。
+          </small>
+        </div>
+      )}
       <div className="review-actions">
         {canCancel && <button className="secondary-button" type="button" disabled={isPending} onClick={() => onAction("cancel")}>取消搜索</button>}
-        {canContinue && <button className="secondary-button" type="button" disabled={isPending} onClick={() => onAction("continue_one_round")}>再搜索一轮</button>}
+        {canContinue && <button
+          className="secondary-button"
+          type="button"
+          disabled={isPending}
+          onClick={() => onAction(
+            "continue_one_round",
+            effectiveSelectedCandidateId ?? undefined,
+            humanFeedback.trim() || undefined,
+          )}
+        >再生成一轮</button>}
         {canAcceptAction && (
           <button className="primary-button" type="button" disabled={isPending} onClick={() => onAction("accept_global_winner")}>
             <Icon name="check" /> 接受历史最佳 Raw

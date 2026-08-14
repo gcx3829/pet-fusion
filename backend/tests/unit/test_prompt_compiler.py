@@ -27,6 +27,15 @@ def test_round_directives_do_not_mutate_canonical_prompt_lineage() -> None:
     assert "y=0.5000" not in canonical_prompt
     assert "width=0.2000" not in canonical_prompt
     assert "height=0.3000" not in canonical_prompt
+    feedback_prompt, feedback_hash = compile_generation_prompt(
+        canonical_prompt=canonical_prompt,
+        active_directives=(),
+        human_feedback="Make the cat slightly smaller and keep the current eye color.",
+    )
+    assert "PHOTOGRAPHER FEEDBACK FOR THIS ROUND" in feedback_prompt
+    assert "Make the cat slightly smaller" in feedback_prompt
+    assert feedback_hash != canonical_hash
+    assert feedback_prompt.startswith(canonical_prompt)
     no_directives_prompt, no_directives_hash = compile_generation_prompt(
         canonical_prompt=canonical_prompt,
         active_directives=(),

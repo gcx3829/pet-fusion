@@ -32,6 +32,7 @@ function PromptBlock({
 }
 
 export function PromptHistory({ history }: PromptHistoryProps) {
+  const latestRoundIndex = history.length ? history[history.length - 1].round_index : null;
   return (
     <section className="panel prompt-history-panel" aria-labelledby="prompt-history-heading">
       <div className="panel-heading prompt-history-heading">
@@ -75,11 +76,17 @@ export function PromptHistory({ history }: PromptHistoryProps) {
                     ))}
                   </div>
                 )}
+                {!!entry.human_feedback && (
+                  <div className="prompt-human-feedback" aria-label="本轮人工反馈">
+                    <span>PHOTOGRAPHER FEEDBACK</span>
+                    <p>{entry.human_feedback}</p>
+                  </div>
+                )}
                 <PromptBlock
                   label="发送给图像模型的 generation prompt"
                   prompt={entry.generation_prompt}
                   hash={entry.generation_prompt_hash}
-                  open={entry.round_index === 0}
+                  open={entry.round_index === latestRoundIndex}
                 />
                 <PromptBlock
                   label="稳定基准 canonical prompt"

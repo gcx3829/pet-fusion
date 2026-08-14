@@ -293,7 +293,9 @@ function normalizePromptHistory(value: unknown): PromptHistoryEntry[] {
       canonical_template_version: stringValue(entry.canonical_template_version) || undefined,
       active_directives: directives,
       active_directives_hash: stringValue(entry.active_directives_hash) || undefined,
-      tuned: entry.tuned === true || directives.length > 0,
+      human_feedback: stringValue(entry.human_feedback) || undefined,
+      human_selected_candidate_id: stringValue(entry.human_selected_candidate_id) || undefined,
+      tuned: entry.tuned === true || directives.length > 0 || Boolean(entry.human_feedback),
     }];
   }).sort((left, right) => left.round_index - right.round_index);
 }
@@ -361,8 +363,7 @@ export async function startSearch(
   };
 }
 
-export async function getSearch(searchId: string): Promise<SearchSnapshot> {
-  const object = asObject(await request(`/searches/${encodeURIComponent(searchId)}`));
+function normalizeSearchSnapshot(object: JsonObject, searchId: string): SearchSnapshot {
   const globalWinnerValue = isObject(object.global_winner) ? object.global_winner : undefined;
   const globalWinnerId = stringValue(
     object.global_winner_id,
@@ -429,23 +430,37 @@ export async function getSearch(searchId: string): Promise<SearchSnapshot> {
   };
 }
 
+export async function getSearch(searchId: string): Promise<SearchSnapshot> {
+  const object = asObject(await request(`/searches/${encodeURIComponent(searchId)}`));
+  return normalizeSearchSnapshot(object, searchId);
+}
+
 export async function resumeSearch(
   searchId: string,
   action: ResumeAction,
   selectedCandidateId?: string | null,
-): Promise<void> {
-  const body: Record<string, string | null> = {
+  humanFeedback?: string | null,
+  reviewedRoundIndex?: number | null,
+): Promise<SearchSnapshot> {
+  const body: Record<string, string | number | null> = {
     action,
     updated_user_intent: null,
   };
-  if (action === "accept_candidate" && selectedCandidateId) {
+  if ((action === "accept_candidate" || action === "continue_one_round") && selectedCandidateId) {
     body.selected_candidate_id = selectedCandidateId;
   }
-  await request(`/searches/${encodeURIComponent(searchId)}/resume`, {
+  if (action === "continue_one_round" && humanFeedback?.trim()) {
+    body.human_feedback = humanFeedback.trim();
+  }
+  if (action === "continue_one_round" && typeof reviewedRoundIndex === "number") {
+    body.reviewed_round_index = reviewedRoundIndex;
+  }
+  const object = asObject(await request(`/searches/${encodeURIComponent(searchId)}/resume`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }));
+  return normalizeSearchSnapshot(object, searchId);
 }
 
 export function searchEventsUrl(search: SearchRecord): string {

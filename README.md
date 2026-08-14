@@ -214,7 +214,7 @@ OPENAI_BASE_URL=
 3. `GET /searches/{search_id}`：读取搜索状态和候选；
 4. `GET /searches/{search_id}/events`：通过 SSE 接收持久化时间线；
 5. `GET /assets/{asset_id}`：读取后端校验过的图片资产。
-6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、接受指定候选（`action=accept_candidate` + `selected_candidate_id`）、继续一轮或取消；`GET /searches/{search_id}` 会返回每张候选的 Critic 维度、问题和 ranker 分数，以及 `prompt_history`（首轮初始 prompt、每轮调优 prompt、指令与哈希）；
+6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、接受指定候选（`action=accept_candidate` + `selected_candidate_id`）、继续一轮或取消；继续时提交 `reviewed_round_index`，并可附带 `selected_candidate_id` 与 `human_feedback`，相同轮次和相同内容的网络重试会幂等返回当前状态；`GET /searches/{search_id}` 会返回每张候选的 Critic 维度、问题和 ranker 分数，以及 `prompt_history`（首轮初始 prompt、每轮调优 prompt、指令与哈希）；
 7. `POST /searches/{search_id}/export`：只导出已接受搜索的历史 Global Winner，可选 PNG/JPEG、JPEG 质量与 ICC/EXIF 复制策略；
 8. `GET /searches/{search_id}/exports/{export_key}`：读取幂等、内容寻址的导出记录。
 9. `POST /searches/{search_id}/local-fixes`：对已接受搜索的历史候选（省略 `candidate_id` 时为 Global Winner）执行一次 isolated Local Fix；mask 可为内部 PNG asset ID 或结构化 full-resolution box，结果包含可重放 `request_key`；

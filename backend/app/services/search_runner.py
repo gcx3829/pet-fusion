@@ -73,7 +73,17 @@ class SearchRunner:
         ]
         attempted_categories: list[str] = []
         planner_fallback_attempts = 0
+        human_feedback: str | None = None
+        human_selected_candidate_id: str | None = None
         for item in search.round_history:
+            item_round = item.get("round_index")
+            if item_round == search.round_index - 1:
+                raw_feedback = item.get("human_feedback")
+                if isinstance(raw_feedback, str) and raw_feedback.strip():
+                    human_feedback = raw_feedback.strip()
+                raw_selected = item.get("human_selected_candidate_id")
+                if isinstance(raw_selected, str) and raw_selected:
+                    human_selected_candidate_id = raw_selected
             raw_categories = item.get("planned_categories")
             if isinstance(raw_categories, list):
                 attempted_categories.extend(
@@ -121,6 +131,8 @@ class SearchRunner:
             "prompt_history": [
                 item.model_dump(mode="json") for item in search.prompt_history
             ],
+            "human_feedback": human_feedback,
+            "human_selected_candidate_id": human_selected_candidate_id,
             "round_index": search.round_index,
             "max_rounds": search.max_rounds,
             "review_each_round": search.review_each_round,
