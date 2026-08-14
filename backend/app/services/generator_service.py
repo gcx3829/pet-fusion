@@ -30,6 +30,9 @@ from app.services.openai_image_client import (
 
 FAKE_IMAGE_MODEL = "fake-gpt-image-2"
 GENERATOR_SCHEMA_VERSION = "generator-request/v1"
+GENERATOR_INPUT_PROXY_VERSION = "generator-input-proxy/v1"
+GENERATOR_BACKGROUND_MAX_SIDE = 2048
+GENERATOR_REFERENCE_MAX_SIDE = 1536
 PROVIDER_RESULT_POLL_SECONDS = 0.02
 PROVIDER_RESULT_WAIT_SECONDS = 30.0
 PROVIDER_CALL_LEASE_SECONDS = 5
@@ -112,7 +115,7 @@ class DeterministicFakeImageGenerator:
 
 
 class OpenAIImageGenerator:
-    """GPT Image 2 edit provider restricted to immutable PNG source assets."""
+    """GPT Image 2 edit provider using bounded, in-memory PNG source proxies."""
 
     def __init__(self, *, transport: OpenAIImageEditsTransport) -> None:
         self.transport = transport
@@ -123,7 +126,21 @@ class OpenAIImageGenerator:
         inputs: list[OpenAIImageInput] = []
         for index, asset in enumerate(assets):
             with Image.open(asset.filesystem_path) as opened:
-                normalized = opened.convert("RGBA" if "A" in opened.getbands() else "RGB")
+                has_alpha = "A" in opened.getbands() or "transparency" in opened.info
+                normalized = opened.convert("RGBA" if has_alpha else "RGB")
+                max_side = (
+                    GENERATOR_BACKGROUND_MAX_SIDE
+                    if index == 0
+                    else GENERATOR_REFERENCE_MAX_SIDE
+                )
+                longest_side = max(normalized.size)
+                if longest_side > max_side:
+                    scale = max_side / longest_side
+                    target_size = (
+                        max(1, round(normalized.width * scale)),
+                        max(1, round(normalized.height * scale)),
+                    )
+                    normalized = normalized.resize(target_size, Image.Resampling.LANCZOS)
                 output = io.BytesIO()
                 normalized.save(output, format="PNG", compress_level=9, optimize=False)
             png_bytes = output.getvalue()
@@ -252,6 +269,9 @@ class GeneratorService:
             "prompt_hash": request.prompt_hash,
             "quality": request.quality,
             "size": request.size,
+            "input_proxy_version": GENERATOR_INPUT_PROXY_VERSION,
+            "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
+            "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
@@ -342,6 +362,11 @@ class GeneratorService:
             "model": request.model,
             "quality": request.quality,
             "size": request.size,
+            "input_proxy": {
+                "schema_version": GENERATOR_INPUT_PROXY_VERSION,
+                "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
+                "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+            },
         }
         owner_id = f"provider_{uuid4().hex}"
         claimed, status, completed_response = await asyncio.to_thread(

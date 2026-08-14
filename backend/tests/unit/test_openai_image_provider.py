@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
+import sqlite3
 import threading
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 from openai import AsyncOpenAI
+from PIL import Image
 
 from app.config import Settings
 from app.container import AppContainer
@@ -20,6 +23,9 @@ from app.domain.projects import ProjectRecord
 from app.domain.searches import CreateSearchRequest, PlacementIntent
 from app.persistence.app_store import utcnow
 from app.services.generator_service import (
+    GENERATOR_BACKGROUND_MAX_SIDE,
+    GENERATOR_INPUT_PROXY_VERSION,
+    GENERATOR_REFERENCE_MAX_SIDE,
     DeterministicFakeImageGenerator,
     GenerationRequest,
     GeneratorService,
@@ -254,6 +260,17 @@ async def test_openai_generator_uses_ordered_png_sources_and_persists_safe_audit
         "request_id": "req_offline_transport",
         "usage": {"input_tokens": 11, "output_tokens": 22, "total_tokens": 33},
     }
+    with sqlite3.connect(settings.resolved_app_db_path) as connection:
+        (request_json,) = connection.execute(
+            "SELECT request_json FROM provider_calls WHERE request_key = ?",
+            (request_key,),
+        ).fetchone()
+    audited_request = json.loads(request_json)
+    assert audited_request["input_proxy"] == {
+        "schema_version": GENERATOR_INPUT_PROXY_VERSION,
+        "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
+        "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+    }
 
 
 async def test_openai_generator_normalizes_jpeg_and_webp_sources_in_memory(tmp_path) -> None:
@@ -308,6 +325,143 @@ async def test_openai_generator_normalizes_jpeg_and_webp_sources_in_memory(tmp_p
     assert isinstance(inputs, tuple)
     assert [item.filename.split("-", 2)[1] for item in inputs] == ["background", "reference"]
     assert all(item.png_bytes.startswith(b"\x89PNG\r\n\x1a\n") for item in inputs)
+
+
+async def test_openai_generator_bounds_source_proxies_without_mutating_sources(tmp_path) -> None:
+    background_path = Path(tmp_path) / "large-background.png"
+    reference_path = Path(tmp_path) / "large-reference.png"
+    background_bytes = make_image_bytes((10, 20, 30), size=(2304, 1152))
+    reference_output = io.BytesIO()
+    Image.new("RGBA", (1800, 1200), (80, 90, 100, 77)).save(
+        reference_output, format="PNG"
+    )
+    reference_bytes = reference_output.getvalue()
+    background_path.write_bytes(background_bytes)
+    reference_path.write_bytes(reference_bytes)
+    manifest = SourceManifest.create(
+        background=AssetRef(
+            asset_id="ast_large_background",
+            path=str(background_path),
+            sha256=hashlib.sha256(background_bytes).hexdigest(),
+            width=2304,
+            height=1152,
+        ),
+        cat_references=[
+            AssetRef(
+                asset_id="ast_large_reference",
+                path=str(reference_path),
+                sha256=hashlib.sha256(reference_bytes).hexdigest(),
+                width=1800,
+                height=1200,
+            )
+        ],
+    )
+    request = GenerationRequest(
+        search_id="search_bounded_sources",
+        source_manifest=manifest,
+        placement=PlacementIntent(
+            x=0.1,
+            y=0.1,
+            width=0.2,
+            height=0.2,
+            pose="sitting",
+            facing="left",
+        ),
+        prompt="Use bounded immutable inputs.",
+        prompt_hash=hashlib.sha256(b"bounded-sources").hexdigest(),
+        round_index=0,
+        candidate_count=1,
+        model="gpt-image-2-2026-04-21",
+        quality="medium",
+        size="1024x1024",
+    )
+    transport = RecordingImageEditsTransport((make_image_bytes((1, 2, 3)),))
+
+    await OpenAIImageGenerator(transport=transport).generate_round(request)
+
+    inputs = transport.calls[0]["images"]
+    assert isinstance(inputs, tuple)
+    proxy_sizes: list[tuple[int, int]] = []
+    proxy_modes: list[str] = []
+    reference_alpha_extrema: tuple[int, int] | None = None
+    for item in inputs:
+        with Image.open(io.BytesIO(item.png_bytes)) as proxy:
+            assert proxy.format == "PNG"
+            proxy_sizes.append(proxy.size)
+            proxy_modes.append(proxy.mode)
+            if proxy.mode == "RGBA":
+                reference_alpha_extrema = proxy.getchannel("A").getextrema()
+    assert proxy_sizes == [
+        (GENERATOR_BACKGROUND_MAX_SIDE, 1024),
+        (GENERATOR_REFERENCE_MAX_SIDE, 1024),
+    ]
+    assert proxy_modes == ["RGB", "RGBA"]
+    assert reference_alpha_extrema == (77, 77)
+    assert max(proxy_sizes[1]) == GENERATOR_REFERENCE_MAX_SIDE
+    assert background_path.read_bytes() == background_bytes
+    assert reference_path.read_bytes() == reference_bytes
+
+
+def test_generator_request_key_tracks_input_proxy_contract(settings) -> None:
+    from app.persistence.app_store import AppStore
+    from app.services.asset_store import AssetStore
+
+    app_store = AppStore(settings.resolved_app_db_path)
+    asset_store = AssetStore(settings.asset_dir, max_image_pixels=settings.max_image_pixels)
+    asset_store.initialize()
+    app_store.initialize()
+    background = asset_store.put_image_bytes(make_image_bytes())
+    reference = asset_store.put_image_bytes(make_image_bytes((1, 2, 3)))
+    manifest = SourceManifest.create(background=background, cat_references=[reference])
+    request = GenerationRequest(
+        search_id="search_proxy_key",
+        source_manifest=manifest,
+        placement=PlacementIntent(
+            x=0.1,
+            y=0.1,
+            width=0.2,
+            height=0.2,
+            pose="sitting",
+            facing="left",
+        ),
+        prompt="Stable prompt.",
+        prompt_hash=hashlib.sha256(b"stable-prompt").hexdigest(),
+        round_index=0,
+        candidate_count=1,
+        model="gpt-image-2-2026-04-21",
+        quality="medium",
+        size="1024x1024",
+    )
+    service = GeneratorService(
+        provider=DeterministicFakeImageGenerator(),
+        asset_store=asset_store,
+        app_store=app_store,
+        model=request.model,
+        quality=request.quality,
+        size=request.size,
+    )
+
+    request_key = service.build_request_key(request)
+
+    expected_payload = {
+        "schema_version": "generator-request/v1",
+        "operation": "generate_round",
+        "search_id": request.search_id,
+        "round_index": 0,
+        "candidate_count": 1,
+        "model": request.model,
+        "source_manifest_hash": manifest.manifest_hash,
+        "prompt_hash": request.prompt_hash,
+        "quality": "medium",
+        "size": "1024x1024",
+        "input_proxy_version": GENERATOR_INPUT_PROXY_VERSION,
+        "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
+        "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+    }
+    expected = hashlib.sha256(
+        json.dumps(expected_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert request_key == expected
 
 
 async def test_openai_source_normalization_does_not_block_lease_heartbeat(
