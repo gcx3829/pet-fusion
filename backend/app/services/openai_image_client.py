@@ -10,10 +10,16 @@ from app.domain.errors import ConfigurationError
 
 @dataclass(frozen=True, slots=True)
 class OpenAIImageInput:
-    """One PNG image sent to the Image API, held only for the lifetime of a request."""
+    """One in-memory image sent to the Image API for the lifetime of a request.
+
+    ``png_bytes`` is retained as the field name for compatibility with the first
+    provider adapter.  ``mime_type`` describes the actual payload and allows
+    opaque proxy images to use a much smaller JPEG representation.
+    """
 
     filename: str
     png_bytes: bytes
+    mime_type: str = "image/png"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +91,7 @@ class OfficialOpenAIImageEditsTransport:
         response = await client.images.edit(
             model=model,
             prompt=prompt,
-            image=[(image.filename, image.png_bytes, "image/png") for image in images],
+            image=[(image.filename, image.png_bytes, image.mime_type) for image in images],
             n=n,
             quality=quality,
             size=size,

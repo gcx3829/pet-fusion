@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.assets import AssetRef, SourceManifest
@@ -30,9 +30,11 @@ from app.services.openai_image_client import (
 
 FAKE_IMAGE_MODEL = "fake-gpt-image-2"
 GENERATOR_SCHEMA_VERSION = "generator-request/v1"
-GENERATOR_INPUT_PROXY_VERSION = "generator-input-proxy/v1"
-GENERATOR_BACKGROUND_MAX_SIDE = 2048
-GENERATOR_REFERENCE_MAX_SIDE = 1536
+GENERATOR_INPUT_PROXY_VERSION = "generator-input-proxy/v2"
+GENERATOR_BACKGROUND_MAX_SIDE = 1024
+GENERATOR_REFERENCE_MAX_SIDE = 768
+GENERATOR_OPAQUE_PROXY_FORMAT = "jpeg"
+GENERATOR_OPAQUE_PROXY_QUALITY = 82
 PROVIDER_RESULT_POLL_SECONDS = 0.02
 PROVIDER_RESULT_WAIT_SECONDS = 30.0
 PROVIDER_CALL_LEASE_SECONDS = 5
@@ -115,7 +117,7 @@ class DeterministicFakeImageGenerator:
 
 
 class OpenAIImageGenerator:
-    """GPT Image 2 edit provider using bounded, in-memory PNG source proxies."""
+    """GPT Image 2 edit provider using bounded, in-memory source proxies."""
 
     def __init__(self, *, transport: OpenAIImageEditsTransport) -> None:
         self.transport = transport
@@ -126,8 +128,14 @@ class OpenAIImageGenerator:
         inputs: list[OpenAIImageInput] = []
         for index, asset in enumerate(assets):
             with Image.open(asset.filesystem_path) as opened:
-                has_alpha = "A" in opened.getbands() or "transparency" in opened.info
-                normalized = opened.convert("RGBA" if has_alpha else "RGB")
+                oriented = ImageOps.exif_transpose(opened)
+                declares_alpha = "A" in oriented.getbands() or "transparency" in oriented.info
+                normalized = oriented.convert("RGBA" if declares_alpha else "RGB")
+                has_transparency = declares_alpha and (
+                    normalized.getchannel("A").getextrema() != (255, 255)
+                )
+                if declares_alpha and not has_transparency:
+                    normalized = normalized.convert("RGB")
                 max_side = (
                     GENERATOR_BACKGROUND_MAX_SIDE
                     if index == 0
@@ -142,13 +150,28 @@ class OpenAIImageGenerator:
                     )
                     normalized = normalized.resize(target_size, Image.Resampling.LANCZOS)
                 output = io.BytesIO()
-                normalized.save(output, format="PNG", compress_level=9, optimize=False)
-            png_bytes = output.getvalue()
+                if has_transparency:
+                    normalized.save(output, format="PNG", compress_level=9, optimize=False)
+                    mime_type = "image/png"
+                    suffix = "png"
+                else:
+                    normalized.save(
+                        output,
+                        format="JPEG",
+                        quality=GENERATOR_OPAQUE_PROXY_QUALITY,
+                        optimize=True,
+                        progressive=True,
+                        subsampling=2,
+                    )
+                    mime_type = "image/jpeg"
+                    suffix = "jpg"
+            input_bytes = output.getvalue()
             role = "background" if index == 0 else f"reference-{index}"
             inputs.append(
                 OpenAIImageInput(
-                    filename=f"{index:02d}-{role}-{asset.asset_id}.png",
-                    png_bytes=png_bytes,
+                    filename=f"{index:02d}-{role}-{asset.asset_id}.{suffix}",
+                    png_bytes=input_bytes,
+                    mime_type=mime_type,
                 )
             )
         return tuple(inputs)
@@ -272,6 +295,9 @@ class GeneratorService:
             "input_proxy_version": GENERATOR_INPUT_PROXY_VERSION,
             "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
             "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+            "opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
+            "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
+            "transparent_format": "png",
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
@@ -366,6 +392,9 @@ class GeneratorService:
                 "schema_version": GENERATOR_INPUT_PROXY_VERSION,
                 "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
                 "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+                "opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
+                "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
+                "transparent_format": "png",
             },
         }
         owner_id = f"provider_{uuid4().hex}"

@@ -97,6 +97,7 @@ def test_live_generator_requires_a_nonempty_backend_key(tmp_path) -> None:
 
 async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fields() -> None:
     png_bytes = make_image_bytes((12, 34, 56))
+    jpeg_bytes = make_image_bytes((56, 34, 12), image_format="JPEG")
     captured: dict[str, object] = {}
 
     async def handle_request(request: httpx.Request) -> httpx.Response:
@@ -126,7 +127,9 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
     )
     inputs = (
         OpenAIImageInput(filename="00-background.png", png_bytes=png_bytes),
-        OpenAIImageInput(filename="01-reference.png", png_bytes=png_bytes),
+        OpenAIImageInput(
+            filename="01-reference.jpg", png_bytes=jpeg_bytes, mime_type="image/jpeg"
+        ),
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http_client:
         client = AsyncOpenAI(
@@ -153,13 +156,18 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
     body = captured["body"]
     assert isinstance(body, bytes)
     assert b'name="image[]"; filename="00-background.png"' in body
-    assert b'name="image[]"; filename="01-reference.png"' in body
+    assert b"Content-Type: image/png" in body
+    assert b'name="image[]"; filename="01-reference.jpg"' in body
+    assert b"Content-Type: image/jpeg" in body
+    assert jpeg_bytes in body
     assert b'name="model"' in body and b"gpt-image-2-2026-04-21" in body
     assert b'name="output_format"' in body and b"png" in body
     assert b"input_fidelity" not in body
 
 
-async def test_openai_generator_uses_ordered_png_sources_and_persists_safe_audit(settings) -> None:
+async def test_openai_generator_uses_ordered_source_proxies_and_persists_safe_audit(
+    settings,
+) -> None:
     from app.persistence.app_store import AppStore
     from app.services.asset_store import AssetStore
 
@@ -247,7 +255,12 @@ async def test_openai_generator_uses_ordered_png_sources_and_persists_safe_audit
         "reference",
         "reference",
     ]
-    assert all(item.png_bytes.startswith(b"\x89PNG\r\n\x1a\n") for item in inputs)
+    assert [item.mime_type for item in inputs] == [
+        "image/jpeg",
+        "image/jpeg",
+        "image/jpeg",
+    ]
+    assert all(Image.open(io.BytesIO(item.png_bytes)).format == "JPEG" for item in inputs)
     assert all("candidates" not in item.filename for item in inputs)
     request_key = service.build_request_key(request)
     provider_call = app_store.get_provider_call(request_key)
@@ -270,6 +283,9 @@ async def test_openai_generator_uses_ordered_png_sources_and_persists_safe_audit
         "schema_version": GENERATOR_INPUT_PROXY_VERSION,
         "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
         "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+        "opaque_format": "jpeg",
+        "opaque_quality": 82,
+        "transparent_format": "png",
     }
 
 
@@ -324,7 +340,8 @@ async def test_openai_generator_normalizes_jpeg_and_webp_sources_in_memory(tmp_p
     inputs = transport.calls[0]["images"]
     assert isinstance(inputs, tuple)
     assert [item.filename.split("-", 2)[1] for item in inputs] == ["background", "reference"]
-    assert all(item.png_bytes.startswith(b"\x89PNG\r\n\x1a\n") for item in inputs)
+    assert [item.mime_type for item in inputs] == ["image/jpeg", "image/jpeg"]
+    assert all(Image.open(io.BytesIO(item.png_bytes)).format == "JPEG" for item in inputs)
 
 
 async def test_openai_generator_bounds_source_proxies_without_mutating_sources(tmp_path) -> None:
@@ -386,20 +403,139 @@ async def test_openai_generator_bounds_source_proxies_without_mutating_sources(t
     reference_alpha_extrema: tuple[int, int] | None = None
     for item in inputs:
         with Image.open(io.BytesIO(item.png_bytes)) as proxy:
-            assert proxy.format == "PNG"
+            assert proxy.format == ("PNG" if item.mime_type == "image/png" else "JPEG")
             proxy_sizes.append(proxy.size)
             proxy_modes.append(proxy.mode)
             if proxy.mode == "RGBA":
                 reference_alpha_extrema = proxy.getchannel("A").getextrema()
     assert proxy_sizes == [
-        (GENERATOR_BACKGROUND_MAX_SIDE, 1024),
-        (GENERATOR_REFERENCE_MAX_SIDE, 1024),
+        (GENERATOR_BACKGROUND_MAX_SIDE, 512),
+        (GENERATOR_REFERENCE_MAX_SIDE, 512),
     ]
     assert proxy_modes == ["RGB", "RGBA"]
     assert reference_alpha_extrema == (77, 77)
     assert max(proxy_sizes[1]) == GENERATOR_REFERENCE_MAX_SIDE
+    assert [item.mime_type for item in inputs] == ["image/jpeg", "image/png"]
     assert background_path.read_bytes() == background_bytes
     assert reference_path.read_bytes() == reference_bytes
+
+
+async def test_openai_generator_encodes_fully_opaque_rgba_sources_as_jpeg(tmp_path) -> None:
+    background_path = Path(tmp_path) / "opaque-rgba-background.png"
+    reference_path = Path(tmp_path) / "opaque-rgba-reference.png"
+    background_output = io.BytesIO()
+    reference_output = io.BytesIO()
+    Image.new("RGBA", (96, 64), (10, 20, 30, 255)).save(background_output, format="PNG")
+    Image.new("RGBA", (64, 96), (80, 90, 100, 255)).save(reference_output, format="PNG")
+    background_bytes = background_output.getvalue()
+    reference_bytes = reference_output.getvalue()
+    background_path.write_bytes(background_bytes)
+    reference_path.write_bytes(reference_bytes)
+    manifest = SourceManifest.create(
+        background=AssetRef(
+            asset_id="ast_opaque_rgba_background",
+            path=str(background_path),
+            sha256=hashlib.sha256(background_bytes).hexdigest(),
+            width=96,
+            height=64,
+        ),
+        cat_references=[
+            AssetRef(
+                asset_id="ast_opaque_rgba_reference",
+                path=str(reference_path),
+                sha256=hashlib.sha256(reference_bytes).hexdigest(),
+                width=64,
+                height=96,
+            )
+        ],
+    )
+    request = GenerationRequest(
+        search_id="search_opaque_rgba_sources",
+        source_manifest=manifest,
+        placement=PlacementIntent(
+            x=0.1,
+            y=0.1,
+            width=0.2,
+            height=0.2,
+            pose="sitting",
+            facing="left",
+        ),
+        prompt="Use compact opaque proxies.",
+        prompt_hash=hashlib.sha256(b"opaque-rgba-sources").hexdigest(),
+        round_index=0,
+        candidate_count=1,
+        model="gpt-image-2-2026-04-21",
+        quality="medium",
+        size="1024x1024",
+    )
+    transport = RecordingImageEditsTransport((make_image_bytes((1, 2, 3)),))
+
+    await OpenAIImageGenerator(transport=transport).generate_round(request)
+
+    inputs = transport.calls[0]["images"]
+    assert isinstance(inputs, tuple)
+    assert [item.mime_type for item in inputs] == ["image/jpeg", "image/jpeg"]
+    assert all(item.filename.endswith(".jpg") for item in inputs)
+    assert all(Image.open(io.BytesIO(item.png_bytes)).format == "JPEG" for item in inputs)
+
+
+async def test_openai_generator_applies_exif_orientation_before_encoding(tmp_path) -> None:
+    background_path = Path(tmp_path) / "oriented-background.jpg"
+    reference_path = Path(tmp_path) / "reference.png"
+    background_output = io.BytesIO()
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (24, 48), (10, 20, 30)).save(background_output, format="JPEG", exif=exif)
+    background_bytes = background_output.getvalue()
+    reference_bytes = make_image_bytes((80, 90, 100))
+    background_path.write_bytes(background_bytes)
+    reference_path.write_bytes(reference_bytes)
+    manifest = SourceManifest.create(
+        background=AssetRef(
+            asset_id="ast_oriented_background",
+            path=str(background_path),
+            sha256=hashlib.sha256(background_bytes).hexdigest(),
+            mime_type="image/jpeg",
+            width=48,
+            height=24,
+        ),
+        cat_references=[
+            AssetRef(
+                asset_id="ast_orientation_reference",
+                path=str(reference_path),
+                sha256=hashlib.sha256(reference_bytes).hexdigest(),
+                width=96,
+                height=64,
+            )
+        ],
+    )
+    request = GenerationRequest(
+        search_id="search_oriented_source",
+        source_manifest=manifest,
+        placement=PlacementIntent(
+            x=0.1,
+            y=0.1,
+            width=0.2,
+            height=0.2,
+            pose="sitting",
+            facing="left",
+        ),
+        prompt="Respect the normalized source orientation.",
+        prompt_hash=hashlib.sha256(b"oriented-source").hexdigest(),
+        round_index=0,
+        candidate_count=1,
+        model="gpt-image-2-2026-04-21",
+        quality="medium",
+        size="1024x1024",
+    )
+    transport = RecordingImageEditsTransport((make_image_bytes((1, 2, 3)),))
+
+    await OpenAIImageGenerator(transport=transport).generate_round(request)
+
+    inputs = transport.calls[0]["images"]
+    assert isinstance(inputs, tuple)
+    with Image.open(io.BytesIO(inputs[0].png_bytes)) as proxy:
+        assert proxy.size == (48, 24)
 
 
 def test_generator_request_key_tracks_input_proxy_contract(settings) -> None:
@@ -457,6 +593,9 @@ def test_generator_request_key_tracks_input_proxy_contract(settings) -> None:
         "input_proxy_version": GENERATOR_INPUT_PROXY_VERSION,
         "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
         "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+        "opaque_format": "jpeg",
+        "opaque_quality": 82,
+        "transparent_format": "png",
     }
     expected = hashlib.sha256(
         json.dumps(expected_payload, sort_keys=True, separators=(",", ":")).encode()
