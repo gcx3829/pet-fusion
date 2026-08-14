@@ -7,7 +7,7 @@ import math
 from typing import Literal
 
 from PIL import Image, ImageDraw
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.assets import AssetRef, SourceManifest
 from app.domain.candidates import CandidateRecord
@@ -31,7 +31,27 @@ class CriticProxyBundle(BaseModel):
     background_proxy: AssetRef
     placement_overlay_proxy: AssetRef
     reference_proxies: tuple[AssetRef, ...] = Field(min_length=1, max_length=3)
-    protected_candidate_proxy: AssetRef
+    # Raw is the only candidate image used by Search/Critic/user review.  The
+    # protected field remains optional so checkpoints written by the previous
+    # protected-first implementation can still be read.
+    raw_candidate_proxy: AssetRef
+    protected_candidate_proxy: AssetRef | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def hydrate_legacy_proxy(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "raw_candidate_proxy" not in payload and "protected_candidate_proxy" in payload:
+            payload["raw_candidate_proxy"] = payload["protected_candidate_proxy"]
+        return payload
+
+    @property
+    def candidate_proxy(self) -> AssetRef:
+        """The image Critic must see; legacy protected proxies are never preferred."""
+
+        return self.raw_candidate_proxy
 
     @property
     def is_checkpoint_safe(self) -> bool:
@@ -45,7 +65,7 @@ class CriticProxyBuilder:
 
     These derivatives are content-addressed assets. Replaying a graph node therefore
     returns the same references and does not mutate immutable source assets or the
-    candidate's raw/protected lineage.
+    candidate's raw lineage.
     """
 
     def __init__(
@@ -122,11 +142,7 @@ class CriticProxyBuilder:
         candidate: CandidateRecord,
         placement: PlacementIntent,
     ) -> CriticProxyBundle:
-        """Create the fixed-proxy view for one protected candidate.
-
-        Critic inputs deliberately refer to ``protected_asset``.  The raw generator
-        output is never handed to a Critic or used as a later search input.
-        """
+        """Create the fixed-proxy view for the raw candidate under review."""
 
         source_manifest.assert_integrity()
         if candidate.source_manifest_hash != source_manifest.manifest_hash:
@@ -136,7 +152,7 @@ class CriticProxyBuilder:
             self._proxy_asset(reference)
             for reference in source_manifest.cat_references[: self.reference_limit]
         )
-        candidate_proxy = self._proxy_asset(candidate.protected_asset)
+        candidate_proxy = self._proxy_asset(candidate.raw_authoritative_asset)
         overlay_proxy = self._placement_overlay(background_proxy, placement)
         return CriticProxyBundle(
             candidate_id=candidate.candidate_id,
@@ -144,5 +160,9 @@ class CriticProxyBuilder:
             background_proxy=background_proxy,
             placement_overlay_proxy=overlay_proxy,
             reference_proxies=references,
+            raw_candidate_proxy=candidate_proxy,
+            # Byte-identical legacy alias for checkpoint/replay consumers.  New
+            # providers use ``candidate_proxy`` so protected data cannot become
+            # the review authority by accident.
             protected_candidate_proxy=candidate_proxy,
         )

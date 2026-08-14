@@ -25,8 +25,13 @@ from app.domain.searches import CreateSearchRequest, PlacementIntent
 from app.persistence.app_store import utcnow
 from app.services.generator_service import (
     GENERATOR_BACKGROUND_MAX_SIDE,
+    GENERATOR_BACKGROUND_PROXY_FORMAT,
     GENERATOR_INPUT_PROXY_VERSION,
+    GENERATOR_MASK_VERSION,
+    GENERATOR_MODEL_MASK_X_PADDING,
+    GENERATOR_MODEL_MASK_Y_PADDING,
     GENERATOR_MULTI_CANDIDATE_STRATEGY,
+    GENERATOR_OUTPUT_SEMANTICS_VERSION,
     GENERATOR_REFERENCE_MAX_SIDE,
     DeterministicFakeImageGenerator,
     GenerationRequest,
@@ -56,12 +61,14 @@ class RecordingImageEditsTransport:
         n: int,
         quality: str,
         size: str,
+        mask: OpenAIImageInput | None = None,
     ) -> OpenAIImageEditResult:
         self.calls.append(
             {
                 "model": model,
                 "prompt": prompt,
                 "images": tuple(images),
+                "mask": mask,
                 "n": n,
                 "quality": quality,
                 "size": size,
@@ -100,6 +107,9 @@ def test_live_generator_requires_a_nonempty_backend_key(tmp_path) -> None:
 async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fields() -> None:
     png_bytes = make_image_bytes((12, 34, 56))
     jpeg_bytes = make_image_bytes((56, 34, 12), image_format="JPEG")
+    mask_output = io.BytesIO()
+    Image.new("RGBA", (96, 64), (255, 255, 255, 0)).save(mask_output, format="PNG")
+    mask_bytes = mask_output.getvalue()
     captured: dict[str, object] = {}
 
     async def handle_request(request: httpx.Request) -> httpx.Response:
@@ -133,6 +143,9 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
             filename="01-reference.jpg", png_bytes=jpeg_bytes, mime_type="image/jpeg"
         ),
     )
+    mask = OpenAIImageInput(
+        filename="00-provider-mask.png", png_bytes=mask_bytes, mime_type="image/png"
+    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http_client:
         client = AsyncOpenAI(
             api_key="test-key-never-sent",
@@ -144,6 +157,7 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
             model="gpt-image-2-2026-04-21",
             prompt="offline transport contract",
             images=inputs,
+            mask=mask,
             n=1,
             quality="medium",
             size="1024x1024",
@@ -162,6 +176,9 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
     assert b'name="image[]"; filename="01-reference.jpg"' in body
     assert b"Content-Type: image/jpeg" in body
     assert jpeg_bytes in body
+    assert b'name="mask"; filename="00-provider-mask.png"' in body
+    assert b"Content-Type: image/png" in body
+    assert mask_bytes in body
     assert b'name="n"' not in body
     assert b'name="model"' in body and b"gpt-image-2-2026-04-21" in body
     assert b'name="output_format"' in body and b"png" in body
@@ -285,10 +302,12 @@ async def test_openai_generator_uses_ordered_source_proxies_and_persists_safe_au
     )
 
     assert len(candidates) == 2
-    assert [candidate.protected_asset.mime_type for candidate in candidates] == [
+    assert [candidate.raw_asset.mime_type for candidate in candidates] == [
         "image/png",
         "image/png",
     ]
+    assert all(candidate.raw_asset == candidate.protected_asset for candidate in candidates)
+    assert all(candidate.composite is None for candidate in candidates)
     assert len(transport.calls) == 1
     call = transport.calls[0]
     assert call["model"] == "gpt-image-2-2026-04-21"
@@ -303,12 +322,26 @@ async def test_openai_generator_uses_ordered_source_proxies_and_persists_safe_au
         "reference",
     ]
     assert [item.mime_type for item in inputs] == [
-        "image/jpeg",
+        "image/png",
         "image/jpeg",
         "image/jpeg",
     ]
-    assert all(Image.open(io.BytesIO(item.png_bytes)).format == "JPEG" for item in inputs)
+    assert [Image.open(io.BytesIO(item.png_bytes)).format for item in inputs] == [
+        "PNG",
+        "JPEG",
+        "JPEG",
+    ]
     assert all("candidates" not in item.filename for item in inputs)
+    provider_mask = call["mask"]
+    assert isinstance(provider_mask, OpenAIImageInput)
+    assert provider_mask.mime_type == "image/png"
+    assert provider_mask.filename == "00-provider-mask.png"
+    with Image.open(io.BytesIO(provider_mask.png_bytes)) as mask_image:
+        assert mask_image.format == "PNG"
+        assert mask_image.mode == "RGBA"
+        assert mask_image.size == Image.open(io.BytesIO(inputs[0].png_bytes)).size
+        assert mask_image.getchannel("A").getpixel((0, 0)) == 255
+        assert mask_image.getchannel("A").getpixel((30, 20)) == 0
     request_key = service.build_request_key(request)
     provider_call = app_store.get_provider_call(request_key)
     assert provider_call is not None
@@ -328,8 +361,13 @@ async def test_openai_generator_uses_ordered_source_proxies_and_persists_safe_au
     audited_request = json.loads(request_json)
     assert audited_request["input_proxy"] == {
         "schema_version": GENERATOR_INPUT_PROXY_VERSION,
+        "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
+        "provider_mask_version": GENERATOR_MASK_VERSION,
         "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
         "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+        "background_format": GENERATOR_BACKGROUND_PROXY_FORMAT,
+        "model_mask_x_padding": GENERATOR_MODEL_MASK_X_PADDING,
+        "model_mask_y_padding": GENERATOR_MODEL_MASK_Y_PADDING,
         "opaque_format": "jpeg",
         "opaque_quality": 82,
         "transparent_format": "png",
@@ -388,8 +426,11 @@ async def test_openai_generator_normalizes_jpeg_and_webp_sources_in_memory(tmp_p
     inputs = transport.calls[0]["images"]
     assert isinstance(inputs, tuple)
     assert [item.filename.split("-", 2)[1] for item in inputs] == ["background", "reference"]
-    assert [item.mime_type for item in inputs] == ["image/jpeg", "image/jpeg"]
-    assert all(Image.open(io.BytesIO(item.png_bytes)).format == "JPEG" for item in inputs)
+    assert [item.mime_type for item in inputs] == ["image/png", "image/jpeg"]
+    assert [Image.open(io.BytesIO(item.png_bytes)).format for item in inputs] == [
+        "PNG",
+        "JPEG",
+    ]
 
 
 async def test_openai_generator_bounds_source_proxies_without_mutating_sources(tmp_path) -> None:
@@ -463,7 +504,7 @@ async def test_openai_generator_bounds_source_proxies_without_mutating_sources(t
     assert proxy_modes == ["RGB", "RGBA"]
     assert reference_alpha_extrema == (77, 77)
     assert max(proxy_sizes[1]) == GENERATOR_REFERENCE_MAX_SIDE
-    assert [item.mime_type for item in inputs] == ["image/jpeg", "image/png"]
+    assert [item.mime_type for item in inputs] == ["image/png", "image/png"]
     assert background_path.read_bytes() == background_bytes
     assert reference_path.read_bytes() == reference_bytes
 
@@ -522,9 +563,11 @@ async def test_openai_generator_encodes_fully_opaque_rgba_sources_as_jpeg(tmp_pa
 
     inputs = transport.calls[0]["images"]
     assert isinstance(inputs, tuple)
-    assert [item.mime_type for item in inputs] == ["image/jpeg", "image/jpeg"]
-    assert all(item.filename.endswith(".jpg") for item in inputs)
-    assert all(Image.open(io.BytesIO(item.png_bytes)).format == "JPEG" for item in inputs)
+    assert [item.mime_type for item in inputs] == ["image/png", "image/jpeg"]
+    assert inputs[0].filename.endswith(".png")
+    assert inputs[1].filename.endswith(".jpg")
+    assert Image.open(io.BytesIO(inputs[0].png_bytes)).format == "PNG"
+    assert Image.open(io.BytesIO(inputs[1].png_bytes)).format == "JPEG"
 
 
 async def test_openai_generator_applies_exif_orientation_before_encoding(tmp_path) -> None:
@@ -629,6 +672,7 @@ def test_generator_request_key_tracks_input_proxy_contract(settings) -> None:
 
     expected_payload = {
         "schema_version": "generator-request/v1",
+        "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
         "operation": "generate_round",
         "search_id": request.search_id,
         "round_index": 0,
@@ -639,8 +683,12 @@ def test_generator_request_key_tracks_input_proxy_contract(settings) -> None:
         "quality": "medium",
         "size": "1024x1024",
         "input_proxy_version": GENERATOR_INPUT_PROXY_VERSION,
+        "provider_mask_version": GENERATOR_MASK_VERSION,
         "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
         "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+        "background_format": GENERATOR_BACKGROUND_PROXY_FORMAT,
+        "model_mask_x_padding": GENERATOR_MODEL_MASK_X_PADDING,
+        "model_mask_y_padding": GENERATOR_MODEL_MASK_Y_PADDING,
         "opaque_format": "jpeg",
         "opaque_quality": 82,
         "transparent_format": "png",

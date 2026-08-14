@@ -555,7 +555,7 @@ def test_incompatible_source_icc_is_not_attached_to_rgb_delivery(
         assert image.info.get("icc_profile") is None
 
 
-async def test_non_full_provider_canvas_is_protected_replayed_and_exported(
+async def test_non_full_provider_canvas_stays_raw_replays_and_exports_on_demand(
     settings,
 ) -> None:
     provider = SmallCanvasGenerator()
@@ -604,14 +604,12 @@ async def test_non_full_provider_canvas_is_protected_replayed_and_exported(
     candidate = first[0]
     assert second == first
     assert provider.call_count == 1
-    assert candidate.raw_asset != candidate.protected_asset
+    assert candidate.schema_version == "candidate/v2"
+    assert candidate.raw_asset == candidate.protected_asset
     assert candidate.crop_mapping is not None
-    assert candidate.composite is not None
-    assert candidate.protected_asset.width == background.width
-    assert candidate.protected_asset.height == background.height
-    assert container.app_store.get_asset(candidate.composite.mask.asset.asset_id) == (
-        candidate.composite.mask.asset
-    )
+    assert candidate.composite is None
+    assert candidate.raw_asset.width == 8
+    assert candidate.raw_asset.height == 6
 
     container.app_store.update_search(
         search.search_id,
@@ -626,12 +624,12 @@ async def test_non_full_provider_canvas_is_protected_replayed_and_exported(
     assert exported.asset.width == background.width
     assert exported.asset.height == background.height
     assert exported.composite.crop_mapping == candidate.crop_mapping
-    assert exported.composite.mask == candidate.composite.mask
+    assert exported.composite.mask.mask_scope == "placement"
     assert exported.copied_icc is True
     assert exported.copied_exif is False
-    with Image.open(candidate.protected_asset.filesystem_path) as image:
-        assert image.mode == "RGBA"
-        assert image.info.get("icc_profile") == icc_profile
+    with Image.open(candidate.raw_asset.filesystem_path) as image:
+        assert image.mode == "RGB"
+        assert image.info.get("icc_profile") is None
     with Image.open(exported.asset.filesystem_path) as image:
         assert image.mode == "RGBA"
         assert image.info.get("icc_profile") == icc_profile

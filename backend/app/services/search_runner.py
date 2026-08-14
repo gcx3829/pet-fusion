@@ -118,6 +118,9 @@ class SearchRunner:
                 item.model_dump(mode="json") for item in self.app_store.list_evaluations(search_id)
             ],
             "round_history": search.round_history,
+            "prompt_history": [
+                item.model_dump(mode="json") for item in search.prompt_history
+            ],
             "round_index": search.round_index,
             "max_rounds": search.max_rounds,
             "review_each_round": search.review_each_round,
@@ -176,6 +179,11 @@ class SearchRunner:
                 status=result_status,
                 round_index=round_index,
                 stop_reason=result.get("stop_reason") or "mock_round_complete",
+                prompt_history=(
+                    result.get("prompt_history")
+                    if isinstance(result.get("prompt_history"), list)
+                    else None
+                ),
                 state_summary={
                     "schema_version": result["schema_version"],
                     "source_manifest_hash": result["source_manifest_hash"],

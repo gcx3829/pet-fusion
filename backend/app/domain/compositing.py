@@ -138,6 +138,12 @@ class Mask(BaseModel):
     coordinate_space: Literal["full_resolution"] = "full_resolution"
     allowed_box: PixelBox
     feather_radius_px: int = Field(ge=0)
+    # ``placement`` is the tight user box. ``model_window`` is the deterministic
+    # expanded legacy floor. ``full_frame`` is used only by Local Fix when its
+    # root is a raw-first Search candidate: the user's tight mask then preserves
+    # every raw pixel outside the requested repair without inventing a Search
+    # floor after the fact.
+    mask_scope: Literal["placement", "model_window", "full_frame"] = "placement"
 
 
 class CompositeResult(BaseModel):

@@ -58,6 +58,12 @@ def test_mocked_vertical_slice_through_api_and_sse(
     assert search["stop_reason"] in {"accept_threshold", "no_meaningful_defect", "max_rounds"}
     assert search["global_winner_id"] is not None
     assert search["round_index"] == 0
+    assert len(search["prompt_history"]) == 1
+    initial_prompt = search["prompt_history"][0]
+    assert initial_prompt["round_index"] == 0
+    assert initial_prompt["tuned"] is False
+    assert "ROLE OF INPUTS" in initial_prompt["generation_prompt"]
+    assert len(initial_prompt["generation_prompt_hash"]) == 64
     assert len(search["candidates"]) == 3
     assert fake_generator.call_count == 1
 
@@ -68,6 +74,9 @@ def test_mocked_vertical_slice_through_api_and_sse(
         assert candidate["model"] == "fake-gpt-image-2"
         assert candidate["mime_type"] == "image/png"
         assert candidate["asset_url"].startswith("/api/v1/assets/")
+        assert candidate["score"] is not None
+        assert candidate["evaluation"]["candidate_id"] == candidate["candidate_id"]
+        assert candidate["evaluation"]["scores"]["cat_identity"] > 0
         asset_response = client.get(candidate["asset_url"])
         assert asset_response.status_code == 200
         assert asset_response.headers["content-type"] == "image/png"
@@ -125,6 +134,38 @@ def test_mocked_vertical_slice_through_api_and_sse(
     assert checkpoint_count >= 5
     assert b"\x89PNG\r\n\x1a\n" not in serialized_state
     assert b"data:image" not in serialized_state
+
+
+def test_api_can_accept_an_explicit_candidate(
+    client: TestClient,
+    project_payload,
+    search_payload,
+) -> None:
+    project = _create_project(client, project_payload)
+    created = client.post(
+        f"/api/v1/projects/{project['project_id']}/searches",
+        json=search_payload,
+        headers={"Idempotency-Key": "accept-explicit-candidate"},
+    ).json()
+    search = client.get(f"/api/v1/searches/{created['search_id']}").json()
+    selected = next(
+        candidate
+        for candidate in search["candidates"]
+        if candidate["candidate_id"] != search["global_winner_id"]
+    )
+
+    response = client.post(
+        f"/api/v1/searches/{created['search_id']}/resume",
+        json={
+            "action": "accept_candidate",
+            "selected_candidate_id": selected["candidate_id"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    accepted = response.json()
+    assert accepted["status"] == "accepted"
+    assert accepted["global_winner_id"] == selected["candidate_id"]
+    assert accepted["stop_reason"] == "accepted_selected_candidate"
 
 
 def test_resume_cancel_is_idempotent_and_other_actions_are_explicitly_unavailable(

@@ -174,6 +174,12 @@ def test_continue_rebases_to_original_manifest_and_keeps_historical_global_winne
     assert second["status"] == "waiting_for_human"
     assert second["round_index"] == 1
     assert len(second["round_history"]) == 2
+    assert [item["round_index"] for item in second["prompt_history"]] == [0, 1]
+    assert second["prompt_history"][0]["tuned"] is False
+    second_prompt = second["prompt_history"][1]["generation_prompt"]
+    assert second["prompt_history"][1]["tuned"] == (
+        second_prompt != second["prompt_history"][0]["generation_prompt"]
+    )
     candidate_ids = {candidate["candidate_id"] for candidate in second["candidates"]}
     assert first["global_winner_id"] in candidate_ids
     assert second["global_winner_id"] in candidate_ids
@@ -248,6 +254,8 @@ def test_review_false_automatically_runs_next_round_and_supplies_historical_eval
     assert search["status"] == "waiting_for_human"
     assert search["round_index"] == 1
     assert len(search["round_history"]) == 2
+    assert len(search["prompt_history"]) == 2
+    assert search["prompt_history"][1]["tuned"] is True
     assert fake_generator.call_count == 2
     assert len(policy.seen_evaluations) == 2
     assert planner_provider.call_count == 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -7,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.candidates import CandidateRecord, CandidateResponse
+from app.domain.evaluations import CandidateEvaluation
 
 
 class SearchStatus(StrEnum):
@@ -57,6 +59,22 @@ class CreateSearchRequest(BaseModel):
     review_each_round: bool = False
 
 
+class PromptHistoryEntry(BaseModel):
+    """The exact bounded prompts used by one generation round."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    round_index: int = Field(ge=0)
+    canonical_prompt: str = Field(min_length=1, max_length=12_000)
+    canonical_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generation_prompt: str = Field(min_length=1, max_length=16_000)
+    generation_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_template_version: str = Field(min_length=1, max_length=120)
+    active_directives: list[dict[str, object]] = Field(default_factory=list)
+    active_directives_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tuned: bool = False
+
+
 class SearchRunRecord(BaseModel):
     search_id: str
     thread_id: str
@@ -75,6 +93,7 @@ class SearchRunRecord(BaseModel):
     global_winner_id: str | None = None
     global_winner_score: float | None = None
     round_history: list[dict[str, object]] = Field(default_factory=list)
+    prompt_history: list[PromptHistoryEntry] = Field(default_factory=list)
     active_directives: list[dict[str, object]] = Field(default_factory=list)
     interrupt_payload: dict[str, object] | None = None
     stop_reason: str | None = None
@@ -115,6 +134,7 @@ class SearchResponse(BaseModel):
     global_winner_id: str | None
     global_winner_score: float | None
     round_history: list[dict[str, object]]
+    prompt_history: list[PromptHistoryEntry]
     active_directives: list[dict[str, object]]
     interrupt_payload: dict[str, object] | None
     stop_reason: str | None
@@ -123,7 +143,48 @@ class SearchResponse(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_record(cls, search: SearchRunRecord) -> SearchResponse:
+    def from_record(
+        cls,
+        search: SearchRunRecord,
+        *,
+        evaluations: Sequence[tuple[CandidateEvaluation, float | None]] = (),
+    ) -> SearchResponse:
+        evaluation_by_candidate = {
+            evaluation.candidate_id: (evaluation, score)
+            for evaluation, score in evaluations
+        }
+        response_candidates = [
+            CandidateResponse.from_record(
+                item,
+                evaluation=(
+                    evaluation_by_candidate[item.candidate_id][0]
+                    if item.candidate_id in evaluation_by_candidate
+                    else None
+                ),
+                score=(
+                    evaluation_by_candidate[item.candidate_id][1]
+                    if item.candidate_id in evaluation_by_candidate
+                    else None
+                ),
+            )
+            for item in search.candidates
+        ]
+        interrupt_payload = (
+            dict(search.interrupt_payload) if search.interrupt_payload is not None else None
+        )
+        if search.status is SearchStatus.WAITING_FOR_HUMAN and response_candidates:
+            interrupt_payload = interrupt_payload or {"type": "search_review"}
+            raw_allowed_actions = interrupt_payload.get("allowed_actions", [])
+            allowed_actions = (
+                [str(item) for item in raw_allowed_actions]
+                if isinstance(raw_allowed_actions, list)
+                else []
+            )
+            if "accept_candidate" not in allowed_actions:
+                allowed_actions.insert(0, "accept_candidate")
+            if search.global_winner_id and "accept_global_winner" not in allowed_actions:
+                allowed_actions.insert(0, "accept_global_winner")
+            interrupt_payload["allowed_actions"] = allowed_actions
         return cls(
             search_id=search.search_id,
             thread_id=search.thread_id,
@@ -132,12 +193,13 @@ class SearchResponse(BaseModel):
             round_index=search.round_index,
             round_winner_id=search.round_winner_id,
             candidate_count=search.candidate_count,
-            candidates=[CandidateResponse.from_record(item) for item in search.candidates],
+            candidates=response_candidates,
             global_winner_id=search.global_winner_id,
             global_winner_score=search.global_winner_score,
             round_history=search.round_history,
+            prompt_history=search.prompt_history,
             active_directives=search.active_directives,
-            interrupt_payload=search.interrupt_payload,
+            interrupt_payload=interrupt_payload,
             stop_reason=search.stop_reason,
             error=search.error,
             created_at=search.created_at,
@@ -161,8 +223,10 @@ class ResumeSearchRequest(BaseModel):
 
     action: Literal[
         "accept_global_winner",
+        "accept_candidate",
         "continue_one_round",
         "update_user_intent",
         "cancel",
     ]
     updated_user_intent: str | None = Field(default=None, min_length=1, max_length=2000)
+    selected_candidate_id: str | None = Field(default=None, min_length=1, max_length=120)

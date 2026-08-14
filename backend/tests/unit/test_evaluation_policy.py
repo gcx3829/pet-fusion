@@ -1,8 +1,8 @@
 import pytest
 
 from app.container import AppContainer
-from app.domain.assets import SourceManifest
-from app.domain.candidates import CandidateRecord
+from app.domain.assets import AssetRef, SourceManifest
+from app.domain.candidates import CandidateRecord, CandidateResponse
 from app.domain.errors import ConflictError
 from app.domain.evaluations import (
     CandidateEvaluation,
@@ -68,6 +68,43 @@ def test_ranker_is_stable_and_keeps_historical_winner() -> None:
     existing = GlobalWinner(candidate_id="historical", score=99, round_index=0)
     later = ranker.rank_round([make_evaluation("candidate-c", round_index=1)], round_index=1)
     assert ranker.update_global_winner(existing, later) == existing
+
+
+def test_candidate_response_reviews_raw_even_for_a_legacy_protected_derivative() -> None:
+    raw = AssetRef(
+        asset_id="ast_raw",
+        path="/tmp/raw.png",
+        sha256="a" * 64,
+        width=96,
+        height=64,
+    )
+    protected = AssetRef(
+        asset_id="ast_protected",
+        path="/tmp/protected.png",
+        sha256="b" * 64,
+        width=96,
+        height=64,
+    )
+    candidate = CandidateRecord(
+        candidate_id="candidate-legacy-derivative",
+        round_index=0,
+        variant_index=0,
+        raw_asset=raw,
+        protected_asset=protected,
+        source_manifest_hash="c" * 64,
+        prompt_hash="d" * 64,
+        request_key="e" * 64,
+        model="fixture",
+        quality="medium",
+        size="96x64",
+    )
+
+    response = CandidateResponse.from_record(candidate)
+
+    assert response.review_asset_kind == "raw"
+    assert response.asset_id == response.raw_asset_id == raw.asset_id
+    assert response.asset_url == response.raw_asset_url == "/api/v1/assets/ast_raw"
+    assert response.protected_asset_id == protected.asset_id
 
 
 def test_blocking_issue_is_the_only_automatic_regeneration_trigger() -> None:
@@ -164,6 +201,21 @@ def test_low_confidence_blocking_is_normalized_to_warning() -> None:
     )
     assert evaluation.issues[0].severity is Severity.WARNING
     assert not evaluation.has_blocking_issue
+
+
+def test_relay_unit_interval_scores_are_normalized_to_public_scale() -> None:
+    scores = DimensionScores(
+        cat_identity=0.92,
+        pose_geometry=0.90,
+        perspective_scale=0.91,
+        lighting_color=0.89,
+        optical_consistency=0.90,
+        physical_integration=0.88,
+        scene_preservation=0.96,
+        overall_photographic_naturalness=0.90,
+    )
+    assert scores.cat_identity == 92
+    assert scores.scene_preservation == 96
 
 
 def test_evaluation_checkpoint_payload_contains_no_image_bytes() -> None:

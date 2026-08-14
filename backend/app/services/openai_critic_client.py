@@ -130,9 +130,9 @@ class OfficialOpenAICriticProvider:
             (
                 {
                     "type": "input_text",
-                    "text": "Protected candidate to evaluate independently:",
+                    "text": "Raw candidate to evaluate independently:",
                 },
-                self._image_part(proxies.protected_candidate_proxy),
+                self._image_part(proxies.candidate_proxy),
             )
         )
         return content

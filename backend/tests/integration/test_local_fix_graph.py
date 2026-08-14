@@ -408,7 +408,7 @@ async def test_local_fix_service_rejects_delivery_asset_mask_before_provider(
     assert provider.call_count == 0
 
 
-async def test_local_fix_rejects_tampered_outer_floor_before_provider(
+async def test_local_fix_rejects_inconsistent_raw_compatibility_alias_before_provider(
     settings: Settings,
 ) -> None:
     container, manifest, _command, search_id = await _accepted_search(settings)
@@ -419,27 +419,9 @@ async def test_local_fix_rejects_tampered_outer_floor_before_provider(
         asset_store=container.asset_store,
     )
     base = container.app_store.get_search(search_id).candidates[0]
-    assert base.composite is not None
-    original_box = base.composite.mask.allowed_box
-    expanded_box = PixelBox(
-        x=max(0, original_box.x - 1),
-        y=max(0, original_box.y - 1),
-        width=min(manifest.background.width, original_box.right + 1)
-        - max(0, original_box.x - 1),
-        height=min(manifest.background.height, original_box.bottom + 1)
-        - max(0, original_box.y - 1),
-    )
-    expanded_mask = service.composite_floor.create_mask_for_box(
-        source_background=manifest.background,
-        allowed_box=expanded_box,
-        feather_radius_px=base.composite.mask.feather_radius_px,
-    )
-    container.app_store.register_asset(expanded_mask.asset)
-    tampered = base.model_copy(
-        update={
-            "composite": base.composite.model_copy(update={"mask": expanded_mask}),
-        }
-    )
+    assert base.composite is None
+    assert base.raw_asset == base.protected_asset
+    tampered = base.model_copy(update={"protected_asset": manifest.background})
     container.app_store.add_candidate(search_id, tampered)
     request = LocalFixRequest(
         search_id=search_id,
@@ -454,7 +436,7 @@ async def test_local_fix_rejects_tampered_outer_floor_before_provider(
         generation_depth=0,
     )
 
-    with pytest.raises(ConflictError, match="accepted placement"):
+    with pytest.raises(ConflictError, match="inconsistent compatibility lineage"):
         service.resolve(request)
     assert provider.call_count == 0
 

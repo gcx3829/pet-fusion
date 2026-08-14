@@ -12,6 +12,9 @@ from app.domain.compositing import CompositeResult, CropMapping, Mask, PixelBox
 from app.domain.searches import PlacementIntent
 from app.services.asset_store import AssetStore
 
+MODEL_WINDOW_X_PADDING = 0.045
+MODEL_WINDOW_Y_PADDING = 0.065
+
 
 def normalized_placement_to_pixel_box(
     placement: PlacementIntent, *, width: int, height: int
@@ -128,15 +131,37 @@ class CompositeFloorService:
         mask.paste(ImageChops.darker(horizontal, vertical), (allowed_box.x, allowed_box.y))
         return mask
 
+    @staticmethod
+    def _placement_for_scope(
+        placement: PlacementIntent,
+        mask_scope: Literal["placement", "model_window"],
+    ) -> PlacementIntent:
+        if mask_scope == "placement":
+            return placement
+        left = max(0.0, placement.x - MODEL_WINDOW_X_PADDING)
+        top = max(0.0, placement.y - MODEL_WINDOW_Y_PADDING)
+        right = min(1.0, placement.x + placement.width + MODEL_WINDOW_X_PADDING)
+        bottom = min(1.0, placement.y + placement.height + MODEL_WINDOW_Y_PADDING)
+        return placement.model_copy(
+            update={
+                "x": left,
+                "y": top,
+                "width": right - left,
+                "height": bottom - top,
+            }
+        )
+
     def create_mask(
         self,
         *,
         source_background: AssetRef,
         placement: PlacementIntent,
         feather_radius_px: int = 2,
+        mask_scope: Literal["placement", "model_window"] = "placement",
     ) -> Mask:
+        scoped_placement = self._placement_for_scope(placement, mask_scope)
         allowed_box = normalized_placement_to_pixel_box(
-            placement,
+            scoped_placement,
             width=source_background.width,
             height=source_background.height,
         )
@@ -144,6 +169,7 @@ class CompositeFloorService:
             source_background=source_background,
             allowed_box=allowed_box,
             feather_radius_px=feather_radius_px,
+            mask_scope=mask_scope,
         )
 
     def create_mask_for_box(
@@ -152,6 +178,7 @@ class CompositeFloorService:
         source_background: AssetRef,
         allowed_box: PixelBox,
         feather_radius_px: int = 0,
+        mask_scope: Literal["placement", "model_window", "full_frame"] = "placement",
     ) -> Mask:
         """Store a deterministic full-resolution mask for one bounded box.
 
@@ -175,6 +202,7 @@ class CompositeFloorService:
             asset=mask_asset,
             allowed_box=allowed_box,
             feather_radius_px=feather_radius_px,
+            mask_scope=mask_scope,
         )
 
     def _load_mask(self, mask: Mask, *, size: tuple[int, int]) -> Image.Image:
@@ -199,8 +227,10 @@ class CompositeFloorService:
         """
 
         self.asset_store.assert_png_lineage_asset(source_background)
+        if mask.mask_scope == "full_frame":
+            raise ValueError("full-frame Local Fix boundary is not a placement mask")
         expected_box = normalized_placement_to_pixel_box(
-            placement,
+            self._placement_for_scope(placement, mask.mask_scope),
             width=source_background.width,
             height=source_background.height,
         )

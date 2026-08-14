@@ -12,6 +12,7 @@ from app.domain.directives import (
     PlannerAction,
     PlannerInput,
     PlannerResult,
+    stable_directives_hash,
 )
 from app.domain.evaluations import (
     CandidateEvaluation,
@@ -20,7 +21,7 @@ from app.domain.evaluations import (
     StopAction,
     StopDecision,
 )
-from app.domain.searches import PlacementIntent, SearchStatus
+from app.domain.searches import PlacementIntent, PromptHistoryEntry, SearchStatus
 from app.graphs.critic_subgraph import build_critic_subgraph
 from app.graphs.feedback_planner_subgraph import build_feedback_planner_subgraph
 from app.graphs.reducers import empty_evaluation_bucket
@@ -44,7 +45,7 @@ from app.services.prompt_compiler import (
 from app.services.proxy_builder import CriticProxyBuilder
 from app.services.stop_policy import DeterministicStopPolicy
 
-SEARCH_STATE_SCHEMA_VERSION = "search-state/v3"
+SEARCH_STATE_SCHEMA_VERSION = "search-state/v4"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,12 +165,41 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             canonical_prompt=canonical_prompt,
             active_directives=active_directives,
         )
+        prompt_history = [
+            dict(item)
+            for item in state.get("prompt_history", [])
+            if isinstance(item, dict) and item.get("round_index") != state["round_index"]
+        ]
+        prompt_history.append(
+            PromptHistoryEntry(
+                round_index=state["round_index"],
+                canonical_prompt=canonical_prompt,
+                canonical_prompt_hash=canonical_prompt_hash,
+                generation_prompt=generation_prompt,
+                generation_prompt_hash=generation_prompt_hash,
+                canonical_template_version=CANONICAL_TEMPLATE_VERSION,
+                active_directives=[
+                    item.model_dump(mode="json") for item in active_directives
+                ],
+                active_directives_hash=stable_directives_hash(active_directives),
+                tuned=bool(active_directives),
+            ).model_dump(mode="json")
+        )
+        prompt_history.sort(key=lambda item: cast(int, item.get("round_index", 0)))
+        assert_checkpoint_safe(prompt_history, path="prompt_history")
+        if not fenced_update(
+            state["search_id"],
+            prompt_history=prompt_history,
+        ):
+            current = services.app_store.get_search(state["search_id"])
+            return {"status": current.status.value}
         return {
             "canonical_prompt": canonical_prompt,
             "canonical_prompt_hash": canonical_prompt_hash,
             "canonical_template_version": CANONICAL_TEMPLATE_VERSION,
             "generation_prompt": generation_prompt,
             "generation_prompt_hash": generation_prompt_hash,
+            "prompt_history": prompt_history,
         }
 
     async def prepare_round(state: SearchState) -> dict[str, object]:
@@ -355,6 +385,11 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             global_winner_id=global_winner.candidate_id if global_winner else None,
             global_winner_score=global_winner.score if global_winner else None,
             round_history=round_history,
+            prompt_history=(
+                state.get("prompt_history")
+                if isinstance(state.get("prompt_history"), list)
+                else None
+            ),
             stop_reason=decision.reason,
             events=transition_events,
         ):
@@ -528,6 +563,11 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             state["search_id"],
             active_directives=directives_payload,
             round_history=round_history,
+            prompt_history=(
+                state.get("prompt_history")
+                if isinstance(state.get("prompt_history"), list)
+                else None
+            ),
             stop_reason=result.stop_reason or state.get("stop_reason"),
             events=(
                 (
@@ -606,6 +646,8 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
                 "stop_reason": state.get("stop_reason"),
             }
         allowed_actions = ["cancel"]
+        if state.get("current_candidates"):
+            allowed_actions.insert(0, "accept_candidate")
         if state.get("global_winner_id"):
             allowed_actions.insert(0, "accept_global_winner")
         if state["round_index"] + 1 < state["max_rounds"]:
@@ -652,6 +694,11 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             status=SearchStatus.WAITING_FOR_HUMAN,
             round_index=state["round_index"],
             stop_reason=state.get("stop_reason") or "round_complete",
+            prompt_history=(
+                state.get("prompt_history")
+                if isinstance(state.get("prompt_history"), list)
+                else None
+            ),
             state_summary=summary,
             interrupt_payload=interrupt_payload,
             clear_lease=True,

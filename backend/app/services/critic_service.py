@@ -30,7 +30,8 @@ from app.services.proxy_builder import CriticProxyBundle
 
 RUBRIC_VERSION = "critic-rubric/v1-fake"
 FAKE_CRITIC_MODEL = "deterministic-critic-fixture/v1"
-CRITIC_EVALUATION_SCHEMA_VERSION = "critic-evaluation/v1"
+CRITIC_EVALUATION_SCHEMA_VERSION = "critic-evaluation/v2"
+CRITIC_INPUT_SEMANTICS_VERSION = "raw-authority/v1"
 CRITIC_PROVIDER_RESULT_POLL_SECONDS = 0.02
 CRITIC_PROVIDER_RESULT_WAIT_SECONDS = 30.0
 CRITIC_PROVIDER_CALL_LEASE_SECONDS = 30
@@ -158,7 +159,8 @@ class CriticEvaluationService:
             "candidate_id": request.candidate.candidate_id,
             "round_index": request.candidate.round_index,
             "source_manifest_hash": request.source_manifest.manifest_hash,
-            "protected_asset_sha256": request.candidate.protected_asset.sha256,
+            "raw_asset_sha256": request.candidate.raw_authoritative_asset.sha256,
+            "input_semantics_version": CRITIC_INPUT_SEMANTICS_VERSION,
             "canonical_prompt_hash": request.canonical_prompt_hash,
             "model": model,
             "rubric_version": rubric_version,
@@ -168,7 +170,7 @@ class CriticEvaluationService:
                     "background": proxies.background_proxy.sha256,
                     "placement_overlay": proxies.placement_overlay_proxy.sha256,
                     "references": [item.sha256 for item in proxies.reference_proxies],
-                    "candidate": proxies.protected_candidate_proxy.sha256,
+                    "candidate": proxies.candidate_proxy.sha256,
                 }
                 if proxies is not None
                 else None
@@ -328,8 +330,9 @@ class CriticEvaluationService:
             "candidate_id": request.candidate.candidate_id,
             "round_index": request.candidate.round_index,
             "source_manifest_hash": request.source_manifest.manifest_hash,
-            "protected_asset_id": request.candidate.protected_asset.asset_id,
-            "protected_asset_sha256": request.candidate.protected_asset.sha256,
+            "raw_asset_id": request.candidate.raw_authoritative_asset.asset_id,
+            "raw_asset_sha256": request.candidate.raw_authoritative_asset.sha256,
+            "input_semantics_version": CRITIC_INPUT_SEMANTICS_VERSION,
             "canonical_prompt_hash": request.canonical_prompt_hash,
             "model": model,
             "rubric_version": rubric_version,
@@ -339,7 +342,7 @@ class CriticEvaluationService:
                     "background": request.proxies.background_proxy.asset_id,
                     "placement_overlay": request.proxies.placement_overlay_proxy.asset_id,
                     "references": [item.asset_id for item in request.proxies.reference_proxies],
-                    "candidate": request.proxies.protected_candidate_proxy.asset_id,
+                    "candidate": request.proxies.candidate_proxy.asset_id,
                 }
                 if request.proxies is not None
                 else None
@@ -584,7 +587,7 @@ class DeterministicCriticService:
     def evaluate(self, request: CriticInput) -> CandidateEvaluation:
         candidate = request.candidate
         background = request.source_manifest.background
-        candidate_size = self._read_dimensions(candidate.protected_asset.filesystem_path)
+        candidate_size = self._read_dimensions(candidate.raw_authoritative_asset.filesystem_path)
         expected_size = (background.width, background.height)
         digest = hashlib.sha256(
             f"{candidate.candidate_id}:{candidate.request_key}:{RUBRIC_VERSION}".encode()
@@ -608,7 +611,7 @@ class DeterministicCriticService:
                     issue_id="asset_unreadable",
                     category="asset_integrity",
                     severity=Severity.BLOCKING,
-                    evidence="The protected candidate asset cannot be decoded locally.",
+                    evidence="The raw candidate asset cannot be decoded locally.",
                     suggested_fix="Regenerate the candidate as a valid PNG asset.",
                     confidence=1.0,
                 )
@@ -621,7 +624,8 @@ class DeterministicCriticService:
                     category="scene_preservation",
                     severity=Severity.BLOCKING,
                     evidence=(
-                        f"Candidate dimensions {candidate_size} differ from source {expected_size}."
+                        "Raw candidate dimensions "
+                        f"{candidate_size} differ from source {expected_size}."
                     ),
                     suggested_fix="Regenerate at the immutable source background dimensions.",
                     confidence=1.0,

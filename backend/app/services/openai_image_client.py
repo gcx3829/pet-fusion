@@ -39,6 +39,7 @@ class OpenAIImageEditsTransport(Protocol):
         n: int,
         quality: str,
         size: str,
+        mask: OpenAIImageInput | None = None,
     ) -> OpenAIImageEditResult: ...
 
 
@@ -86,6 +87,7 @@ class OfficialOpenAIImageEditsTransport:
         n: int,
         quality: str,
         size: str,
+        mask: OpenAIImageInput | None = None,
     ) -> OpenAIImageEditResult:
         client = self._get_client()
         try:
@@ -94,6 +96,7 @@ class OfficialOpenAIImageEditsTransport:
                 model=model,
                 prompt=prompt,
                 images=images,
+                mask=mask,
                 n=(n if n > 1 else None),
                 quality=quality,
                 size=size,
@@ -112,6 +115,7 @@ class OfficialOpenAIImageEditsTransport:
                     model=model,
                     prompt=prompt,
                     images=images,
+                    mask=mask,
                     n=None,
                     quality=quality,
                     size=size,
@@ -141,6 +145,7 @@ class OfficialOpenAIImageEditsTransport:
         n: int | None,
         quality: str,
         size: str,
+        mask: OpenAIImageInput | None = None,
     ) -> OpenAIImageEditResult:
         kwargs: dict[str, object] = {
             "model": model,
@@ -150,6 +155,8 @@ class OfficialOpenAIImageEditsTransport:
             "size": size,
             "output_format": "png",
         }
+        if mask is not None:
+            kwargs["mask"] = (mask.filename, mask.png_bytes, mask.mime_type)
         if n is not None:
             kwargs["n"] = n
         response = await client.images.edit(**kwargs)

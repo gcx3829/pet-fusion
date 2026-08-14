@@ -21,7 +21,7 @@ from app.domain.errors import SourceManifestMismatchError
 from app.domain.searches import PlacementIntent
 from app.persistence.app_store import AppStore
 from app.services.asset_store import AssetStore
-from app.services.image_pipeline import CompositeFloorService
+from app.services.image_pipeline import normalized_placement_to_pixel_box
 from app.services.openai_image_client import (
     OpenAIImageEditResult,
     OpenAIImageEditsTransport,
@@ -30,9 +30,14 @@ from app.services.openai_image_client import (
 
 FAKE_IMAGE_MODEL = "fake-gpt-image-2"
 GENERATOR_SCHEMA_VERSION = "generator-request/v1"
+GENERATOR_OUTPUT_SEMANTICS_VERSION = "raw-authority/v1"
 GENERATOR_INPUT_PROXY_VERSION = "generator-input-proxy/v2"
+GENERATOR_MASK_VERSION = "provider-mask/v1"
 GENERATOR_BACKGROUND_MAX_SIDE = 1024
 GENERATOR_REFERENCE_MAX_SIDE = 768
+GENERATOR_MODEL_MASK_X_PADDING = 0.045
+GENERATOR_MODEL_MASK_Y_PADDING = 0.065
+GENERATOR_BACKGROUND_PROXY_FORMAT = "png"
 GENERATOR_OPAQUE_PROXY_FORMAT = "jpeg"
 GENERATOR_OPAQUE_PROXY_QUALITY = 82
 GENERATOR_MULTI_CANDIDATE_STRATEGY = "relay-n-fallback-serial/v1"
@@ -151,7 +156,11 @@ class OpenAIImageGenerator:
                     )
                     normalized = normalized.resize(target_size, Image.Resampling.LANCZOS)
                 output = io.BytesIO()
-                if has_transparency:
+                # The provider mask must have the same dimensions and a
+                # compatible raster format as the first image. Keep the
+                # background as PNG even when it is opaque; references can
+                # still use compact JPEG proxies when they are opaque.
+                if has_transparency or index == 0:
                     normalized.save(output, format="PNG", compress_level=9, optimize=False)
                     mime_type = "image/png"
                     suffix = "png"
@@ -177,12 +186,78 @@ class OpenAIImageGenerator:
             )
         return tuple(inputs)
 
+    @staticmethod
+    def _model_mask_placement(placement: PlacementIntent) -> PlacementIntent:
+        """Expand the provider edit window enough for contact and edge blending."""
+
+        left = max(0.0, placement.x - GENERATOR_MODEL_MASK_X_PADDING)
+        top = max(0.0, placement.y - GENERATOR_MODEL_MASK_Y_PADDING)
+        right = min(1.0, placement.x + placement.width + GENERATOR_MODEL_MASK_X_PADDING)
+        bottom = min(1.0, placement.y + placement.height + GENERATOR_MODEL_MASK_Y_PADDING)
+        return placement.model_copy(
+            update={
+                "x": left,
+                "y": top,
+                "width": right - left,
+                "height": bottom - top,
+            }
+        )
+
+    @classmethod
+    def _provider_mask(
+        cls,
+        request: GenerationRequest,
+        background_input: OpenAIImageInput,
+    ) -> OpenAIImageInput:
+        """Build the same-size RGBA mask expected by the image edit endpoint.
+
+        The provider mask uses the inverse alpha convention: transparent pixels
+        are the edit region and opaque pixels are preserved. The expanded window
+        gives the model room to blend contact and edge context. No local floor is
+        applied during Search; Fusion/Export own any later pixel compositing.
+        """
+
+        with Image.open(io.BytesIO(background_input.png_bytes)) as opened:
+            width, height = opened.size
+        placement = cls._model_mask_placement(request.placement)
+        editable_box = normalized_placement_to_pixel_box(
+            placement,
+            width=width,
+            height=height,
+        )
+        editable = Image.new("L", (width, height), 0)
+        ImageDraw.Draw(editable).rectangle(
+            (
+                editable_box.x,
+                editable_box.y,
+                editable_box.right - 1,
+                editable_box.bottom - 1,
+            ),
+            fill=255,
+        )
+        provider_alpha = ImageOps.invert(editable)
+        mask = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+        mask.putalpha(provider_alpha)
+        output = io.BytesIO()
+        mask.save(output, format="PNG", compress_level=9, optimize=False)
+        return OpenAIImageInput(
+            filename="00-provider-mask.png",
+            png_bytes=output.getvalue(),
+            mime_type="image/png",
+        )
+
     async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
         source_inputs = await asyncio.to_thread(self._source_inputs, request)
+        provider_mask = await asyncio.to_thread(
+            self._provider_mask,
+            request,
+            source_inputs[0],
+        )
         result: OpenAIImageEditResult = await self.transport.edit(
             model=request.model,
             prompt=request.prompt,
             images=source_inputs,
+            mask=provider_mask,
             n=request.candidate_count,
             quality=request.quality,
             size=request.size,
@@ -244,7 +319,6 @@ class GeneratorService:
         model: str = FAKE_IMAGE_MODEL,
         quality: str = "medium",
         size: str | None = None,
-        composite_floor: CompositeFloorService | None = None,
     ) -> None:
         self.provider = provider
         self.asset_store = asset_store
@@ -252,7 +326,6 @@ class GeneratorService:
         self.model = model
         self.quality = quality
         self.size = size
-        self.composite_floor = composite_floor or CompositeFloorService(asset_store)
 
     @staticmethod
     def _crop_mapping_for_output(
@@ -284,6 +357,7 @@ class GeneratorService:
     def build_request_key(request: GenerationRequest) -> str:
         payload = {
             "schema_version": GENERATOR_SCHEMA_VERSION,
+            "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
             "operation": "generate_round",
             "search_id": request.search_id,
             "round_index": request.round_index,
@@ -294,8 +368,12 @@ class GeneratorService:
             "quality": request.quality,
             "size": request.size,
             "input_proxy_version": GENERATOR_INPUT_PROXY_VERSION,
+            "provider_mask_version": GENERATOR_MASK_VERSION,
             "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
             "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+            "background_format": GENERATOR_BACKGROUND_PROXY_FORMAT,
+            "model_mask_x_padding": GENERATOR_MODEL_MASK_X_PADDING,
+            "model_mask_y_padding": GENERATOR_MODEL_MASK_Y_PADDING,
             "opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
             "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
             "transparent_format": "png",
@@ -379,6 +457,7 @@ class GeneratorService:
         request_key = self.build_request_key(request)
         audit_payload = {
             "schema_version": GENERATOR_SCHEMA_VERSION,
+            "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
             "source_manifest_hash": request.source_manifest.manifest_hash,
             "source_asset_ids": [
                 request.source_manifest.background.asset_id,
@@ -392,8 +471,13 @@ class GeneratorService:
             "size": request.size,
             "input_proxy": {
                 "schema_version": GENERATOR_INPUT_PROXY_VERSION,
+                "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
+                "provider_mask_version": GENERATOR_MASK_VERSION,
                 "background_max_side": GENERATOR_BACKGROUND_MAX_SIDE,
                 "reference_max_side": GENERATOR_REFERENCE_MAX_SIDE,
+                "background_format": GENERATOR_BACKGROUND_PROXY_FORMAT,
+                "model_mask_x_padding": GENERATOR_MODEL_MASK_X_PADDING,
+                "model_mask_y_padding": GENERATOR_MODEL_MASK_Y_PADDING,
                 "opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
                 "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
                 "transparent_format": "png",
@@ -481,11 +565,6 @@ class GeneratorService:
                     "Image generator returned a different number of candidates than requested"
                 )
             candidates: list[CandidateRecord] = []
-            composite_mask = await asyncio.to_thread(
-                self.composite_floor.create_mask,
-                source_background=request.source_manifest.background,
-                placement=request.placement,
-            )
             for output in sorted(generated, key=lambda item: item.variant_index):
                 raw_asset = await asyncio.to_thread(
                     self.asset_store.put_image_bytes, output.png_bytes
@@ -493,15 +572,6 @@ class GeneratorService:
                 crop_mapping = self._crop_mapping_for_output(
                     source_manifest=request.source_manifest,
                     output_asset=raw_asset,
-                )
-                composite = await asyncio.to_thread(
-                    self.composite_floor.protect_candidate,
-                    source_manifest_hash=request.source_manifest.manifest_hash,
-                    source_background=request.source_manifest.background,
-                    raw_candidate=raw_asset,
-                    placement=request.placement,
-                    crop_mapping=crop_mapping,
-                    mask=composite_mask,
                 )
                 candidate_seed = (
                     f"{request.search_id}:{request.round_index}:{output.variant_index}:"
@@ -515,10 +585,12 @@ class GeneratorService:
                     round_index=request.round_index,
                     variant_index=output.variant_index,
                     raw_asset=raw_asset,
-                    protected_asset=composite.protected_asset,
+                    # ``protected_asset`` is retained as a legacy alias only.
+                    # Search never floors or rewrites the raw provider output.
+                    protected_asset=raw_asset,
                     source_manifest_hash=request.source_manifest.manifest_hash,
                     crop_mapping=crop_mapping,
-                    composite=composite,
+                    composite=None,
                     prompt_hash=request.prompt_hash,
                     request_key=request_key,
                     generation_depth=0,

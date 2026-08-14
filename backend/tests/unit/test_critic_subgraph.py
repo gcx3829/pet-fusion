@@ -189,10 +189,35 @@ async def test_critic_subgraph_fans_out_bounded_proxies_and_replays_idempotently
         for asset in (
             bundle.background_proxy,
             bundle.placement_overlay_proxy,
-            bundle.protected_candidate_proxy,
+            bundle.raw_candidate_proxy,
             *bundle.reference_proxies,
         ):
             assert max(asset.width, asset.height) <= 32
+
+
+async def test_critic_proxy_uses_raw_when_legacy_protected_asset_differs(
+    settings: Settings,
+) -> None:
+    container, manifest, command, _search_id, candidates = (
+        await _setup_search_with_candidates(settings)
+    )
+    raw_candidate = candidates[0]
+    legacy_shaped = raw_candidate.model_copy(
+        update={"protected_asset": manifest.background}
+    )
+
+    bundle = CriticProxyBuilder(
+        asset_store=container.asset_store,
+        app_store=container.app_store,
+        max_side=64,
+    ).build(
+        source_manifest=manifest,
+        candidate=legacy_shaped,
+        placement=command.placement,
+    )
+
+    assert bundle.candidate_proxy == bundle.raw_candidate_proxy
+    assert bundle.raw_candidate_proxy.sha256 != bundle.background_proxy.sha256
 
 
 async def test_critic_subgraph_isolates_exhausted_provider_failures_on_replay(
@@ -579,6 +604,24 @@ def test_critic_request_key_fences_model_and_prompt_lineage() -> None:
         search_id="search-key",
         request=request,
         model="gpt-5.6-sol",
+        rubric_version="critic-rubric/v1",
+        provider_fingerprint="openai-responses:test",
+    )
+    protected_only_change = candidate.model_copy(
+        update={"protected_asset": source.cat_references[0]}
+    )
+    assert base == CriticEvaluationService.build_request_key(
+        search_id="search-key",
+        request=replace(request, candidate=protected_only_change),
+        model="gpt-5.6-terra",
+        rubric_version="critic-rubric/v1",
+        provider_fingerprint="openai-responses:test",
+    )
+    raw_change = candidate.model_copy(update={"raw_asset": source.cat_references[0]})
+    assert base != CriticEvaluationService.build_request_key(
+        search_id="search-key",
+        request=replace(request, candidate=raw_change),
+        model="gpt-5.6-terra",
         rubric_version="critic-rubric/v1",
         provider_fingerprint="openai-responses:test",
     )

@@ -18,6 +18,18 @@ from app.domain.searches import (
 router = APIRouter(tags=["searches"])
 
 
+def _search_response(container: object, search_id: str) -> SearchResponse:
+    from app.container import AppContainer
+
+    if not isinstance(container, AppContainer):
+        raise TypeError("Search response requires an application container")
+    search = container.app_store.get_search(search_id)
+    return SearchResponse.from_record(
+        search,
+        evaluations=container.app_store.list_evaluations_with_scores(search_id),
+    )
+
+
 async def _run_inline_search(container: object, search_id: str) -> None:
     from app.container import AppContainer
 
@@ -81,7 +93,7 @@ async def create_search(
 
 @router.get("/searches/{search_id}", response_model=SearchResponse)
 async def get_search(search_id: str, container: ContainerDependency) -> SearchResponse:
-    return SearchResponse.from_record(container.app_store.get_search(search_id))
+    return _search_response(container, search_id)
 
 
 @router.post("/searches/{search_id}/resume", response_model=SearchResponse)
@@ -101,27 +113,33 @@ async def resume_search(
             raise ConflictError(f"Cannot cancel a search with status {refreshed.status.value}")
         return SearchResponse.from_record(container.app_store.get_search(search_id))
 
-    if request.action == "accept_global_winner":
+    if request.action in {"accept_global_winner", "accept_candidate"}:
         if search.status is SearchStatus.ACCEPTED:
-            return SearchResponse.from_record(search)
+            return _search_response(container, search_id)
         if search.status is not SearchStatus.WAITING_FOR_HUMAN:
             raise ConflictError(
                 f"Cannot accept a search with status {search.status.value}"
             )
-        if search.global_winner_id is None:
+        selected_candidate_id = (
+            request.selected_candidate_id if request.action == "accept_candidate" else None
+        )
+        if request.action == "accept_candidate" and selected_candidate_id is None:
+            raise ConflictError("Cannot accept a candidate without selected_candidate_id")
+        if request.action == "accept_global_winner" and search.global_winner_id is None:
             raise ConflictError("Cannot accept without a global winner")
         if not any(
-            candidate.candidate_id == search.global_winner_id for candidate in search.candidates
+            candidate.candidate_id == (selected_candidate_id or search.global_winner_id)
+            for candidate in search.candidates
         ):
-            raise ConflictError("Global winner is not a candidate in this search")
-        if not container.app_store.accept_search(search_id):
+            raise ConflictError("Selected candidate is not a candidate in this search")
+        if not container.app_store.accept_search(search_id, candidate_id=selected_candidate_id):
             refreshed = container.app_store.get_search(search_id)
             if refreshed.status is SearchStatus.ACCEPTED:
-                return SearchResponse.from_record(refreshed)
+                return _search_response(container, search_id)
             raise ConflictError(
                 f"Cannot accept a search with status {refreshed.status.value}"
             )
-        return SearchResponse.from_record(container.app_store.get_search(search_id))
+        return _search_response(container, search_id)
 
     if request.action == "continue_one_round":
         if search.status is not SearchStatus.WAITING_FOR_HUMAN:
@@ -130,11 +148,10 @@ async def resume_search(
             )
         if not container.app_store.queue_next_round(search_id):
             raise ConflictError("Search has reached its maximum configured rounds")
-        queued = container.app_store.get_search(search_id)
         if container.settings.run_inline:
             background_tasks.add_task(_run_inline_search, container, search_id)
-        return SearchResponse.from_record(queued)
+        return _search_response(container, search_id)
 
     raise UnsupportedMilestoneActionError(
-        "The mocked vertical slice supports accept_global_winner, continue_one_round, and cancel"
+        "Supported actions: accept_global_winner, accept_candidate, continue_one_round, and cancel"
     )

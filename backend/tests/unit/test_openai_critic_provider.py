@@ -245,7 +245,12 @@ async def test_official_critic_uses_structured_responses_and_safe_idempotent_aud
             "SELECT request_json, response_json FROM provider_calls WHERE request_key = ?",
             (request_key,),
         ).fetchone()
-    audited = json.loads(request_json), json.loads(response_json)
+    audited_request = json.loads(request_json)
+    assert audited_request["input_semantics_version"] == "raw-authority/v1"
+    assert audited_request["raw_asset_id"] == request.candidate.raw_asset.asset_id
+    assert audited_request["raw_asset_sha256"] == request.candidate.raw_asset.sha256
+    assert all("protected" not in key for key in audited_request)
+    audited = audited_request, json.loads(response_json)
     audited_text = json.dumps(audited, sort_keys=True)
     assert "stub-secret-key" not in audited_text
     assert "relay.example.test" not in audited_text

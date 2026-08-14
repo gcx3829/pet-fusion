@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.assets import AssetRef
 from app.domain.candidates import CandidateRecord
-from app.domain.compositing import Mask
+from app.domain.compositing import Mask, PixelBox
 from app.domain.errors import ConflictError, SourceManifestMismatchError
 from app.domain.local_fixes import (
     LocalFixOutcome,
@@ -160,9 +160,7 @@ class LocalFixService:
             source_background.width,
             source_background.height,
         ):
-            raise ConflictError(
-                "Local Fix base candidate must be a full-resolution protected image"
-            )
+            raise ConflictError("Local Fix base candidate must be full-resolution")
         image_size = (source_background.width, source_background.height)
         tight_pixels = self._validated_mask_image(
             mask=mask,
@@ -173,7 +171,7 @@ class LocalFixService:
         outer_pixels = self._validated_mask_image(
             mask=outer_mask,
             expected_size=image_size,
-            label="original composite floor",
+            label="outer Local Fix boundary",
         )
         allowed = outer_mask.allowed_box
         tight = mask.allowed_box
@@ -184,13 +182,13 @@ class LocalFixService:
             or tight.bottom > allowed.bottom
         ):
             raise ConflictError(
-                "Local Fix tight mask must remain inside the original composite floor"
+                "Local Fix tight mask must remain inside its outer boundary"
             )
         tight_binary = tight_pixels.point(lambda alpha: 255 if alpha > 0 else 0)
         outside_outer = outer_pixels.point(lambda alpha: 255 if alpha == 0 else 0)
         if ImageChops.multiply(tight_binary, outside_outer).getbbox() is not None:
             raise ConflictError(
-                "Local Fix tight mask contains editable pixels outside the original floor"
+                "Local Fix tight mask contains editable pixels outside its outer boundary"
             )
 
     def _validated_mask_image(
@@ -238,37 +236,70 @@ class LocalFixService:
         return pixels
 
     def _validate_base_composite_lineage(self, resolution: LocalFixResolution) -> None:
-        """Ensure a candidate's claimed floor really belongs to this immutable source."""
+        """Validate either a legacy floor or a raw-first full-frame boundary."""
 
         composite = resolution.base_candidate.composite
+        outer_mask = resolution.outer_composite_mask
+        source_background = resolution.source_manifest.background
         if composite is None:
-            raise ConflictError("Local Fix requires a composite-protected base candidate")
-        if composite.source_background != resolution.source_manifest.background:
-            raise ConflictError(
-                "Local Fix candidate composite does not match the source background"
+            if (
+                resolution.base_candidate.raw_asset
+                != resolution.base_candidate.protected_asset
+            ):
+                raise ConflictError(
+                    "Raw-first Local Fix base has inconsistent compatibility lineage"
+                )
+            if outer_mask.mask_scope != "full_frame":
+                raise ConflictError("Raw-first Local Fix requires a full-frame boundary")
+        else:
+            if composite.source_background != source_background:
+                raise ConflictError(
+                    "Local Fix candidate composite does not match the source background"
+                )
+            if composite.raw_candidate != resolution.base_candidate.raw_asset:
+                raise ConflictError(
+                    "Local Fix candidate composite does not match raw candidate lineage"
+                )
+            if composite.protected_asset != resolution.base_candidate.protected_asset:
+                raise ConflictError(
+                    "Local Fix candidate composite does not match protected lineage"
+                )
+            if composite.mask != outer_mask:
+                raise ConflictError("Local Fix candidate composite mask does not match lineage")
+            if not composite.outside_mask_exact:
+                raise ConflictError(
+                    "Local Fix base candidate lacks verified background protection"
+                )
+
+        if outer_mask.mask_scope == "full_frame":
+            expected_box = PixelBox(
+                x=0,
+                y=0,
+                width=source_background.width,
+                height=source_background.height,
             )
-        if composite.raw_candidate != resolution.base_candidate.raw_asset:
-            raise ConflictError(
-                "Local Fix candidate composite does not match raw candidate lineage"
+            if outer_mask.allowed_box != expected_box or outer_mask.feather_radius_px != 0:
+                raise ConflictError("Local Fix full-frame boundary metadata is invalid")
+            self._validated_mask_image(
+                mask=outer_mask,
+                expected_size=(source_background.width, source_background.height),
+                label="full-frame boundary",
             )
-        if composite.protected_asset != resolution.base_candidate.protected_asset:
-            raise ConflictError("Local Fix candidate composite does not match protected lineage")
-        if not composite.outside_mask_exact:
-            raise ConflictError("Local Fix base candidate lacks verified background protection")
-        try:
-            self.composite_floor.assert_mask_matches_placement(
-                source_background=resolution.source_manifest.background,
-                placement=resolution.placement,
-                mask=composite.mask,
-            )
-        except ValueError as exc:
-            raise ConflictError(
-                "Local Fix candidate composite floor does not match the accepted placement"
-            ) from exc
+        else:
+            try:
+                self.composite_floor.assert_mask_matches_placement(
+                    source_background=source_background,
+                    placement=resolution.placement,
+                    mask=outer_mask,
+                )
+            except ValueError as exc:
+                raise ConflictError(
+                    "Local Fix candidate composite floor does not match the accepted placement"
+                ) from exc
         with (
-            Image.open(resolution.source_manifest.background.filesystem_path) as source,
+            Image.open(source_background.filesystem_path) as source,
             Image.open(resolution.base_candidate.protected_asset.filesystem_path) as protected,
-            Image.open(composite.mask.asset.filesystem_path) as mask,
+            Image.open(outer_mask.asset.filesystem_path) as mask,
         ):
             if not self.composite_floor.outside_mask_is_exact(
                 background=source,
@@ -410,8 +441,26 @@ class LocalFixService:
         self.asset_store.assert_png_lineage_asset(base_candidate.raw_asset)
         self.asset_store.assert_png_lineage_asset(base_candidate.protected_asset)
         if root_candidate.composite is None:
-            raise ConflictError("Local Fix root candidate lacks a composite floor")
-        outer_composite_mask = root_candidate.composite.mask
+            if (
+                root_candidate.raw_asset.width != manifest.background.width
+                or root_candidate.raw_asset.height != manifest.background.height
+            ):
+                raise ConflictError(
+                    "Local Fix requires a full-resolution raw candidate or legacy composite"
+                )
+            outer_composite_mask = self.composite_floor.create_mask_for_box(
+                source_background=manifest.background,
+                allowed_box=PixelBox(
+                    x=0,
+                    y=0,
+                    width=manifest.background.width,
+                    height=manifest.background.height,
+                ),
+                feather_radius_px=0,
+                mask_scope="full_frame",
+            )
+        else:
+            outer_composite_mask = root_candidate.composite.mask
         self.app_store.register_asset(outer_composite_mask.asset)
         resolution = LocalFixResolution(
             request=request,

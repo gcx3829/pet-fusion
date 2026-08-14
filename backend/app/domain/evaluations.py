@@ -100,6 +100,40 @@ class DimensionScores(BaseModel):
     scene_preservation: float = Field(ge=0, le=100)
     overall_photographic_naturalness: float = Field(ge=0, le=100)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_unit_interval_scores(cls, value: Any) -> Any:
+        """Accept relays that return rubric scores as 0..1 fractions.
+
+        The public rubric is 0..100, but a few OpenAI-compatible relays coerce
+        numeric fields into unit-interval probabilities. Normalizing that shape
+        at the domain boundary keeps the ranker and UI on one scale without
+        changing the documented response contract.
+        """
+
+        if not isinstance(value, Mapping):
+            return value
+        dimension_names = tuple(cls.model_fields)
+        raw_scores = [value.get(name) for name in dimension_names]
+        numeric_scores = [
+            item
+            for item in raw_scores
+            if isinstance(item, (int, float)) and not isinstance(item, bool)
+        ]
+        if (
+            numeric_scores
+            and len(numeric_scores) == len(dimension_names)
+            and max(numeric_scores) <= 1
+        ):
+            return {
+                **value,
+                **{
+                    name: float(value[name]) * 100
+                    for name in dimension_names
+                },
+            }
+        return value
+
     def as_mapping(self) -> dict[str, float]:
         return {
             "cat_identity": self.cat_identity,

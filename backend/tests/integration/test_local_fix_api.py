@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.services import local_fix_service as local_fix_service_module
+from app.services.image_pipeline import normalized_placement_to_pixel_box
 from app.services.local_fix_service import (
     DeterministicFakeLocalFixProvider,
     LocalFixGeneratedImage,
@@ -50,15 +51,18 @@ def _stored_tight_mask(
     base = next(
         item for item in search.candidates if item.candidate_id == candidate["global_winner_id"]
     )
-    assert base.composite is not None
-    outer = base.composite.mask.allowed_box
+    outer = normalized_placement_to_pixel_box(
+        search.placement,
+        width=base.raw_asset.width,
+        height=base.raw_asset.height,
+    )
     width = min(8, outer.width)
     height = min(8, outer.height)
     x = outer.x + (outer.width - width) // 2
     y = outer.y + (outer.height - height) // 2
     image = Image.new(
         "L",
-        (base.protected_asset.width, base.protected_asset.height),
+        (base.raw_asset.width, base.raw_asset.height),
         0,
     )
     image.paste(255, (x, y, x + width, y + height))

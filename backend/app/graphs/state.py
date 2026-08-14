@@ -27,6 +27,7 @@ class SearchState(TypedDict, total=False):
     canonical_template_version: str
     generation_prompt: str
     generation_prompt_hash: str
+    prompt_history: list[dict[str, object]]
     active_directives: list[dict[str, object]]
     active_directives_hash: str
     directive_policy_version: str
