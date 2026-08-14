@@ -11,14 +11,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.domain.assets import AssetRef
+from app.domain.assets import AssetRef, SourceManifest
 from app.domain.candidates import CandidateRecord
 from app.domain.errors import ConflictError, NotFoundError
 from app.domain.evaluations import CandidateEvaluation
 from app.domain.exports import ExportResult
+from app.domain.fusions import FusionResult
 from app.domain.projects import ProjectRecord
 from app.domain.searches import (
     CreateSearchRequest,
+    PromptHistoryEntry,
     SearchEvent,
     SearchRunRecord,
     SearchStatus,
@@ -78,6 +80,7 @@ class AppStore:
                 ("round_winner_id", "TEXT"),
                 ("global_winner_score", "REAL"),
                 ("round_history_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("prompt_history_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("interrupt_payload_json", "TEXT"),
             ):
                 if column not in search_columns:
@@ -89,6 +92,17 @@ class AppStore:
                 "ON search_runs(project_id, idempotency_key) "
                 "WHERE idempotency_key IS NOT NULL"
             )
+            # Version 10 adds explicit search-scoped alpha-mask registration and
+            # two audit columns.  ``CREATE TABLE IF NOT EXISTS`` handles old
+            # databases with no Fusion tables; these additive columns handle a
+            # database created by the initial v9 Fusion slice.
+            fusion_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(fusions)")
+            }
+            for column in ("source_background_asset_id", "input_mask_asset_id"):
+                if column not in fusion_columns:
+                    connection.execute(f"ALTER TABLE fusions ADD COLUMN {column} TEXT")
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (MIGRATION_VERSION, utcnow().isoformat()),
@@ -285,6 +299,250 @@ class AppStore:
             connection.commit()
         return result
 
+    @staticmethod
+    def _fusion_from_row(row: sqlite3.Row) -> FusionResult:
+        return FusionResult.model_validate_json(row["result_json"])
+
+    @staticmethod
+    def _asset_matches_row(asset: AssetRef, row: sqlite3.Row) -> bool:
+        return (
+            str(row["asset_id"]) == asset.asset_id
+            and str(row["sha256"]) == asset.sha256
+            and str(row["path"]) == asset.path
+            and str(row["mime_type"]) == asset.mime_type
+            and int(row["width"]) == asset.width
+            and int(row["height"]) == asset.height
+        )
+
+    def register_fusion_mask(
+        self,
+        *,
+        search_id: str,
+        source_manifest_hash: str,
+        asset: AssetRef,
+    ) -> AssetRef:
+        """Bind one uploaded alpha mask to an accepted Search lineage."""
+
+        now = utcnow().isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            search_row = connection.execute(
+                "SELECT status, source_manifest_hash FROM search_runs WHERE search_id = ?",
+                (search_id,),
+            ).fetchone()
+            if search_row is None:
+                connection.rollback()
+                raise NotFoundError(f"Search {search_id} was not found")
+            if str(search_row["status"]) != SearchStatus.ACCEPTED.value:
+                connection.rollback()
+                raise ConflictError("Fusion Mask upload requires an accepted search")
+            if str(search_row["source_manifest_hash"]) != source_manifest_hash:
+                connection.rollback()
+                raise ConflictError("Fusion Mask source lineage does not match the search")
+            asset_row = connection.execute(
+                "SELECT * FROM assets WHERE asset_id = ?", (asset.asset_id,)
+            ).fetchone()
+            if asset_row is None or not self._asset_matches_row(asset, asset_row):
+                connection.rollback()
+                raise ConflictError("Fusion Mask asset is not registered canonically")
+            connection.execute(
+                """
+                INSERT INTO fusion_mask_inputs(
+                    search_id, source_manifest_hash, asset_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(search_id, asset_id) DO NOTHING
+                """,
+                (search_id, source_manifest_hash, asset.asset_id, now),
+            )
+            connection.commit()
+        return asset
+
+    def get_fusion_mask(
+        self,
+        *,
+        search_id: str,
+        source_manifest_hash: str,
+        asset_id: str,
+    ) -> AssetRef:
+        """Resolve only an alpha mask explicitly registered for this Search."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT a.* FROM fusion_mask_inputs AS m
+                JOIN assets AS a ON a.asset_id = m.asset_id
+                WHERE m.search_id = ? AND m.source_manifest_hash = ? AND m.asset_id = ?
+                """,
+                (search_id, source_manifest_hash, asset_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(
+                f"Fusion Mask {asset_id} was not found for search {search_id}"
+            )
+        return AssetRef(
+            asset_id=row["asset_id"],
+            sha256=row["sha256"],
+            path=row["path"],
+            mime_type=row["mime_type"],
+            width=row["width"],
+            height=row["height"],
+        )
+
+    def find_fusion(self, fusion_key: str) -> FusionResult | None:
+        """Return an explicit Fusion result for content-addressed replay."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM fusions WHERE fusion_key = ?",
+                (fusion_key,),
+            ).fetchone()
+        return self._fusion_from_row(row) if row is not None else None
+
+    def get_fusion(self, *, search_id: str, fusion_key: str) -> FusionResult:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT result_json FROM fusions
+                WHERE search_id = ? AND fusion_key = ?
+                """,
+                (search_id, fusion_key),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Fusion {fusion_key} was not found for search {search_id}")
+        return self._fusion_from_row(row)
+
+    def record_fusion(self, result: FusionResult) -> FusionResult:
+        """Persist an explicit Fusion result behind a final lineage fence."""
+
+        if result.key_schema_version != "fusion/v2":
+            raise ConflictError("Only current Fusion lineage can be newly persisted")
+        now = utcnow().isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                "SELECT result_json FROM fusions WHERE fusion_key = ?",
+                (result.fusion_key,),
+            ).fetchone()
+            search_row = connection.execute(
+                """
+                SELECT status, source_manifest_hash, project_id
+                FROM search_runs WHERE search_id = ?
+                """,
+                (result.search_id,),
+            ).fetchone()
+            candidate_row = connection.execute(
+                "SELECT search_id, record_json FROM candidates WHERE candidate_id = ?",
+                (result.candidate_id,),
+            ).fetchone()
+            if search_row is None or candidate_row is None:
+                connection.rollback()
+                raise NotFoundError("Fusion search or candidate was not found")
+            if str(search_row["status"]) != SearchStatus.ACCEPTED.value:
+                connection.rollback()
+                raise ConflictError("Only an accepted search can persist a Fusion")
+            if str(candidate_row["search_id"]) != result.search_id:
+                connection.rollback()
+                raise ConflictError("Fusion candidate does not belong to its search")
+            if str(search_row["source_manifest_hash"]) != result.source_manifest_hash:
+                connection.rollback()
+                raise ConflictError("Fusion source manifest lineage does not match the search")
+            project_row = connection.execute(
+                "SELECT source_manifest_json FROM projects WHERE project_id = ?",
+                (search_row["project_id"],),
+            ).fetchone()
+            if project_row is None:
+                connection.rollback()
+                raise NotFoundError("Fusion project was not found")
+            source_manifest = SourceManifest.model_validate_json(
+                project_row["source_manifest_json"]
+            )
+            source_manifest.assert_integrity()
+            if (
+                source_manifest.manifest_hash != result.source_manifest_hash
+                or source_manifest.background != result.composite.source_background
+            ):
+                connection.rollback()
+                raise ConflictError("Fusion source background lineage changed before persistence")
+            candidate = CandidateRecord.model_validate_json(candidate_row["record_json"])
+            if (
+                candidate.source_manifest_hash != result.source_manifest_hash
+                or candidate.raw_asset != result.raw_asset
+                or candidate.crop_mapping != result.crop_mapping
+                or candidate.generation_depth != 0
+            ):
+                connection.rollback()
+                raise ConflictError("Fusion raw candidate lineage changed before persistence")
+            if not result.composite.outside_mask_exact:
+                connection.rollback()
+                raise ConflictError("Fusion result lacks exact outside-mask protection")
+            for asset in (
+                result.composite.source_background,
+                result.raw_asset,
+                result.mask,
+                result.fusion_asset,
+                *(
+                    (result.input_mask_asset,)
+                    if result.input_mask_asset is not None
+                    else ()
+                ),
+            ):
+                asset_row = connection.execute(
+                    "SELECT * FROM assets WHERE asset_id = ?", (asset.asset_id,)
+                ).fetchone()
+                if asset_row is None or not self._asset_matches_row(asset, asset_row):
+                    connection.rollback()
+                    raise ConflictError("Fusion references a non-canonical asset")
+            if result.input_mask_asset is not None:
+                binding = connection.execute(
+                    """
+                    SELECT 1 FROM fusion_mask_inputs
+                    WHERE search_id = ? AND source_manifest_hash = ? AND asset_id = ?
+                    """,
+                    (
+                        result.search_id,
+                        result.source_manifest_hash,
+                        result.input_mask_asset.asset_id,
+                    ),
+                ).fetchone()
+                if binding is None:
+                    connection.rollback()
+                    raise ConflictError("Fusion input mask is not registered for this search")
+            if existing_row is not None:
+                existing = self._fusion_from_row(existing_row)
+                if existing != result:
+                    connection.rollback()
+                    raise ConflictError("Fusion key collision with a different result")
+                connection.commit()
+                return existing
+            connection.execute(
+                """
+                INSERT INTO fusions(
+                    fusion_key, search_id, candidate_id, source_manifest_hash,
+                    source_background_asset_id, raw_asset_id, input_mask_asset_id,
+                    mask_asset_id, fusion_asset_id, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.fusion_key,
+                    result.search_id,
+                    result.candidate_id,
+                    result.source_manifest_hash,
+                    result.composite.source_background.asset_id,
+                    result.raw_asset.asset_id,
+                    (
+                        result.input_mask_asset.asset_id
+                        if result.input_mask_asset is not None
+                        else None
+                    ),
+                    result.mask.asset_id,
+                    result.fusion_asset.asset_id,
+                    result.model_dump_json(),
+                    now,
+                ),
+            )
+            connection.commit()
+        return result
+
     def create_project(self, project: ProjectRecord) -> None:
         manifest = project.source_manifest
         manifest_json = manifest.model_dump_json()
@@ -464,6 +722,17 @@ class AppStore:
             global_winner_id=row["global_winner_id"],
             global_winner_score=row["global_winner_score"],
             round_history=json.loads(row["round_history_json"] or "[]"),
+            prompt_history=[
+                PromptHistoryEntry.model_validate(item)
+                for item in (
+                    json.loads(
+                        row["prompt_history_json"]
+                        if "prompt_history_json" in row.keys()
+                        else "[]"
+                    )
+                    or []
+                )
+            ],
             active_directives=json.loads(row["active_directives_json"]),
             interrupt_payload=(
                 json.loads(row["interrupt_payload_json"])
@@ -486,6 +755,7 @@ class AppStore:
         global_winner_id: str | None = None,
         global_winner_score: float | None = None,
         round_history: Sequence[Mapping[str, object]] | None = None,
+        prompt_history: Sequence[Mapping[str, object]] | None = None,
         active_directives: Sequence[Mapping[str, object]] | None = None,
         interrupt_payload: Mapping[str, object] | None = None,
         clear_interrupt_payload: bool = False,
@@ -516,6 +786,11 @@ class AppStore:
             "round_history_json": (
                 json.dumps(round_history, separators=(",", ":"))
                 if round_history is not None
+                else None
+            ),
+            "prompt_history_json": (
+                json.dumps(prompt_history, separators=(",", ":"))
+                if prompt_history is not None
                 else None
             ),
             "active_directives_json": (
@@ -1078,16 +1353,29 @@ class AppStore:
             connection.commit()
 
     def list_evaluations(self, search_id: str) -> list[CandidateEvaluation]:
+        return [evaluation for evaluation, _score in self.list_evaluations_with_scores(search_id)]
+
+    def list_evaluations_with_scores(
+        self, search_id: str
+    ) -> list[tuple[CandidateEvaluation, float | None]]:
+        """Return normalized Critic evaluations together with persisted ranker scores."""
+
         self.get_search(search_id)
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT evaluation_json FROM candidate_evaluations
+                SELECT evaluation_json, score FROM candidate_evaluations
                 WHERE search_id = ? ORDER BY round_index, candidate_id
                 """,
                 (search_id,),
             ).fetchall()
-        return [CandidateEvaluation.model_validate_json(row["evaluation_json"]) for row in rows]
+        return [
+            (
+                CandidateEvaluation.model_validate_json(row["evaluation_json"]),
+                float(row["score"]) if row["score"] is not None else None,
+            )
+            for row in rows
+        ]
 
     def claim_next_search(self, *, worker_id: str, lease_seconds: int) -> str | None:
         now = utcnow()
@@ -1163,31 +1451,69 @@ class AppStore:
             connection.commit()
         return cursor.rowcount == 1
 
-    def accept_search(self, search_id: str) -> bool:
-        """Atomically accept only a waiting search with a persisted winner."""
+    def accept_search(self, search_id: str, candidate_id: str | None = None) -> bool:
+        """Atomically accept the historical winner or an explicitly selected candidate."""
 
         now = utcnow().isoformat()
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            search = connection.execute(
+                """
+                SELECT global_winner_id, global_winner_score
+                FROM search_runs
+                WHERE search_id = ? AND status = 'waiting_for_human'
+                """,
+                (search_id,),
+            ).fetchone()
+            if search is None:
+                connection.rollback()
+                return False
+
+            selected_id = str(candidate_id or search["global_winner_id"] or "")
+            if not selected_id:
+                connection.rollback()
+                return False
+            selected = connection.execute(
+                """
+                SELECT candidate_id FROM candidates
+                WHERE search_id = ? AND candidate_id = ?
+                """,
+                (search_id, selected_id),
+            ).fetchone()
+            if selected is None:
+                connection.rollback()
+                return False
+            score_row = connection.execute(
+                """
+                SELECT score FROM candidate_evaluations
+                WHERE search_id = ? AND candidate_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (search_id, selected_id),
+            ).fetchone()
+            selected_score = (
+                float(score_row["score"])
+                if score_row is not None and score_row["score"] is not None
+                else None
+            )
+            if candidate_id is None:
+                selected_score = search["global_winner_score"]
+            stop_reason = (
+                "accepted_selected_candidate"
+                if candidate_id is not None
+                else "accepted_global_winner"
+            )
             cursor = connection.execute(
                 """
                 UPDATE search_runs
-                SET status = 'accepted', stop_reason = 'accepted_global_winner',
-                    interrupt_payload_json = NULL, lease_owner = NULL,
+                SET status = 'accepted', global_winner_id = ?, global_winner_score = ?,
+                    stop_reason = ?, interrupt_payload_json = NULL, lease_owner = NULL,
                     lease_until = NULL, updated_at = ?
                 WHERE search_id = ? AND status = 'waiting_for_human'
-                  AND global_winner_id IS NOT NULL
                 """,
-                (now, search_id),
+                (selected_id, selected_score, stop_reason, now, search_id),
             )
             if cursor.rowcount == 1:
-                winner = connection.execute(
-                    """
-                    SELECT global_winner_id, global_winner_score
-                    FROM search_runs WHERE search_id = ?
-                    """,
-                    (search_id,),
-                ).fetchone()
-                assert winner is not None
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO search_events(
@@ -1198,8 +1524,11 @@ class AppStore:
                         search_id,
                         json.dumps(
                             {
-                                "global_winner_id": winner["global_winner_id"],
-                                "global_winner_score": winner["global_winner_score"],
+                                "global_winner_id": selected_id,
+                                "global_winner_score": selected_score,
+                                "selection_mode": (
+                                    "candidate" if candidate_id is not None else "global_winner"
+                                ),
                             },
                             separators=(",", ":"),
                             sort_keys=True,

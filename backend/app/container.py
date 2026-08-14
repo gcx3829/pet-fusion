@@ -9,6 +9,7 @@ from app.services.asset_store import AssetStore
 from app.services.candidate_ranker import DeterministicCandidateRanker
 from app.services.critic_service import CriticProvider
 from app.services.export_service import ExportService
+from app.services.fusion_service import FusionService
 from app.services.generator_service import (
     FAKE_IMAGE_MODEL,
     DeterministicFakeImageGenerator,
@@ -38,6 +39,7 @@ class AppContainer:
     generator_service: GeneratorService
     search_runner: SearchRunner
     export_service: ExportService
+    fusion_service: FusionService
     local_fix_service: LocalFixService
 
     @classmethod
@@ -97,6 +99,7 @@ class AppContainer:
             image_generator=image_generator,
             generator_service=generator_service,
             export_service=ExportService(app_store=app_store, asset_store=asset_store),
+            fusion_service=FusionService(app_store=app_store, asset_store=asset_store),
             local_fix_service=LocalFixService(
                 provider=(
                     local_fix_provider

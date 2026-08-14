@@ -1,4 +1,4 @@
-MIGRATION_VERSION = 7
+MIGRATION_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS search_runs (
     global_winner_id TEXT,
     global_winner_score REAL,
     round_history_json TEXT NOT NULL DEFAULT '[]',
+    prompt_history_json TEXT NOT NULL DEFAULT '[]',
     active_directives_json TEXT NOT NULL DEFAULT '[]',
     interrupt_payload_json TEXT,
     stop_reason TEXT,
@@ -164,4 +165,33 @@ CREATE TABLE IF NOT EXISTS candidate_evaluations (
 
 CREATE INDEX IF NOT EXISTS idx_candidate_evaluations_search
 ON candidate_evaluations(search_id, round_index, candidate_id);
+
+CREATE TABLE IF NOT EXISTS fusions (
+    fusion_key TEXT PRIMARY KEY,
+    search_id TEXT NOT NULL REFERENCES search_runs(search_id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    source_manifest_hash TEXT NOT NULL,
+    source_background_asset_id TEXT REFERENCES assets(asset_id),
+    raw_asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+    input_mask_asset_id TEXT REFERENCES assets(asset_id),
+    mask_asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+    fusion_asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(search_id, fusion_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fusions_search_created
+ON fusions(search_id, created_at);
+
+CREATE TABLE IF NOT EXISTS fusion_mask_inputs (
+    search_id TEXT NOT NULL REFERENCES search_runs(search_id),
+    source_manifest_hash TEXT NOT NULL,
+    asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (search_id, asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fusion_mask_inputs_asset
+ON fusion_mask_inputs(asset_id, search_id);
 """

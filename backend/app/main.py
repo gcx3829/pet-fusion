@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import assets, events, exports, local_fixes, projects, searches
+from app.api import assets, events, exports, fusions, local_fixes, projects, searches
 from app.config import Settings, get_settings
 from app.container import AppContainer
 from app.domain.errors import DomainError
@@ -104,6 +104,7 @@ def create_app(
     app.include_router(searches.router, prefix="/api/v1")
     app.include_router(local_fixes.router, prefix="/api/v1")
     app.include_router(exports.router, prefix="/api/v1")
+    app.include_router(fusions.router, prefix="/api/v1")
     app.include_router(events.router, prefix="/api/v1")
     app.include_router(assets.router, prefix="/api/v1")
     return app
