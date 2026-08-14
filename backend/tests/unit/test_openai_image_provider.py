@@ -95,10 +95,71 @@ def test_live_generator_requires_a_nonempty_backend_key(tmp_path) -> None:
         AppContainer.build(settings)
 
 
+def test_official_transport_adds_v1_to_a_relay_root_url() -> None:
+    root_transport = OfficialOpenAIImageEditsTransport(
+        api_key="test-key-never-sent",
+        base_url="https://relay.example.test",
+    )
+    versioned_transport = OfficialOpenAIImageEditsTransport(
+        api_key="test-key-never-sent",
+        base_url="https://relay.example.test/v1/",
+    )
+
+    assert root_transport._base_url == "https://relay.example.test/v1"
+    assert versioned_transport._base_url == "https://relay.example.test/v1"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    (
+        (None, None),
+        ("", None),
+        ("  ", None),
+        (
+            " https://relay.example.test/gateway/openai/v1/// ",
+            "https://relay.example.test/gateway/openai/v1",
+        ),
+    ),
+)
+def test_official_transport_preserves_explicit_relay_paths(
+    configured: str | None,
+    expected: str | None,
+) -> None:
+    transport = OfficialOpenAIImageEditsTransport(
+        api_key="test-key-never-sent",
+        base_url=configured,
+    )
+
+    assert transport._base_url == expected
+
+
+@pytest.mark.parametrize(
+    "configured",
+    (
+        "relay.example.test/v1",
+        "ftp://relay.example.test/v1",
+        "https://user:password@relay.example.test/v1",
+        "https://relay.example.test/v1?api_key=must-not-leak",
+        "https://relay.example.test/v1#must-not-leak",
+    ),
+)
+def test_official_transport_rejects_unsafe_or_sdk_incompatible_base_urls(
+    configured: str,
+) -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        OfficialOpenAIImageEditsTransport(
+            api_key="test-key-never-sent",
+            base_url=configured,
+        )
+
+    assert "must-not-leak" not in str(exc_info.value)
+
+
 async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fields() -> None:
     png_bytes = make_image_bytes((12, 34, 56))
     jpeg_bytes = make_image_bytes((56, 34, 12), image_format="JPEG")
     captured: dict[str, object] = {}
+    factory_arguments: list[dict[str, object]] = []
 
     async def handle_request(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
@@ -121,10 +182,6 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
             },
         )
 
-    transport = OfficialOpenAIImageEditsTransport(
-        api_key="test-key-never-sent",
-        base_url="https://relay.example.test/v1",
-    )
     inputs = (
         OpenAIImageInput(filename="00-background.png", png_bytes=png_bytes),
         OpenAIImageInput(
@@ -132,12 +189,19 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
         ),
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http_client:
-        client = AsyncOpenAI(
+        def client_factory(*, api_key: str, base_url: str | None) -> AsyncOpenAI:
+            factory_arguments.append({"api_key": api_key, "base_url": base_url})
+            return AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                http_client=http_client,
+            )
+
+        transport = OfficialOpenAIImageEditsTransport(
             api_key="test-key-never-sent",
-            base_url="https://relay.example.test/v1",
-            http_client=http_client,
+            base_url="https://relay.example.test",
+            client_factory=client_factory,
         )
-        transport._client = client
         result = await transport.edit(
             model="gpt-image-2-2026-04-21",
             prompt="offline transport contract",
@@ -150,6 +214,12 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
     assert result.png_images == (png_bytes,)
     assert result.request_id == "req_mock_http_transport"
     assert result.usage == {"input_tokens": 7, "output_tokens": 13, "total_tokens": 20}
+    assert factory_arguments == [
+        {
+            "api_key": "test-key-never-sent",
+            "base_url": "https://relay.example.test/v1",
+        }
+    ]
     assert captured["url"] == "https://relay.example.test/v1/images/edits"
     assert captured["authorization"] == "Bearer test-key-never-sent"
     assert str(captured["content_type"]).startswith("multipart/form-data; boundary=")

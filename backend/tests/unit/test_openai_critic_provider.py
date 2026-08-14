@@ -107,6 +107,35 @@ def test_container_selects_live_critic_without_constructing_a_client(
     assert "stub-container-key" not in repr(live_settings)
 
 
+def test_official_critic_adds_v1_to_a_relay_root_url(settings: Settings) -> None:
+    container = AppContainer.build(settings)
+    client = StubClient()
+    factory_arguments: list[dict[str, object]] = []
+
+    def client_factory(**kwargs: object) -> StubClient:
+        factory_arguments.append(kwargs)
+        return client
+
+    provider = OfficialOpenAICriticProvider(
+        api_key="stub-secret-key",
+        base_url="https://relay.example.test/",
+        model="gpt-5.6-terra",
+        asset_store=container.asset_store,
+        client_factory=client_factory,
+    )
+
+    assert provider._base_url == "https://relay.example.test/v1"
+    assert provider._get_client() is client
+    assert factory_arguments == [
+        {
+            "api_key": "stub-secret-key",
+            "base_url": "https://relay.example.test/v1",
+        }
+    ]
+    assert "stub-secret-key" not in provider.provider_fingerprint
+    assert "relay.example.test" not in provider.provider_fingerprint
+
+
 async def test_official_critic_uses_structured_responses_and_safe_idempotent_audit(
     settings: Settings,
 ) -> None:

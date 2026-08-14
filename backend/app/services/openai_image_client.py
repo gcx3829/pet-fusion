@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.domain.errors import ConfigurationError
+from app.services.openai_client_config import normalize_openai_base_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +58,7 @@ class OfficialOpenAIImageEditsTransport:
         client_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._api_key = api_key
-        self._base_url = base_url or None
+        self._base_url = normalize_openai_base_url(base_url)
         self._client_factory = client_factory
         self._client: Any | None = None
 

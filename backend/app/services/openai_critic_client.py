@@ -16,6 +16,7 @@ from app.services.critic_service import (
     CriticProviderResult,
     CriticStructuredOutput,
 )
+from app.services.openai_client_config import normalize_openai_base_url
 
 OFFICIAL_CRITIC_RUBRIC_VERSION: Final = "critic-rubric/v1"
 CRITIC_SYSTEM_INSTRUCTIONS: Final = """
@@ -51,7 +52,7 @@ class OfficialOpenAICriticProvider:
         self._api_key = api_key
         self.model = model.strip()
         self.asset_store = asset_store
-        self._base_url = base_url.rstrip("/") if base_url else None
+        self._base_url = normalize_openai_base_url(base_url)
         endpoint_identity = self._base_url or "https://api.openai.com/v1"
         endpoint_digest = hashlib.sha256(endpoint_identity.encode("utf-8")).hexdigest()
         self.provider_fingerprint = f"openai-responses:{endpoint_digest[:24]}"
