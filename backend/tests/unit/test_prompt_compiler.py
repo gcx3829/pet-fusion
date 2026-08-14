@@ -21,6 +21,12 @@ def test_round_directives_do_not_mutate_canonical_prompt_lineage() -> None:
         user_intent="Place the same cat naturally in the travel photograph.",
         reference_count=2,
     )
+    assert "provided guidance mask" in canonical_prompt
+    assert "normalized region" not in canonical_prompt
+    assert "x=0.5000" not in canonical_prompt
+    assert "y=0.5000" not in canonical_prompt
+    assert "width=0.2000" not in canonical_prompt
+    assert "height=0.3000" not in canonical_prompt
     no_directives_prompt, no_directives_hash = compile_generation_prompt(
         canonical_prompt=canonical_prompt,
         active_directives=(),

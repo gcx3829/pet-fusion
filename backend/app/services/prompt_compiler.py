@@ -21,9 +21,8 @@ def compile_canonical_prompt(
             "- Image 1 is the immutable original travel photograph and base scene.",
             f"- Images 2..{reference_count + 1} show the same cat.",
             "TASK",
-            f"Add that exact cat inside normalized region x={placement.x:.4f}, "
-            f"y={placement.y:.4f}, width={placement.width:.4f}, "
-            f"height={placement.height:.4f}.",
+            "Add that exact cat in the intended placement area indicated by the "
+            "provided guidance mask.",
             f"Pose: {placement.pose}. Facing: {placement.facing}. Contact: {contact}.",
             f"User intent: {user_intent}",
             "Preserve identity, perspective, local light, optics, physical contact, "
