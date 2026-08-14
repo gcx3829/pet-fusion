@@ -128,7 +128,7 @@ export function PlacementCanvas({
             onChange={(event) => setShowMasks(event.target.checked)}
           />
           <span className="switch-track"><span /></span>
-          Mask 预览
+          Guidance Mask 预览
         </label>
       </div>
 
@@ -156,14 +156,6 @@ export function PlacementCanvas({
                   width={modelRight - modelX}
                   height={modelBottom - modelY}
                   rx="12"
-                />
-                <rect
-                  className="composite-mask"
-                  x={x - 8}
-                  y={y - 8}
-                  width={width + 16}
-                  height={height + 16}
-                  rx="8"
                 />
               </>
             )}
@@ -206,10 +198,18 @@ export function PlacementCanvas({
         {backgroundUrl && (
           <div className="canvas-legend" aria-hidden="true">
             <span><i className="legend-target" />目标边界</span>
-            {showMasks && <span><i className="legend-model" />模型引导</span>}
-            {showMasks && <span><i className="legend-floor" />保护回贴</span>}
+            {showMasks && <span><i className="legend-model" />Guidance Mask · 发给模型</span>}
+            <span className="legend-fusion-note"><i className="legend-fusion" />Fusion Mask · 用户接受后可选</span>
           </div>
         )}
+      </div>
+
+      <div className="mask-contract-note" role="note">
+        <div>
+          <strong>Guidance Mask ≠ Fusion Mask</strong>
+          <span>Guidance Mask 只告诉 GPT Image 2 关注哪里，不锁定像素；当前搜索、Critic 和人工审片始终查看 Raw Candidate。</span>
+        </div>
+        <small>Fusion Mask 编辑器尚未启用，接受候选后再由用户选择融合区域与羽化。</small>
       </div>
 
       <fieldset className="placement-fields" disabled={disabled || !backgroundUrl}>

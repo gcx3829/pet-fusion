@@ -2,8 +2,10 @@ import { useCallback, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icon } from "../components/Icon";
 import { CandidateGallery } from "../features/candidates/CandidateGallery";
+import { FusionEditor } from "../features/fusion/FusionEditor";
 import { PlacementCanvas } from "../features/placement/PlacementCanvas";
 import { HumanReview } from "../features/search/HumanReview";
+import { PromptHistory } from "../features/search/PromptHistory";
 import { SearchControls } from "../features/search/SearchControls";
 import { SearchTimeline } from "../features/search/SearchTimeline";
 import { SourcePanel } from "../features/sources/SourcePanel";
@@ -72,6 +74,7 @@ export function App() {
   const [options, setOptions] = useState<SearchOptions>(initialOptions);
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [search, setSearch] = useState<SearchRecord | null>(null);
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const searchIdempotencyKey = useRef<string | null>(null);
   const backgroundUrl = useObjectUrl(draft.background);
 
@@ -112,14 +115,15 @@ export function App() {
     },
     onSuccess: (nextSearch) => {
       searchIdempotencyKey.current = null;
+      setSelectedCandidateId(null);
       setSearch(nextSearch);
     },
   });
 
   const resumeMutation = useMutation({
-    mutationFn: (action: ResumeAction) => {
+    mutationFn: ({ action, candidateId }: { action: ResumeAction; candidateId?: string }) => {
       if (!search) throw new Error("没有可恢复的搜索");
-      return resumeSearch(search.search_id, action);
+      return resumeSearch(search.search_id, action, candidateId);
     },
     onSuccess: () => invalidateSearch(),
   });
@@ -142,6 +146,7 @@ export function App() {
     setOptions(initialOptions);
     setProject(null);
     setSearch(null);
+    setSelectedCandidateId(null);
     searchIdempotencyKey.current = null;
     submitMutation.reset();
     resumeMutation.reset();
@@ -168,9 +173,9 @@ export function App() {
         <div className="header-center" aria-hidden="true">
           <span>IMMUTABLE NEGATIVE</span>
           <i />
-          <span>LANGGRAPH SEARCH</span>
+          <span>RAW REVIEW</span>
           <i />
-          <span>COMPOSITE FLOOR</span>
+          <span>OPTIONAL FUSION</span>
         </div>
         <div className="header-status">
           <span className={`live-dot ${connectionState === "open" ? "is-live" : ""}`} />
@@ -189,8 +194,8 @@ export function App() {
           </div>
           <div className="intro-note">
             <span className="note-rule" />
-            <p>从原始旅行照重新采样每一轮，保护背景，保留历史最佳。</p>
-            <small>生成广泛 · 独立审片 · 精确修正</small>
+            <p>从原始旅行照重新采样每一轮，直接审片 Raw，保留历史最佳。</p>
+            <small>宽引导 · 独立审片 · 用户融合</small>
           </div>
         </section>
 
@@ -235,12 +240,15 @@ export function App() {
               </div>
             )}
 
+            {search && <PromptHistory history={snapshot?.prompt_history ?? []} />}
+
             {snapshot && (
               <HumanReview
                 snapshot={snapshot}
                 isPending={resumeMutation.isPending}
                 error={errorMessage(resumeMutation.error)}
-                onAction={(action) => resumeMutation.mutate(action)}
+                selectedCandidateId={selectedCandidateId}
+                onAction={(action, candidateId) => resumeMutation.mutate({ action, candidateId })}
               />
             )}
 
@@ -248,7 +256,17 @@ export function App() {
               candidates={candidates}
               status={status}
               expectedCount={options.candidate_count}
+              activeRoundIndex={snapshot?.round_index}
+              onSelect={setSelectedCandidateId}
             />
+
+            {snapshot && (
+              <FusionEditor
+                snapshot={snapshot}
+                selectedCandidateId={selectedCandidateId}
+                placement={placement}
+              />
+            )}
 
             <SearchTimeline
               events={events}

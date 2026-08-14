@@ -105,7 +105,14 @@ export interface SearchCandidate {
   round_index: number;
   variant_index: number;
   image_url: string;
+  /** Raw provider output; authoritative for Critic and human review. */
   raw_image_url?: string;
+  raw_asset_id?: string;
+  raw_asset_url?: string;
+  /** Legacy diagnostic only; never used as ``image_url``. */
+  protected_asset_id?: string;
+  protected_asset_url?: string;
+  review_asset_kind?: "raw";
   score?: number;
   evaluation?: CandidateEvaluation;
   is_round_winner: boolean;
@@ -115,10 +122,49 @@ export interface SearchCandidate {
   quality?: string;
 }
 
+export interface FusionBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface FusionMaskRegistration {
+  search_id: string;
+  source_manifest_hash: string;
+  asset: AssetRef;
+}
+
+export interface FusionResult {
+  fusion_key: string;
+  search_id: string;
+  candidate_id: string;
+  source_manifest_hash: string;
+  raw_asset: AssetRef;
+  fusion_asset: AssetRef;
+  mask_asset: AssetRef;
+  input_mask_asset?: AssetRef;
+  feather_radius_px: number;
+  box?: FusionBox;
+  crop_mapping?: Record<string, unknown>;
+}
+
 export interface ActiveDirective {
   directive_id?: string;
   category?: string;
   instruction: string;
+}
+
+export interface PromptHistoryEntry {
+  round_index: number;
+  canonical_prompt: string;
+  canonical_prompt_hash?: string;
+  generation_prompt: string;
+  generation_prompt_hash?: string;
+  canonical_template_version?: string;
+  active_directives: ActiveDirective[];
+  active_directives_hash?: string;
+  tuned: boolean;
 }
 
 export interface InterruptPayload {
@@ -134,6 +180,7 @@ export interface SearchSnapshot extends SearchRecord {
   candidates: SearchCandidate[];
   global_winner_id?: string | null;
   global_winner_score?: number | null;
+  prompt_history: PromptHistoryEntry[];
   active_directives: ActiveDirective[];
   stop_reason?: string | null;
   estimated_cost_usd?: number | null;
@@ -149,5 +196,6 @@ export interface SearchEvent {
 
 export type ResumeAction =
   | "accept_global_winner"
+  | "accept_candidate"
   | "continue_one_round"
   | "cancel";

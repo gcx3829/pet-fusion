@@ -825,14 +825,6 @@ summary:focus-visible,
   vector-effect: non-scaling-stroke;
 }
 
-.composite-mask {
-  fill: rgba(221, 169, 95, 0.07);
-  stroke: rgba(221, 169, 95, 0.68);
-  stroke-width: 1;
-  stroke-dasharray: 2 5;
-  vector-effect: non-scaling-stroke;
-}
-
 .placement-target {
   cursor: grab;
   outline: none;
@@ -928,6 +920,41 @@ summary:focus-visible,
 .legend-target { background: var(--amber); }
 .legend-model { border-top: 1px dashed var(--safelight); }
 .legend-floor { border-top: 1px dotted var(--amber); }
+
+.fusion-editor { border-top: 1px solid color-mix(in srgb, var(--amber) 45%, transparent); }
+.fusion-status { color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+.fusion-status.is-ready { color: var(--cyan); }
+.fusion-explainer { color: var(--muted); font-size: 12px; line-height: 1.7; max-width: 720px; }
+.fusion-disabled { align-items: center; color: var(--muted); display: flex; gap: 8px; padding: 18px 0 4px; }
+.fusion-candidate-line { align-items: baseline; display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.fusion-candidate-line > span { color: var(--muted); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+.fusion-candidate-line > strong { color: var(--amber); font-family: var(--font-mono); font-size: 12px; }
+.fusion-candidate-line > small { color: var(--muted); }
+.fusion-mode-tabs { border-bottom: 1px solid var(--line); display: flex; gap: 18px; margin-bottom: 16px; }
+.fusion-mode-tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; font: inherit; padding: 8px 0; }
+.fusion-mode-tabs button[aria-selected="true"] { border-bottom-color: var(--amber); color: var(--amber); }
+.fusion-box-grid { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.fusion-box-grid label { display: grid; gap: 5px; }
+.fusion-box-grid label span { color: var(--muted); font-size: 10px; letter-spacing: .12em; }
+.fusion-box-grid input { background: var(--ink); border: 1px solid var(--line); color: var(--paper); font: inherit; min-width: 0; padding: 8px; width: 100%; }
+.fusion-file-input { border: 1px dashed var(--line-strong); color: var(--muted); display: grid; gap: 8px; padding: 14px; }
+.fusion-file-input input { color: var(--paper); font: inherit; }
+.fusion-file-input small { color: var(--amber); }
+.fusion-feather { display: grid; gap: 6px; margin-top: 16px; }
+.fusion-feather span { color: var(--muted); font-size: 12px; }
+.fusion-feather strong { color: var(--paper); }
+.fusion-feather input { accent-color: var(--amber); width: 100%; }
+.fusion-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.fusion-error { color: var(--red); font-size: 12px; }
+.fusion-result { border-top: 1px solid var(--line); display: grid; gap: 8px; margin-top: 18px; padding-top: 18px; }
+.fusion-result-heading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 10px; }
+.fusion-result-heading strong { color: var(--cyan); }
+.fusion-result-heading span, .fusion-result small { color: var(--muted); font-size: 11px; }
+.fusion-result img { background: #111; border: 1px solid var(--line-strong); max-height: 520px; object-fit: contain; width: 100%; }
+
+@media (max-width: 640px) {
+  .fusion-box-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 .empty-canvas {
   position: absolute;
@@ -1815,6 +1842,152 @@ summary:focus-visible,
 .tone-winner .event-marker { border-color: var(--green); background: var(--green); box-shadow: 0 0 8px rgba(145, 169, 129, 0.45); }
 .tone-warning .event-marker { border-color: var(--safelight); background: var(--safelight); }
 .tone-danger .event-marker { border-color: var(--danger); background: var(--danger); }
+
+.prompt-history-panel {
+  overflow: hidden;
+  border-color: rgba(141, 174, 176, 0.22);
+}
+
+.prompt-history-heading {
+  min-height: 74px;
+}
+
+.prompt-history-count,
+.prompt-round,
+.prompt-status {
+  color: var(--paper-faint);
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.prompt-history-count {
+  align-self: center;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+}
+
+.prompt-history-empty {
+  margin: 0;
+  padding: 18px 22px 22px;
+  color: var(--paper-faint);
+  font-size: 0.7rem;
+  line-height: 1.55;
+}
+
+.prompt-history-list {
+  display: grid;
+  gap: 1px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  background: var(--line);
+}
+
+.prompt-history-entry {
+  display: grid;
+  gap: 10px;
+  padding: 17px 22px 20px;
+  background: var(--ink-raised);
+}
+
+.prompt-entry-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.prompt-entry-heading > div {
+  display: grid;
+  gap: 5px;
+}
+
+.prompt-entry-heading strong {
+  color: var(--paper);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.prompt-status {
+  padding: 5px 7px;
+  border: 1px solid var(--line-bright);
+  color: var(--paper-muted);
+}
+
+.prompt-status.is-tuned {
+  border-color: rgba(221, 169, 95, 0.42);
+  color: var(--amber);
+}
+
+.prompt-status.is-initial {
+  border-color: rgba(141, 174, 176, 0.35);
+  color: var(--cyan);
+}
+
+.prompt-directive-list {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border-left: 2px solid var(--amber);
+  background: rgba(221, 169, 95, 0.06);
+}
+
+.prompt-directive-list span {
+  color: var(--paper-muted);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+
+.prompt-block {
+  border: 1px solid var(--line);
+  background: rgba(23, 20, 17, 0.42);
+}
+
+.prompt-block summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  color: var(--paper-muted);
+  cursor: pointer;
+  font-size: 0.64rem;
+  list-style: none;
+}
+
+.prompt-block summary::-webkit-details-marker { display: none; }
+.prompt-block summary::before {
+  width: 12px;
+  color: var(--cyan);
+  content: "＋";
+  font-family: var(--mono);
+}
+.prompt-block[open] summary::before { content: "－"; }
+
+.prompt-block summary code {
+  overflow: hidden;
+  color: var(--paper-faint);
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-block pre {
+  max-height: 220px;
+  padding: 12px 13px 14px 35px;
+  margin: 0;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 0.61rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 .timeline-footer {
   display: grid;

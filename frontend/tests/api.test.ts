@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createProject, getSearch, startSearch } from "../src/lib/api";
+import {
+  createFusion,
+  createProject,
+  getSearch,
+  resumeSearch,
+  startSearch,
+  uploadFusionMask,
+} from "../src/lib/api";
 import type { PlacementIntent, SourceDraft } from "../src/types";
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -101,6 +108,15 @@ describe("API client", () => {
         model: "fake-gpt-image-2",
       }],
       global_winner_id: null,
+      prompt_history: [{
+        round_index: 0,
+        canonical_prompt: "基准 prompt",
+        canonical_prompt_hash: "a".repeat(64),
+        generation_prompt: "初始生成 prompt",
+        generation_prompt_hash: "b".repeat(64),
+        active_directives: [],
+        tuned: false,
+      }],
       active_directives: [],
       stop_reason: "mock_round_complete",
     }));
@@ -114,6 +130,79 @@ describe("API client", () => {
       model: "fake-gpt-image-2",
       is_global_winner: false,
     });
+    expect(snapshot.prompt_history).toEqual([expect.objectContaining({
+      round_index: 0,
+      generation_prompt: "初始生成 prompt",
+      tuned: false,
+    })]);
+  });
+
+  it("候选同时包含 raw 与 protected 资产时始终选择 raw 审片图", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      search_id: "search-raw",
+      status: "waiting_for_human",
+      round_index: 1,
+      candidates: [{
+        candidate_id: "candidate-raw",
+        round_index: 1,
+        variant_index: 0,
+        raw_asset_id: "raw-asset",
+        raw_asset_url: "/api/v1/assets/raw-asset",
+        raw_image_url: "/api/v1/assets/raw-image-alias",
+        protected_asset_id: "protected-asset",
+        protected_asset_url: "/api/v1/assets/protected-asset",
+        asset_url: "/api/v1/assets/generic-alias",
+      }],
+      prompt_history: [],
+      active_directives: [],
+    }));
+
+    const snapshot = await getSearch("search-raw");
+
+    expect(snapshot.candidates[0]).toMatchObject({
+      image_url: "/api/v1/assets/raw-asset",
+      raw_image_url: "/api/v1/assets/raw-asset",
+      raw_asset_id: "raw-asset",
+      protected_asset_id: "protected-asset",
+      review_asset_kind: "raw",
+    });
+  });
+
+  it("旧 protected URL 只作为兼容回退且不会被误当作 asset ID", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      search_id: "search-legacy",
+      status: "waiting_for_human",
+      candidates: [{
+        candidate_id: "candidate-legacy",
+        round_index: 0,
+        variant_index: 0,
+        protected_image_url: "/api/v1/assets/legacy-protected",
+      }],
+      prompt_history: [],
+      active_directives: [],
+    }));
+
+    const snapshot = await getSearch("search-legacy");
+
+    expect(snapshot.candidates[0].image_url).toBe("/api/v1/assets/legacy-protected");
+  });
+
+  it("人工接受只按 action 提交权威候选 ID", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async () => jsonResponse({ status: "accepted" }));
+
+    await resumeSearch("search-01", "accept_candidate", "candidate-raw");
+    await resumeSearch("search-01", "accept_global_winner", "ignored-candidate");
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      action: "accept_candidate",
+      updated_user_intent: null,
+      selected_candidate_id: "candidate-raw",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      action: "accept_global_winner",
+      updated_user_intent: null,
+    });
   });
 
   it("显示 FastAPI detail，而不是吞掉服务端错误", async () => {
@@ -124,6 +213,76 @@ describe("API client", () => {
       budget_usd: 2,
       review_each_round: false,
     })).rejects.toThrow("参考图数量必须为 1 到 5");
+  });
+
+  it("上传并创建 Fusion 时保留 raw 与独立融合资产引用", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({
+        search_id: "search-fusion",
+        source_manifest_hash: "a".repeat(64),
+        asset: { asset_id: "ast-mask", asset_url: "/api/v1/assets/ast-mask" },
+      }, 201))
+      .mockResolvedValueOnce(jsonResponse({
+        fusion_key: "b".repeat(64),
+        search_id: "search-fusion",
+        candidate_id: "cand-raw",
+        source_manifest_hash: "a".repeat(64),
+        raw_asset: { asset_id: "ast-raw", asset_url: "/api/v1/assets/ast-raw" },
+        fusion_asset: { asset_id: "ast-fused", asset_url: "/api/v1/assets/ast-fused" },
+        mask_asset: { asset_id: "ast-derived-mask", asset_url: "/api/v1/assets/ast-derived-mask" },
+        input_mask_asset: { asset_id: "ast-mask", asset_url: "/api/v1/assets/ast-mask" },
+        feather_radius_px: 8,
+        box: null,
+      }, 201));
+
+    const registered = await uploadFusionMask(
+      "search-fusion",
+      new File(["mask"], "mask.png", { type: "image/png" }),
+    );
+    const result = await createFusion("search-fusion", {
+      candidate_id: "cand-raw",
+      mask_asset_id: registered.asset.asset_id,
+      feather_radius_px: 8,
+    });
+
+    expect(registered.asset.asset_id).toBe("ast-mask");
+    expect(result.raw_asset.asset_id).toBe("ast-raw");
+    expect(result.fusion_asset.asset_id).toBe("ast-fused");
+    const [, uploadInit] = fetchMock.mock.calls[0];
+    expect((uploadInit?.body as FormData).get("mask")).toBeInstanceOf(File);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+      candidate_id: "cand-raw",
+      mask_asset_id: "ast-mask",
+      feather_radius_px: 8,
+    });
+  });
+
+  it("在发请求前拒绝非 PNG mask 与越界矩形", async () => {
+    await expect(uploadFusionMask(
+      "search-fusion",
+      new File(["jpeg"], "mask.jpg", { type: "image/jpeg" }),
+    )).rejects.toThrow("必须是 PNG alpha 图片");
+    await expect(createFusion("search-fusion", {
+      box: { x: 0.9, y: 0.2, width: 0.2, height: 0.2 },
+      feather_radius_px: 8,
+    })).rejects.toThrow("完整位于原片归一化边界内");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("422 校验错误显示首个字段详情", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      error: {
+        code: "VALIDATION_FAILED",
+        message: "Request validation failed",
+        details: [{ field: "body.box", message: "fusion box out of bounds" }],
+      },
+    }, 422));
+
+    await expect(createFusion("search-fusion", {
+      box: { x: 0.2, y: 0.2, width: 0.2, height: 0.2 },
+      feather_radius_px: 8,
+    })).rejects.toThrow("body.box: fusion box out of bounds");
   });
 
   it("兼容统一 error envelope 的 message", async () => {

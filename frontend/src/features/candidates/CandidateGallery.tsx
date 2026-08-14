@@ -6,6 +6,8 @@ interface CandidateGalleryProps {
   candidates: SearchCandidate[];
   status: SearchStatusValue;
   expectedCount: number;
+  activeRoundIndex?: number;
+  onSelect?: (candidateId: string | null) => void;
 }
 
 const metrics: { key: keyof DimensionScores; short: string; label: string }[] = [
@@ -17,7 +19,8 @@ const metrics: { key: keyof DimensionScores; short: string; label: string }[] = 
 
 function ImageFrame({ candidate }: { candidate: SearchCandidate }) {
   const [failed, setFailed] = useState(false);
-  if (!candidate.image_url || failed) {
+  const rawImageUrl = candidate.raw_image_url ?? candidate.image_url;
+  if (!rawImageUrl || failed) {
     return (
       <div className="candidate-image-fallback" role="img" aria-label="候选图片暂不可用">
         <Icon name="image" />
@@ -27,8 +30,8 @@ function ImageFrame({ candidate }: { candidate: SearchCandidate }) {
   }
   return (
     <img
-      src={candidate.image_url}
-      alt={`第 ${candidate.round_index + 1} 轮，第 ${candidate.variant_index + 1} 张候选`}
+      src={rawImageUrl}
+      alt={`第 ${candidate.round_index + 1} 轮，第 ${candidate.variant_index + 1} 张候选 Raw`}
       loading="lazy"
       onError={() => setFailed(true)}
     />
@@ -39,13 +42,26 @@ function scoreLabel(score?: number): string {
   return typeof score === "number" ? score.toFixed(1) : "—";
 }
 
-export function CandidateGallery({ candidates, status, expectedCount }: CandidateGalleryProps) {
+export function CandidateGallery({
+  candidates,
+  status,
+  expectedCount,
+  activeRoundIndex,
+  onSelect,
+}: CandidateGalleryProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   useEffect(() => {
     if (selectedId && !candidates.some((candidate) => candidate.candidate_id === selectedId)) {
       setSelectedId(null);
+      onSelect?.(null);
     }
-  }, [candidates, selectedId]);
+  }, [candidates, onSelect, selectedId]);
+  useEffect(() => {
+    // A new automatic round is a new review context.  Do not carry a prior
+    // round's manual selection into the next candidate set.
+    setSelectedId(null);
+    onSelect?.(null);
+  }, [activeRoundIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selected = useMemo(
     () => candidates.find((candidate) => candidate.candidate_id === selectedId)
@@ -66,6 +82,10 @@ export function CandidateGallery({ candidates, status, expectedCount }: Candidat
           <strong>{String(candidates.length).padStart(2, "0")}</strong>
           <span>EXPOSURES</span>
         </p>
+      </div>
+      <div className="raw-review-notice" role="note">
+        <strong>RAW CANDIDATE</strong>
+        <span>Critic 与人工评价均以模型原始输出为准；Fusion Mask 只有在用户主动融合后才会影响预览或导出。</span>
       </div>
 
       {!candidates.length && !isActive ? (
@@ -90,7 +110,10 @@ export function CandidateGallery({ candidates, status, expectedCount }: Candidat
                   className="candidate-image-button"
                   type="button"
                   aria-pressed={isSelected}
-                  onClick={() => setSelectedId(candidate.candidate_id)}
+                  onClick={() => {
+                    setSelectedId(candidate.candidate_id);
+                    onSelect?.(candidate.candidate_id);
+                  }}
                 >
                   <span className="film-edge film-edge--top" aria-hidden="true" />
                   <ImageFrame candidate={candidate} />
@@ -106,6 +129,7 @@ export function CandidateGallery({ candidates, status, expectedCount }: Candidat
                   <p className="candidate-score"><strong>{scoreLabel(candidate.score)}</strong><small>/ 100</small></p>
                 </div>
                 <div className="candidate-flags">
+                  <span className="raw-flag">RAW REVIEW</span>
                   <span className={blocking ? "has-blocking" : ""}>{blocking} BLOCK</span>
                   <span>{warnings} WARN</span>
                   {!candidate.evaluation && <span>CRITIC PENDING</span>}
@@ -126,10 +150,10 @@ export function CandidateGallery({ candidates, status, expectedCount }: Candidat
         <div className="inspection-drawer">
           <div className="inspection-head">
             <div>
-              <span className="eyebrow">SELECTED NEGATIVE</span>
+              <span className="eyebrow">SELECTED RAW CANDIDATE</span>
               <strong>R{selected.round_index} / V{selected.variant_index + 1}</strong>
             </div>
-            <p>{selected.evaluation?.summary ?? "Mock 纵向切片已生成候选；结构化 Critic 将在后续节点补充分数。"}</p>
+            <p>{selected.evaluation?.summary ?? "正在查看 Raw candidate，等待结构化 Critic 评价。"}</p>
           </div>
           <div className="metric-grid">
             {metrics.map((metric) => {

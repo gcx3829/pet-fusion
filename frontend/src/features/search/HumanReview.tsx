@@ -5,16 +5,31 @@ interface HumanReviewProps {
   snapshot: SearchSnapshot;
   isPending: boolean;
   error?: string | null;
-  onAction: (action: ResumeAction) => void;
+  selectedCandidateId?: string | null;
+  onAction: (action: ResumeAction, candidateId?: string) => void;
 }
 
-export function HumanReview({ snapshot, isPending, error, onAction }: HumanReviewProps) {
+export function HumanReview({
+  snapshot,
+  isPending,
+  error,
+  selectedCandidateId,
+  onAction,
+}: HumanReviewProps) {
   if (snapshot.status !== "waiting_for_human") return null;
   const canAccept = Boolean(snapshot.global_winner_id);
   const allowed = new Set(snapshot.interrupt_payload?.allowed_actions ?? []);
   const canCancel = allowed.has("cancel");
   const canContinue = allowed.has("continue_one_round");
   const canAcceptAction = canAccept && allowed.has("accept_global_winner");
+  const selectedCandidate = selectedCandidateId
+    ? snapshot.candidates.find((candidate) => candidate.candidate_id === selectedCandidateId)
+    : undefined;
+  const canAcceptSelected = Boolean(
+    selectedCandidate
+      && selectedCandidate.candidate_id !== snapshot.global_winner_id
+      && allowed.has("accept_candidate"),
+  );
   return (
     <aside className="human-review" aria-labelledby="review-heading">
       <div className="review-icon"><Icon name="aperture" /></div>
@@ -22,8 +37,11 @@ export function HumanReview({ snapshot, isPending, error, onAction }: HumanRevie
         <p className="eyebrow">HUMAN INTERRUPT</p>
         <h2 id="review-heading">轮到你审片</h2>
         <p>{snapshot.stop_reason === "mock_round_complete"
-          ? "Mock 生成轮已完成。候选已持久化，真实 Critic / Ranker 接入后将在这里给出历史最佳。"
+          ? "本轮候选和自动 Critic 已完成。你可以查看分数、问题和历史最佳，再决定接受或继续。"
           : snapshot.stop_reason ?? "自动搜索在安全边界停下，等待摄影师决定。"}</p>
+        <p className="review-authority-note">
+          当前审片图：<strong>Raw Candidate</strong>。Critic 与人工评价不读取 protected 或 fused 派生图。
+        </p>
         {!!snapshot.interrupt_payload?.blocking_issues?.length && (
           <ul>
             {snapshot.interrupt_payload.blocking_issues.map((issue) => <li key={issue}>{issue}</li>)}
@@ -36,10 +54,20 @@ export function HumanReview({ snapshot, isPending, error, onAction }: HumanRevie
         {canContinue && <button className="secondary-button" type="button" disabled={isPending} onClick={() => onAction("continue_one_round")}>再搜索一轮</button>}
         {canAcceptAction && (
           <button className="primary-button" type="button" disabled={isPending} onClick={() => onAction("accept_global_winner")}>
-            <Icon name="check" /> 接受历史最佳
+            <Icon name="check" /> 接受历史最佳 Raw
           </button>
         )}
-        {!canCancel && !canContinue && !canAcceptAction && (
+        {canAcceptSelected && selectedCandidate && (
+          <button
+            className="primary-button"
+            type="button"
+            disabled={isPending}
+            onClick={() => onAction("accept_candidate", selectedCandidate.candidate_id)}
+          >
+            <Icon name="check" /> 接受所选 Raw
+          </button>
+        )}
+        {!canCancel && !canContinue && !canAcceptAction && !canAcceptSelected && (
           <span className="review-readonly">本轮仅供查看 · Resume 动作尚未开放</span>
         )}
       </div>

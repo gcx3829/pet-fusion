@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CandidateGallery } from "../src/features/candidates/CandidateGallery";
 import type { SearchCandidate } from "../src/types";
 
@@ -43,5 +43,45 @@ describe("CandidateGallery", () => {
     render(<CandidateGallery candidates={candidates} status="waiting_for_human" expectedCount={3} />);
     await user.click(screen.getByRole("button", { name: /第 1 轮，第 1 张候选/ }));
     expect(screen.getByText("第一张候选")).toBeInTheDocument();
+  });
+
+  it("同轮数据刷新保留人工选择，跨轮时清理选择", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const view = render(
+      <CandidateGallery
+        candidates={candidates}
+        status="waiting_for_human"
+        expectedCount={3}
+        activeRoundIndex={0}
+        onSelect={onSelect}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /第 1 轮，第 1 张候选/ }));
+    onSelect.mockClear();
+
+    view.rerender(
+      <CandidateGallery
+        candidates={[...candidates]}
+        status="waiting_for_human"
+        expectedCount={3}
+        activeRoundIndex={0}
+        onSelect={onSelect}
+      />,
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getByText("第一张候选")).toBeInTheDocument();
+
+    view.rerender(
+      <CandidateGallery
+        candidates={candidates.map((candidate) => ({ ...candidate, round_index: 1 }))}
+        status="waiting_for_human"
+        expectedCount={3}
+        activeRoundIndex={1}
+        onSelect={onSelect}
+      />,
+    );
+    expect(onSelect).toHaveBeenCalledWith(null);
+    expect(screen.getByText("历史最佳候选")).toBeInTheDocument();
   });
 });
