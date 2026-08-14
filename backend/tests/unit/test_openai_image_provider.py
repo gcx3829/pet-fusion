@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -25,6 +26,7 @@ from app.persistence.app_store import utcnow
 from app.services.generator_service import (
     GENERATOR_BACKGROUND_MAX_SIDE,
     GENERATOR_INPUT_PROXY_VERSION,
+    GENERATOR_MULTI_CANDIDATE_STRATEGY,
     GENERATOR_REFERENCE_MAX_SIDE,
     DeterministicFakeImageGenerator,
     GenerationRequest,
@@ -160,9 +162,54 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
     assert b'name="image[]"; filename="01-reference.jpg"' in body
     assert b"Content-Type: image/jpeg" in body
     assert jpeg_bytes in body
+    assert b'name="n"' not in body
     assert b'name="model"' in body and b"gpt-image-2-2026-04-21" in body
     assert b'name="output_format"' in body and b"png" in body
     assert b"input_fidelity" not in body
+
+
+async def test_official_transport_falls_back_to_single_outputs_when_relay_rejects_n() -> None:
+    image_bytes = make_image_bytes((12, 34, 56))
+    calls: list[dict[str, object]] = []
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+
+    class Images:
+        async def edit(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(kwargs)
+            if "n" in kwargs:
+                raise RuntimeError("Unknown parameter: 'tools[0].n'.")
+            return SimpleNamespace(
+                data=[SimpleNamespace(b64_json=encoded)],
+                usage=SimpleNamespace(
+                    model_dump=lambda **_: {
+                        "input_tokens": 3,
+                        "output_tokens": 4,
+                        "total_tokens": 7,
+                    }
+                ),
+                _request_id=f"req_{len(calls)}",
+            )
+
+    transport = OfficialOpenAIImageEditsTransport(
+        api_key="test-key-never-sent",
+        base_url="https://relay.example.test/v1",
+        client_factory=lambda **_: SimpleNamespace(images=Images()),
+    )
+    result = await transport.edit(
+        model="gpt-image-2",
+        prompt="relay compatibility",
+        images=(OpenAIImageInput(filename="background.png", png_bytes=image_bytes),),
+        n=2,
+        quality="low",
+        size="auto",
+    )
+
+    assert len(calls) == 3
+    assert "n" in calls[0]
+    assert all("n" not in call for call in calls[1:])
+    assert result.png_images == (image_bytes, image_bytes)
+    assert result.request_id == "req_2"
+    assert result.usage == {"input_tokens": 6, "output_tokens": 8, "total_tokens": 14}
 
 
 async def test_openai_generator_uses_ordered_source_proxies_and_persists_safe_audit(
@@ -286,6 +333,7 @@ async def test_openai_generator_uses_ordered_source_proxies_and_persists_safe_au
         "opaque_format": "jpeg",
         "opaque_quality": 82,
         "transparent_format": "png",
+        "multi_candidate_strategy": GENERATOR_MULTI_CANDIDATE_STRATEGY,
     }
 
 
@@ -596,6 +644,7 @@ def test_generator_request_key_tracks_input_proxy_contract(settings) -> None:
         "opaque_format": "jpeg",
         "opaque_quality": 82,
         "transparent_format": "png",
+        "multi_candidate_strategy": GENERATOR_MULTI_CANDIDATE_STRATEGY,
     }
     expected = hashlib.sha256(
         json.dumps(expected_payload, sort_keys=True, separators=(",", ":")).encode()

@@ -88,15 +88,71 @@ class OfficialOpenAIImageEditsTransport:
         size: str,
     ) -> OpenAIImageEditResult:
         client = self._get_client()
-        response = await client.images.edit(
-            model=model,
-            prompt=prompt,
-            image=[(image.filename, image.png_bytes, image.mime_type) for image in images],
-            n=n,
-            quality=quality,
-            size=size,
-            output_format="png",
-        )
+        try:
+            return await self._edit_once(
+                client=client,
+                model=model,
+                prompt=prompt,
+                images=images,
+                n=(n if n > 1 else None),
+                quality=quality,
+                size=size,
+            )
+        except Exception as exc:
+            if n <= 1 or "tools[0].n" not in str(exc):
+                raise
+            # Some OpenAI-compatible relays translate Image API requests to the
+            # Responses image tool, which rejects the Image API's multi-output
+            # ``n`` field. Retry only this explicit compatibility error as
+            # independent single-output requests so candidate_count semantics stay
+            # intact for the caller.
+            results = [
+                await self._edit_once(
+                    client=client,
+                    model=model,
+                    prompt=prompt,
+                    images=images,
+                    n=None,
+                    quality=quality,
+                    size=size,
+                )
+                for _ in range(n)
+            ]
+            return OpenAIImageEditResult(
+                png_images=tuple(
+                    image
+                    for result in results
+                    for image in result.png_images
+                ),
+                request_id=next(
+                    (result.request_id for result in results if result.request_id),
+                    None,
+                ),
+                usage=_merge_numeric_usage(results),
+            )
+
+    @staticmethod
+    async def _edit_once(
+        *,
+        client: Any,
+        model: str,
+        prompt: str,
+        images: Sequence[OpenAIImageInput],
+        n: int | None,
+        quality: str,
+        size: str,
+    ) -> OpenAIImageEditResult:
+        kwargs: dict[str, object] = {
+            "model": model,
+            "prompt": prompt,
+            "image": [(image.filename, image.png_bytes, image.mime_type) for image in images],
+            "quality": quality,
+            "size": size,
+            "output_format": "png",
+        }
+        if n is not None:
+            kwargs["n"] = n
+        response = await client.images.edit(**kwargs)
         encoded_images = tuple(item.b64_json for item in response.data)
         if any(not isinstance(encoded, str) for encoded in encoded_images):
             raise RuntimeError("OpenAI Image API response did not include PNG base64 data")
@@ -111,3 +167,13 @@ class OfficialOpenAIImageEditsTransport:
             request_id=getattr(response, "_request_id", None),
             usage=dict(usage) if isinstance(usage, Mapping) else {},
         )
+
+
+def _merge_numeric_usage(results: Sequence[OpenAIImageEditResult]) -> dict[str, object]:
+    merged: dict[str, int | float] = {}
+    for result in results:
+        for key, value in result.usage.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            merged[key] = merged.get(key, 0) + value
+    return dict(merged)

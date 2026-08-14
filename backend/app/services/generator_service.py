@@ -35,6 +35,7 @@ GENERATOR_BACKGROUND_MAX_SIDE = 1024
 GENERATOR_REFERENCE_MAX_SIDE = 768
 GENERATOR_OPAQUE_PROXY_FORMAT = "jpeg"
 GENERATOR_OPAQUE_PROXY_QUALITY = 82
+GENERATOR_MULTI_CANDIDATE_STRATEGY = "relay-n-fallback-serial/v1"
 PROVIDER_RESULT_POLL_SECONDS = 0.02
 PROVIDER_RESULT_WAIT_SECONDS = 30.0
 PROVIDER_CALL_LEASE_SECONDS = 5
@@ -298,6 +299,7 @@ class GeneratorService:
             "opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
             "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
             "transparent_format": "png",
+            "multi_candidate_strategy": GENERATOR_MULTI_CANDIDATE_STRATEGY,
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
@@ -395,6 +397,7 @@ class GeneratorService:
                 "opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
                 "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
                 "transparent_format": "png",
+                "multi_candidate_strategy": GENERATOR_MULTI_CANDIDATE_STRATEGY,
             },
         }
         owner_id = f"provider_{uuid4().hex}"
