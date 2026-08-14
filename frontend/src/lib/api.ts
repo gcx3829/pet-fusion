@@ -14,6 +14,7 @@ import type {
   SourceManifest,
   PlacementIntent,
 } from "../types";
+import { MAX_UPLOAD_BYTES, prepareImageForUpload } from "./files";
 
 type JsonObject = Record<string, unknown>;
 
@@ -227,8 +228,16 @@ function normalizeDirectives(value: unknown): ActiveDirective[] {
 export async function createProject(draft: SourceDraft): Promise<ProjectRecord> {
   if (!draft.background) throw new Error("请先选择旅行原片");
   const form = new FormData();
-  form.append("background", draft.background);
-  draft.references.forEach((reference) => form.append("cat_references", reference));
+  const background = draft.background.size > MAX_UPLOAD_BYTES
+    ? (await prepareImageForUpload(draft.background, "background")).file
+    : draft.background;
+  form.append("background", background);
+  for (const reference of draft.references) {
+    const prepared = reference.size > MAX_UPLOAD_BYTES
+      ? (await prepareImageForUpload(reference, "reference")).file
+      : reference;
+    form.append("cat_references", prepared);
+  }
   if (draft.catName.trim()) form.append("cat_name", draft.catName.trim());
   if (draft.catTraits.trim()) form.append("cat_traits", draft.catTraits.trim());
   const object = asObject(await request("/projects", { method: "POST", body: form }));

@@ -1,6 +1,12 @@
 import { useId, useState } from "react";
 import { Icon } from "../../components/Icon";
-import { fileSizeLabel, selectImageFiles, useObjectUrl } from "../../lib/files";
+import {
+  fileSizeLabel,
+  prepareImageForUpload,
+  selectImageFiles,
+  uploadPreparationLabel,
+  useObjectUrl,
+} from "../../lib/files";
 import type { ProjectRecord, SourceDraft } from "../../types";
 
 interface SourcePanelProps {
@@ -31,22 +37,46 @@ export function SourcePanel({
   const referenceInputId = useId();
   const backgroundUrl = useObjectUrl(value.background);
   const [fileMessage, setFileMessage] = useState<string | null>(null);
+  const [isPreparing, setIsPreparing] = useState(false);
 
-  const addReferences = (files: File[]) => {
+  const addReferences = async (files: File[]) => {
     const images = selectImageFiles(files);
     if (!images.length) {
       setFileMessage("请选择 JPEG、PNG 或 WebP 图片");
       return;
     }
-    const unique = [...value.references];
-    images.forEach((file) => {
-      const duplicate = unique.some((current) =>
-        current.name === file.name && current.size === file.size && current.lastModified === file.lastModified,
+    setIsPreparing(true);
+    setFileMessage("正在优化参考图，请稍候……");
+    try {
+      const unique = [...value.references];
+      const compressedLabels: string[] = [];
+      for (const file of images) {
+        const duplicate = unique.some((current) =>
+          current.name === file.name
+          && current.size === file.size
+          && current.lastModified === file.lastModified,
+        );
+        if (duplicate || unique.length >= 5) continue;
+        const prepared = await prepareImageForUpload(file, "reference");
+        unique.push(prepared.file);
+        if (prepared.compressed) {
+          compressedLabels.push(
+            `${file.name} ${fileSizeLabel(prepared.originalBytes)} → ${fileSizeLabel(prepared.file.size)}`,
+          );
+        }
+      }
+      const limited = images.length + value.references.length > 5;
+      setFileMessage(
+        compressedLabels.length
+          ? `已优化 ${compressedLabels.join("；")}${limited ? "；参考图最多保留 5 张" : ""}`
+          : limited ? "参考图最多 5 张，已保留前 5 张" : null,
       );
-      if (!duplicate && unique.length < 5) unique.push(file);
-    });
-    setFileMessage(images.length + value.references.length > 5 ? "参考图最多 5 张，已保留前 5 张" : null);
-    onChange({ ...value, references: unique });
+      onChange({ ...value, references: unique });
+    } catch (error) {
+      setFileMessage(error instanceof Error ? error.message : "参考图处理失败");
+    } finally {
+      setIsPreparing(false);
+    }
   };
 
   return (
@@ -75,7 +105,7 @@ export function SourcePanel({
         </div>
       )}
 
-      <fieldset disabled={locked} className="source-fields">
+      <fieldset disabled={locked || isPreparing} className="source-fields" aria-busy={isPreparing}>
         <legend className="sr-only">上传摄影素材</legend>
         <div className="field-label-row">
           <label htmlFor={backgroundInputId}>旅行原片</label>
@@ -86,14 +116,31 @@ export function SourcePanel({
           id={backgroundInputId}
           type="file"
           accept="image/jpeg,image/png,image/webp"
-          onChange={(event) => {
+          onChange={async (event) => {
+            const input = event.currentTarget;
             const selected = event.target.files?.[0] ?? null;
             if (selected && !selectImageFiles([selected]).length) {
               setFileMessage("旅行原片需为 JPEG、PNG 或 WebP");
               return;
             }
-            setFileMessage(null);
-            onChange({ ...value, background: selected });
+            if (!selected) {
+              onChange({ ...value, background: null });
+              return;
+            }
+            setIsPreparing(true);
+            setFileMessage("正在优化旅行原片，请稍候……");
+            try {
+              const prepared = await prepareImageForUpload(selected, "background");
+              setFileMessage(prepared.compressed
+                ? `已优化 ${selected.name}：${fileSizeLabel(prepared.originalBytes)} → ${fileSizeLabel(prepared.file.size)}`
+                : null);
+              onChange({ ...value, background: prepared.file });
+            } catch (error) {
+              setFileMessage(error instanceof Error ? error.message : "旅行原片处理失败");
+            } finally {
+              setIsPreparing(false);
+              input.value = "";
+            }
           }}
         />
 
@@ -104,7 +151,7 @@ export function SourcePanel({
             <div className="source-file-meta">
               <span>ORIGINAL FRAME</span>
               <strong>{value.background.name}</strong>
-              <small>{fileSizeLabel(value.background.size)}</small>
+              <small>{uploadPreparationLabel(value.background)}</small>
             </div>
             {!locked && (
               <button
@@ -121,7 +168,7 @@ export function SourcePanel({
           <label className="upload-drop upload-drop--hero" htmlFor={backgroundInputId}>
             <span className="upload-icon"><Icon name="image" /></span>
             <strong>装入旅行原片</strong>
-            <small>JPEG / PNG / WebP</small>
+            <small>JPEG / PNG / WebP · 大图自动优化</small>
           </label>
         )}
 
@@ -135,9 +182,10 @@ export function SourcePanel({
           type="file"
           multiple
           accept="image/jpeg,image/png,image/webp"
-          onChange={(event) => {
-            if (event.target.files) addReferences(Array.from(event.target.files));
-            event.target.value = "";
+          onChange={async (event) => {
+            const input = event.currentTarget;
+            if (input.files) await addReferences(Array.from(input.files));
+            input.value = "";
           }}
         />
         <div className="reference-grid">
@@ -146,6 +194,7 @@ export function SourcePanel({
               <FilePreview file={file} alt={`宠物参考 ${index + 1}`} />
               <span className="reference-index">{String(index + 1).padStart(2, "0")}</span>
               {index === 0 && <span className="primary-flag">主参考</span>}
+              <span className="sr-only">{uploadPreparationLabel(file)}</span>
               {!locked && (
                 <button
                   className="icon-button reference-remove"
