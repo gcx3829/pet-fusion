@@ -14,7 +14,7 @@
 
 - **GPT Image 2** 负责真正的视觉重建与合成；
 - **LangGraph** 负责 Critic、反馈规划、候选排名、Global Winner、停止策略和崩溃恢复；
-- **本地图像代码**负责裁切、Mask、像素保护、全分辨率回贴、ICC 和 EXIF 交付；
+- **本地图像代码**负责裁切、Guidance/Fusion Mask、可选像素融合、全分辨率回贴、ICC 和 EXIF 交付；
 - **用户界面**负责摄影师式的位置、尺寸、姿态意图和候选审片。
 
 ## 核心工作流
@@ -34,7 +34,7 @@
                     ↓
              从原始素材重新生成
                     ↓
-        本地 Composite Floor 保护背景像素
+        用户可选 Fusion Mask + 羽化回贴
                     ↓
       回贴到原始分辨率并恢复 ICC / EXIF
 ```
@@ -97,7 +97,8 @@ OpenAI      GPT Image 2 + GPT-5.6 系列多模态模型
 → SQLite checkpoint 与业务事件持久化
 → REST / SSE 返回候选
 → React 工作台展示 placement、候选和时间线
-→ local Composite Floor 回贴、全分辨率导出 JPEG/PNG、ICC/EXIF 尽力保留
+→ raw candidate 作为 Search/Critic/人工审片权威图
+→ 用户可选 Fusion Mask + 羽化回贴、全分辨率导出 JPEG/PNG、ICC/EXIF 尽力保留
 ```
 
 Local Fix 已实现为独立、一次一调用的 LangGraph 后端图、服务和 HTTP API：它只允许 `generation_depth` 从 0 到 2，保留回退候选，并且不会回流到自动 Search。API 可引用已存 PNG mask，或只提交 full-resolution 的结构化矩形以由后端创建受校验 mask；相同语义请求会复用 SQLite provider-call audit。默认配置不会调用 OpenAI，也不需要 API key；mock 候选用于验证资产、状态、恢复边界和前后端数据流，不代表最终生成质量。
@@ -105,7 +106,7 @@ Local Fix 已实现为独立、一次一调用的 LangGraph 后端图、服务�
 ## 当前实现结构
 
 ```text
-backend/   FastAPI、Search/Critic/Planner/Local Fix 显式 LangGraph、SQLite、内容寻址资产、Composite Floor 与导出
+backend/   FastAPI、Search/Critic/Planner/Local Fix 显式 LangGraph、SQLite、内容寻址资产、可选 Fusion 与导出
 frontend/  React、TypeScript、Vite、TanStack Query、Placement Canvas、候选审片和搜索时间线
 data/      本地业务数据库、checkpoint 和项目资产；除 .gitkeep 外不进入 Git
 scripts/   联合开发启动与确定性完整测试脚本
@@ -196,7 +197,7 @@ OPENAI_API_KEY=
 OPENAI_BASE_URL=
 ```
 
-默认 `FAKE_GENERATOR=1` 且 `FAKE_CRITIC=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把 `FAKE_GENERATOR` 设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图和 1～5 张参考图；把 `FAKE_CRITIC` 设为 `0` 后，会通过官方 Responses API 的 Pydantic Structured Outputs 独立评价每张 protected candidate。两个开关可分别启用。
+默认 `FAKE_GENERATOR=1` 且 `FAKE_CRITIC=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把 `FAKE_GENERATOR` 设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图、Guidance Mask 和 1～5 张参考图；把 `FAKE_CRITIC` 设为 `0` 后，会通过官方 Responses API 的 Pydantic Structured Outputs 独立评价每张 raw candidate。两个开关可分别启用。
 
 `RUN_OPENAI_LIVE_TESTS` 不参与应用 provider 选择，只为未来独立的 opt-in 自动 live test 预留；手工工作台验证仍由两个 `FAKE_*` 开关明确控制。默认测试脚本和 pytest harness 会把它保持为 `0`。
 
@@ -213,11 +214,12 @@ OPENAI_BASE_URL=
 3. `GET /searches/{search_id}`：读取搜索状态和候选；
 4. `GET /searches/{search_id}/events`：通过 SSE 接收持久化时间线；
 5. `GET /assets/{asset_id}`：读取后端校验过的图片资产。
-6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、继续一轮或取消；
+6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、接受指定候选（`action=accept_candidate` + `selected_candidate_id`）、继续一轮或取消；`GET /searches/{search_id}` 会返回每张候选的 Critic 维度、问题和 ranker 分数，以及 `prompt_history`（首轮初始 prompt、每轮调优 prompt、指令与哈希）；
 7. `POST /searches/{search_id}/export`：只导出已接受搜索的历史 Global Winner，可选 PNG/JPEG、JPEG 质量与 ICC/EXIF 复制策略；
 8. `GET /searches/{search_id}/exports/{export_key}`：读取幂等、内容寻址的导出记录。
 9. `POST /searches/{search_id}/local-fixes`：对已接受搜索的历史候选（省略 `candidate_id` 时为 Global Winner）执行一次 isolated Local Fix；mask 可为内部 PNG asset ID 或结构化 full-resolution box，结果包含可重放 `request_key`；
 10. `GET /searches/{search_id}/local-fixes/{fix_id}`：读取 SQLite provider-call audit 中的 Local Fix 结果。
+11. `POST /searches/{search_id}/fusion-masks`：将同尺寸 RGBA PNG alpha mask 上传并绑定到已接受搜索；`POST /searches/{search_id}/fusions`：以矩形或已绑定 alpha mask + 羽化生成独立 Fusion 预览；`GET /searches/{search_id}/fusions/{fusion_key}`：幂等读取 Fusion 结果。Fusion 不改写 raw，也不回流 Critic/Search。
 
 浏览器在开发模式下通过 Vite 的 `/api` 代理访问后端，因此不会接触服务端密钥。
 `scripts/dev.sh` 会根据 `PET_FUSION_API_HOST` 和 `PET_FUSION_API_PORT` 自动配置 Vite 代理；也可用 `VITE_DEV_API_TARGET=http://host:port ./scripts/dev.sh` 显式覆盖。需要让浏览器跨域直连时，则在 `frontend/.env.local` 中设置 `VITE_API_BASE_URL`。
@@ -226,8 +228,8 @@ OPENAI_BASE_URL=
 
 - 默认仍使用确定性的 mock generator；`FAKE_GENERATOR=0` 时真实 GPT Image 2 provider 路径已接通，但尚未用真实凭据或中转站完成联调；
 - Critic 默认仍为离线确定性实现；`FAKE_CRITIC=0` 的 GPT-5.6 Terra Responses Structured Outputs 路径已接通但尚未用真实凭据或中转站完成联调。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
-- Composite Floor、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Local Fix 已有独立后端图、深度保护、回退、SQLite replay 与 FastAPI route；尚无真实 edit transport、前端审片或导出操作；
+- raw-first Search/Critic/人工接受、Guidance Mask、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Fusion Mask 是用户显式触发的独立融合层，后端提供 search-scoped alpha mask 上传与矩形/PNG alpha + 羽化 API，前端提供 Fusion 预览编辑器；旧 Composite Floor 资产仅为兼容 Local Fix、导出和历史 SQLite 数据保留，不作为 Search/Critic 默认图像；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
-- 前端已覆盖首个 Search 工作流，不是通用节点编辑器，也暂不包含 Local Fix、导出体验或完整人工 interrupt/resume 操作。
+- 前端已覆盖首个 Search 工作流、Critic 分数/问题展示和人工候选选择；仍不是通用节点编辑器，也暂不包含 Local Fix 与导出操作体验。
 
 这些限制是实施指导中分阶段交付的结果，不是对非协商架构约束的替代；后续真实 provider、自动多轮和局部修复仍必须遵守 immutable-source rebase、幂等调用、PNG lineage、历史最佳和最大修复深度 2 等规则。

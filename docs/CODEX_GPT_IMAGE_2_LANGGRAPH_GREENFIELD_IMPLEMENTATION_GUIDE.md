@@ -28,7 +28,7 @@
 5. **自动搜索阶段禁止 `candidate -> edit -> candidate -> edit`。** 上一轮候选只用于 Critic，不得成为下一轮生成输入。
 6. **候选到候选编辑只允许出现在单独的 Local Fix Graph 中，且深度最多为 2。** 第三次修复必须从原始素材重生成或由用户接受现状。
 7. **所有生成链路中间资产使用 PNG。** JPEG/WebP 只能作为 UI 缩略图或最终交付格式，不能回流为生成输入。
-8. **GPT Image 2 的模型 Mask 只是引导条件。** 最终背景保护必须使用本地 `composite floor`。
+8. **GPT Image 2 的模型 Mask 只是引导条件。** Search/Critic/人工审片使用 raw candidate；最终融合保护由用户显式提交的可选 `Fusion Mask` 决定，不得自动套在每轮 Search 上。
 9. **Critic 只报告可见、可验证、会显著影响真实性的问题。** “没有有意义缺陷”必须是合法且优先的结果。
 10. **只有 blocking issue 能触发自动重生成。** warning/info 仅展示。
 11. **每轮反馈最多形成 1～3 条 active directives。** 禁止把历轮 critique 无限追加进 Prompt。
@@ -41,6 +41,18 @@
 18. **先建立 mock provider 的可测试纵向切片，再启用真实 OpenAI 调用。** 测试不依赖付费 API。
 19. **前后端从零搭建。** 默认采用 FastAPI/Python 后端与 React/TypeScript/Vite 前端。
 20. 完成每个里程碑后更新依赖、`.env.example`、README 和测试，并保持项目可启动。
+
+## 0.1 当前产品决策：Raw-first、可选 Fusion
+
+本节对旧版 Composite Floor 约定作当前版本的产品覆盖，后文出现的 protected
+candidate 仅表示旧数据兼容或用户主动融合后的派生资产：
+
+- GPT Image 2 仍接收 `Model Guidance Mask`，用于聚焦编辑区域；
+- Generator 保存的 `raw candidate` 是 Search、Critic、Ranker、Global Winner、用户审片和人工接受的唯一权威图像；
+- 自动 Search 每轮只从 immutable source、参考图、Guidance Mask 和当前 prompt 重新生成，不自动调用 Composite Floor；
+- 用户接受候选后，可以提交独立的 `Fusion Mask`（矩形/alpha mask + feather）生成融合预览或导出资产；
+- Fusion 不修改 raw candidate，不触发 Critic/Ranker/Planner，也不能作为下一轮 Search 输入；
+- 旧 `protected_asset` / `composite` 字段和旧 SQLite 数据必须可读，但不再作为默认 Search/Critic source of truth。
 
 默认模型配置：
 
@@ -94,7 +106,7 @@ LangGraph 自动审片与 Prompt 搜索
 - 只针对最重要的缺陷生成少量 Prompt 修正；
 - 每轮从原始素材重新采样；
 - 始终保留历史最佳；
-- 最终仅把允许区域回贴到原始全分辨率照片。
+- 用户需要像素级保护时，再以显式 Fusion Mask 把允许区域回贴到原始全分辨率照片。
 
 ---
 
@@ -122,16 +134,19 @@ LangGraph 自动审片与 Prompt 搜索
 - 单个 provider call 有重试上限；
 - 超出上限后进入 `needs_review` 或 `failed`，不能无限消耗预算。
 
-## 2.4 Composite floor
+## 2.4 Optional Fusion
 
-模型输出先经过本地回贴：
+Search 先保留模型原始输出，不自动执行本地回贴。用户接受候选后，可以
+提交独立的 Fusion Mask（矩形或 alpha mask + feather）生成最终预览或导出：
 
 ```text
-protected = original * (1 - composite_mask)
-          + generated * composite_mask
+fused = original * (1 - fusion_mask)
+      + raw_candidate * fusion_mask
 ```
 
-允许区域外必须像素级保持原始背景。
+Fusion 只影响用户主动选择的最终结果，不改变 raw candidate，也不触发 Critic、
+Ranker、Planner 或下一轮 Search。旧 Composite Floor 资产仍可用于读取旧数据和
+Local Fix/兼容导出，但不是 Search 的默认路径。
 
 ## 2.5 失败恢复与人工接管
 
@@ -211,7 +226,7 @@ protected = original * (1 - composite_mask)
 │ canonical prompt                                             │
 │ → round preparation                                          │
 │ → generator invocation                                       │
-│ → protected composite                                        │
+│ → persist raw candidates                                     │
 │ → candidate critic fan-out                                   │
 │ → deterministic ranker                                       │
 │ → global winner update                                       │
@@ -222,8 +237,8 @@ protected = original * (1 - composite_mask)
             ▼                       ▼
 ┌──────────────────────┐   ┌──────────────────────────────────┐
 │ OpenAI Services      │   │ Local Image Services             │
-│ GPT Image 2          │   │ crop / mask / composite floor    │
-│ GPT-5.6 Critic       │   │ diff / export / ICC / EXIF       │
+│ GPT Image 2          │   │ crop / guidance mask             │
+│ GPT-5.6 Critic       │   │ optional fusion / export / ICC   │
 │ GPT-5.6 Planner      │   │ thumbnails / SHA-256             │
 └──────────────────────┘   └──────────────────────────────────┘
             │
@@ -269,7 +284,7 @@ prepare_round
   ↓
 generate_candidates
   ↓
-protect_candidates
+persist_raw_candidates
   ↓
 dispatch_candidate_critics
   ↓
@@ -446,7 +461,10 @@ class CandidateRecord(TypedDict):
     candidate_id: str
     round_index: int
     variant_index: int
+    # Raw is the Search/Critic/user-review authority.
     raw_asset: AssetRef
+    # Legacy compatibility alias. A raw-only Search stores raw_asset here too;
+    # Local Fix/old rows may still reference a distinct derived asset.
     protected_asset: AssetRef
     prompt_hash: str
     request_key: str
@@ -641,8 +659,8 @@ Critic 是多模态节点，输入：
 
 - 原始背景 crop proxy；
 - 猫参考 proxy，默认最多 3 张；
-- placement overlay；
-- 单张 protected candidate；
+- placement overlay 与背景可以合并为一张 proxy，减少一张 image input；
+- 单张 raw candidate；
 - canonical intent；
 - 固定 rubric version。
 
@@ -721,9 +739,9 @@ Mask 作用于第一张图，因此背景 crop 必须是第一张输入。
 - 不发送 `input_fidelity`；
 - 使用 PNG 输入和输出；
 - 保存原始 API 输出为 `raw_candidate.png`；
-- 再生成 `protected_candidate.png`；
-- Critic 评价 protected candidate，因为它才是用户最终看到的版本；
-- raw candidate 保留用于调试 mask 接缝和模型行为。
+- raw candidate 直接进入 Critic、Ranker 和人工审片；
+- 用户显式提交 Fusion Mask 后，才生成可选 `fused_candidate.png`；
+- Fusion 派生图不继承 raw 的评价，也不能作为下一轮 Search 输入。
 
 ## 8.2 两种 Mask
 
@@ -733,12 +751,12 @@ Mask 作用于第一张图，因此背景 crop 必须是第一张输入。
 - 允许模型生成接触阴影、毛发边缘和少量环境反射；
 - 只用于指导 GPT Image 2。
 
-### Composite Floor Mask
+### Fusion Mask
 
-- 更保守；
-- 羽化边缘；
-- 决定最终采用模型像素的区域；
-- 允许区域外必须恢复原始像素。
+- 由用户在接受候选后显式选择；
+- 支持矩形/alpha mask 和可调羽化边缘；
+- 决定最终预览或导出采用 raw 像素的区域；
+- 不参与 Search、Critic 或 prompt 迭代。
 
 二者不能共用同一个边界。
 
@@ -858,7 +876,7 @@ collect evaluations
 由 Critic 给语义判断，但最终硬约束由本地 diff 决定：
 
 - 背景人物、建筑、文字和构图是否无意改变；
-- composite floor 是否产生明显边缘；
+- raw candidate 是否出现不自然的编辑边界；
 - 是否出现重复物体或幽灵纹理。
 
 ### `overall_photographic_naturalness`
@@ -966,7 +984,7 @@ Ranker 不调用 LLM。
 以下任一成立则 candidate 不可自动接受：
 
 - `identity_match == false`；
-- 关键背景差异超出 composite floor；
+- raw candidate 在 Guidance Mask/用户意图之外出现高置信度关键背景破坏；
 - 生成尺寸/文件损坏；
 - 猫位于允许区域之外；
 - 有 blocking anatomy issue；
@@ -993,8 +1011,8 @@ WEIGHTS = {
 随后施加：
 
 - blocking penalty；
-- deterministic background-diff penalty；
-- mask seam penalty；
+- Guidance Mask/用户意图之外的 deterministic background-diff penalty；
+- raw candidate 非预期编辑边界 penalty；
 - reference mismatch hard fail；
 - Critic confidence adjustment。
 
@@ -1137,7 +1155,7 @@ source manifest
 + canonical prompt
 + active directives = []
 → generate 3 medium candidates
-→ composite floor
+→ persist raw candidates
 → independent Critic fan-out
 → rank
 → update global winner
@@ -1458,7 +1476,7 @@ CODEX_TASK.md
 
 - 不创建 `legacy/` 目录；
 - 不复制旧 ComfyUI、Depth、matting、静态前端或 deterministic cat-paste 代码；
-- 可以重新实现 crop mapping、mask、composite floor、asset hash 和 ICC/EXIF 导出；
+- 可以重新实现 crop mapping、Guidance/Fusion Mask、可选像素融合、asset hash 和 ICC/EXIF 导出；
 - 新代码必须由当前架构和测试驱动，而不是为了兼容旧接口；
 - API 在第一版即可使用版本化路径，例如 `/api/v1/...`；
 - Provider 接口从第一天支持 fake/mock 实现，避免测试依赖真实 API。
@@ -1674,7 +1692,7 @@ MVP 不做通用节点画布。
 - 姿态下拉；
 - 朝向；
 - 接触面文字；
-- 显示模型 mask 和 composite mask 的可选预览；
+- 显示 Guidance Mask，并在用户显式创建后显示 Fusion Mask 预览；
 - placement 改变时明确提示需要新 search。
 
 ## 17.3 Search Controls
@@ -1697,7 +1715,7 @@ MVP 不做通用节点画布。
 - identity / perspective / optical / integration 核心分；
 - blocking/warning 数量；
 - Round Winner / Global Winner；
-- raw/protected 切换仅在 debug 模式；
+- raw candidate 始终作为审片图；用户显式融合后可另看 fused preview，旧 protected 仅在 debug/兼容模式显示；
 - Accept / Local Fix / Compare。
 
 ## 17.5 Search Timeline
@@ -1942,14 +1960,14 @@ active_directives_hash
 
 ## 21.10 `test_background_protection.py`
 
-- composite mask 外 RGB 与原图完全一致；
-- alpha/feather 区域符合预期；
-- raw candidate 改背景不影响 protected output；
+- 用户显式 Fusion Mask 外 RGB 与原图完全一致；
+- Fusion alpha/feather 区域符合预期；
+- raw candidate 的背景变化由 Critic 和人工审片直接评估；用户若需要局部保护，显式 Fusion Mask 只影响最终导出，不改变 raw；
 - 全分辨率回贴坐标正确。
 
 ## 21.11 `test_png_lineage.py`
 
-- source normalization、candidate、protected、local fix intermediate 均为 PNG；
+- source normalization、raw candidate、可选 fused asset、local fix intermediate 均为 PNG；
 - UI JPEG thumbnail 不得成为 Generator input。
 
 ## 21.12 `test_local_fix_depth.py`
@@ -2076,10 +2094,11 @@ C. 旧连续 I2I revise 方案
 - request idempotency；
 - live path 由环境开关控制。
 
-## Commit 6 — Composite floor and export mapping
+## Commit 6 — Optional Fusion and export mapping
 
-- protected candidate；
-- mask 外背景 exactness；
+- raw candidate first-class response；
+- optional user Fusion Mask；
+- Fusion mask 外背景 exactness（仅用户触发时）；
 - crop/full-resolution mapping；
 - ICC/EXIF groundwork；
 - 单元测试。
@@ -2199,11 +2218,11 @@ C. 旧连续 I2I revise 方案
 
 ## 背景与导出
 
-- [ ] composite floor 外像素与原图一致；
+- [ ] 用户启用 Fusion Mask 时，mask 外像素与原图一致；
 - [ ] 原始分辨率回贴；
 - [ ] JPEG/PNG 导出；
 - [ ] ICC/EXIF 尽量保留；
-- [ ] raw/protected candidate 均可审计。
+- [ ] raw/fused candidate 均可审计，旧 protected candidate 保持可读。
 
 ## 产品
 
@@ -2245,7 +2264,7 @@ Rank deterministically.
 Keep the historical best.
 Stop before over-optimization.
 Edit candidates only through a bounded local-fix path.
-Protect original pixels outside the permitted region.
+When Fusion is requested, protect original pixels outside the permitted region.
 Persist enough state to resume without paying twice.
 ```
 
@@ -2257,7 +2276,7 @@ Persist enough state to resume without paying twice.
 + 猫身份专用审片
 + LangGraph 可恢复搜索
 + Global Winner
-+ 原始像素保护
++ 用户可控的可选原始像素保护
 + 专业摄影文件交付
 ```
 

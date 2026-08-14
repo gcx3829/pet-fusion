@@ -30,7 +30,7 @@ Build a runnable MVP in this repository with:
 - deterministic candidate ranking and historical Global Winner;
 - immutable-source rebase on every automatic search round;
 - checkpoint persistence, interrupt/resume and idempotent provider calls;
-- local composite-floor background protection;
+- optional user-authored Fusion Mask compositing and background protection;
 - full-resolution export with ICC/EXIF preservation where technically possible;
 - complete backend tests for the architectural invariants.
 
@@ -57,7 +57,9 @@ Use provider interfaces and test doubles before making the live OpenAI path mand
 - Do not feed a previous candidate into the next automatic generation round.
 - Do not let LLM output directly decide candidate ranking or stop conditions without deterministic validation.
 - Do not use JPEG/WebP as an internal generation lineage format.
-- Do not rely on the model mask alone to protect the background.
+- The model Guidance Mask is not a pixel lock. Search/Critic/user review must use
+  raw candidates; only an explicit user Fusion Mask may perform final local
+  compositing, and it must not feed back into Search or Critic.
 - Do not put image bytes or Base64 in LangGraph checkpoint state.
 - Do not expose the OpenAI API key to the browser.
 - Do not copy Nodaro source-available/enterprise code or proprietary prompts.

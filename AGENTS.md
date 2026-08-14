@@ -35,10 +35,23 @@ General ideas may be retained, especially crop mapping, composite-floor protecti
 - Only blocking issues can trigger automatic regeneration.
 - All paid or externally visible side effects are idempotent.
 - LangGraph checkpoints contain references and structured state, not image bytes.
-- Background protection is enforced locally with a composite floor.
+- Search/Critic/user review are raw-first. Background protection is an optional,
+  user-triggered Fusion Mask operation; it must not be applied automatically to
+  Search candidates or used as the Critic's image.
 - Local Fix is separate from Search and has maximum generation depth 2.
 - The OpenAI API key stays on the backend.
 - Use the official OpenAI API directly.
+
+## Current Raw-first product decision
+
+The GPT Image 2 Guidance Mask remains part of every Search generation request.
+It tells the model where to focus, but it is not a pixel lock. Search stores the
+raw provider output as the authoritative candidate: Critic, Ranker, Global Winner,
+human review, and prompt rebase decisions all use that raw asset. A Fusion Mask
+is an optional user-authored rectangle/alpha selection with feathering applied
+only for a final preview or export. Legacy `protected_asset`/`composite` fields
+remain readable for Local Fix and old SQLite rows, but are not the default Search
+source of truth.
 
 ## Default stack
 

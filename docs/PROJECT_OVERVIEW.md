@@ -86,7 +86,7 @@ Original + References → Candidate Round 1
 Original + References → Candidate Round 2
 ```
 
-上一轮候选只用于 Critic；下一轮始终从原始素材重新生成。
+上一轮候选只用于 Critic 和人工审片；下一轮始终从原始素材重新生成。Critic、Ranker、Global Winner 和人工接受都以 raw candidate 为准，不以本地融合后的派生图为准。
 
 ### 4.4 Critic 不是最终裁判
 
@@ -108,6 +108,14 @@ Original + References → Candidate Round 2
 - `no_meaningful_defect` 合法停止；
 - 人工最终选择。
 
+### 4.5 Raw-first 与可选 Fusion
+
+GPT Image 2 的 Guidance Mask 只负责告诉模型应关注的编辑区域。Search 保存模型原始输出
+`raw candidate`，并把它作为 Critic、用户比较、Global Winner 和 prompt 迭代的唯一权威图像。
+系统不再为每轮 Search 自动套用 Composite Floor。用户如果希望像 Photoshop 一样限制最终
+融合范围，可以在接受候选后单独创建 Fusion Mask（矩形或 alpha mask + 羽化），Fusion 只
+影响预览和导出，不修改 raw candidate，也不回流到 Critic 或下一轮 Search。
+
 ## 5. 新的产品与架构命题
 
 当前项目的核心命题是：
@@ -122,7 +130,7 @@ Original + References → Candidate Round 2
 | 光线、透视、毛发和环境融合 | GPT Image 2 |
 | Critic、Prompt Planner、轮次控制 | LangGraph |
 | 候选排名和 Global Winner | 确定性业务逻辑，由 LangGraph 编排 |
-| Mask、裁切、像素回贴 | 本地 Python 图像服务 |
+| Guidance/Fusion Mask、裁切、可选像素回贴 | 本地 Python 图像服务 |
 | 原始分辨率、ICC、EXIF | 本地导出服务 |
 | 位置、尺寸、姿态意图 | 前端 Placement Canvas |
 | 最终接受与审美判断 | 用户 |
@@ -184,10 +192,10 @@ UI 必须区分：
 
 系统不只声称“保持背景”，而应提供：
 
-- Mask 可视化；
-- 原图/候选差异查看；
-- 允许编辑区域外的像素一致性测试；
-- 导出前保护状态提示。
+- Guidance Mask 可视化；
+- 原图/raw candidate 差异查看；
+- 启用 Fusion Mask 时，对融合区域外执行像素一致性测试；
+- 导出前明确提示当前使用 raw 还是用户 Fusion 结果。
 
 ## 8. 摄影质量维度
 
@@ -208,7 +216,7 @@ Critic 和人工审片共同关注：
 
 - 摄影师盲评更偏好搜索选出的 Global Winner；
 - 自动多轮不会出现累计 I2I 画质劣化；
-- 允许编辑区域外像素可验证地保持原图；
+- 启用用户 Fusion Mask 时，融合区域外像素可验证地保持原图；
 - 宠物能被明确认出为参考图中的同一只；
 - 轮数、成本和失败状态可预测；
 - 中断后能够从 checkpoint 恢复且不重复付费；
