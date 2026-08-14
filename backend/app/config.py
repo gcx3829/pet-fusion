@@ -53,7 +53,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("OPENAI_BASE_URL", "PET_FUSION_OPENAI_BASE_URL"),
     )
     openai_image_model: str = Field(
-        default="gpt-image-2-2026-04-21",
+        default="gpt-image-2",
         min_length=1,
         validation_alias=AliasChoices("OPENAI_IMAGE_MODEL", "PET_FUSION_OPENAI_IMAGE_MODEL"),
     )
