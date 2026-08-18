@@ -49,8 +49,6 @@ describe("API client", () => {
         new File(["one"], "cat-1.png", { type: "image/png" }),
         new File(["two"], "cat-2.png", { type: "image/png" }),
       ],
-      catName: "栗子",
-      catTraits: "白色口鼻",
     };
 
     const project = await createProject(draft);
@@ -61,7 +59,7 @@ describe("API client", () => {
     const form = init?.body as FormData;
     expect(form.get("background")).toBe(draft.background);
     expect(form.getAll("cat_references")).toEqual(draft.references);
-    expect(form.get("cat_name")).toBe("栗子");
+    expect(form.get("cat_name")).toBeNull();
   });
 
   it("只发送后端搜索 schema 允许的控制字段", async () => {

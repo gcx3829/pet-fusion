@@ -61,7 +61,7 @@ describe("GuidanceMaskEditor", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("默认 placement seed 可编辑，笔刷 stroke 只改变本地状态且不触发 fetch", async () => {
+  it("默认 Mask 为空，笔刷 stroke 只改变本地状态且不触发 fetch", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const states: GuidanceMaskEditorState[] = [];
@@ -77,14 +77,17 @@ describe("GuidanceMaskEditor", () => {
     const canvas = await screen.findByLabelText("Mask 画布，按住鼠标绘制");
 
     await waitFor(() => expect(states.at(-1)?.dirty).toBe(false));
+    expect(states.at(-1)?.document.strokes).toEqual([]);
     fireEvent.pointerDown(canvas, { pointerId: 1, button: 0, clientX: 20, clientY: 50 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 80, clientY: 50 });
     await waitFor(() => expect(states.at(-1)?.dirty).toBe(true));
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(screen.getByText("CUSTOM MASK")).toBeInTheDocument();
+    expect(screen.queryByText("CUSTOM MASK")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "撤销笔划" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("笔刷大小")).not.toBeInTheDocument();
   });
 
-  it("手绘后 placement 变化不会静默覆盖，重置才回到当前位置 seed", async () => {
+  it("手绘后 legacy placement 变化不会覆盖现有笔划或创建种子 Mask", async () => {
     const states: GuidanceMaskEditorState[] = [];
     const view = render(
       <GuidanceMaskEditor
@@ -99,6 +102,7 @@ describe("GuidanceMaskEditor", () => {
     fireEvent.pointerDown(canvas, { pointerId: 2, button: 0, clientX: 20, clientY: 50 });
     fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 80, clientY: 50 });
     await waitFor(() => expect(states.at(-1)?.dirty).toBe(true));
+    const paintedHash = states.at(-1)?.documentHash;
 
     view.rerender(
       <GuidanceMaskEditor
@@ -109,10 +113,25 @@ describe("GuidanceMaskEditor", () => {
         onStateChange={(state) => states.push(state)}
       />,
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent("不会静默覆盖");
-    fireEvent.click(screen.getByRole("button", { name: "重置为当前位置" }));
-    await waitFor(() => expect(states.at(-1)?.dirty).toBe(false));
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(states.at(-1)?.dirty).toBe(true);
+    expect(states.at(-1)?.documentHash).toBe(paintedHash);
+    expect(screen.queryByText("MASK 已保留")).not.toBeInTheDocument();
+  });
+
+  it("按图片原始比例设置画布舞台，不受工作区宽高拉伸", async () => {
+    const view = render(
+      <GuidanceMaskEditor
+        backgroundSrc="blob:wide-background"
+        width={1600}
+        height={900}
+        placement={placement}
+      />,
+    );
+    await screen.findByLabelText("Mask 画布，按住鼠标绘制");
+    const stage = view.container.querySelector<HTMLElement>(".mask-brush-stage");
+    expect(stage?.style.width).toBe("960px");
+    expect(stage?.style.height).toBe("540px");
+    expect(stage?.style.aspectRatio).toBe("960 / 540");
   });
 
   it("Search 启动后锁定画笔并显示新 Search 提示", async () => {
@@ -128,7 +147,7 @@ describe("GuidanceMaskEditor", () => {
       />,
     );
     const canvas = await screen.findByLabelText("Mask 画布，按住鼠标绘制");
-    expect(screen.getByText(/Guidance Mask 已锁定/)).toBeInTheDocument();
+    expect(screen.getByText("MASK LOCKED")).toBeInTheDocument();
     expect(canvas).toHaveAttribute("aria-disabled", "true");
     fireEvent.pointerDown(canvas, { pointerId: 3, button: 0, clientX: 20, clientY: 50 });
     fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 80, clientY: 50 });
