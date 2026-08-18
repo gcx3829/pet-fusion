@@ -69,7 +69,7 @@ export function SearchControls({
             <span>相同源素材独立采样</span>
           </div>
           <div className="segmented-control" aria-label="每轮候选数量">
-            {[2, 3, 4].map((count) => (
+            {[1, 2, 3].map((count) => (
               <button
                 key={count}
                 type="button"

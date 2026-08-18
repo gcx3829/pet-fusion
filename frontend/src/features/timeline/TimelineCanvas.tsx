@@ -45,7 +45,7 @@ function previewState(nodeId: string, element: HTMLElement, x = 0.5, y = 0.5): T
 function PhotoNode({ data }: NodeProps<PhotoFlowNode>) {
   const { node, selected, onActivate, onPreview } = data;
   return <>
-    <Handle type="target" position={Position.Left} isConnectable={false} />
+    {node.kind !== "source" && <Handle type="target" position={Position.Left} id="in" isConnectable={false} />}
     <button
       type="button"
       className={`timeline-photo-node is-${node.kind} is-${node.status} ${selected ? "is-selected" : ""} nodrag nopan`}
@@ -83,7 +83,7 @@ function PhotoNode({ data }: NodeProps<PhotoFlowNode>) {
       {node.progress && <span className="timeline-progress" aria-label="处理中"><b /><b /><b /></span>}
       {typeof node.score === "number" && <output>{node.score.toFixed(1)}</output>}
     </button>
-    <Handle type="source" position={Position.Right} isConnectable={false} />
+    {node.kind !== "final" && <Handle type="source" position={Position.Right} id="out" isConnectable={false} />}
   </>;
 }
 
@@ -103,18 +103,22 @@ export function TimelineCanvas({ events, snapshot, selectedNodeId, onSelectCandi
     const position = layout.positions[node.id] ?? { x: 0, y: 0, width: 132, height: 94 };
     return { id: node.id, type: "photo", position: { x: position.x, y: position.y }, width: position.width, height: position.height, draggable: false, selectable: false, focusable: false, data: { node, selected: node.id === selectedNodeId, onActivate: activate, onPreview: setPreview } };
   }), [graph.nodes, layout.positions, onSelectCandidate, onSelectFinal, onSelectSource, selectedNodeId]);
-  const edges = useMemo<FlowEdge[]>(() => graph.edges.map((edge) => ({
-    id: edge.id,
-    source: edge.from,
-    target: edge.to,
-    type: "smoothstep",
-    selectable: false,
-    focusable: false,
-    animated: false,
-    zIndex: 1,
-    style: { stroke: edge.relation === "accept" ? "#36b37e" : "#8b96a8", strokeWidth: 2, strokeDasharray: edge.relation === "rebase" ? "6 4" : undefined, opacity: 1 },
-    markerEnd: { type: MarkerType.ArrowClosed, color: edge.relation === "accept" ? "#36b37e" : "#8b96a8", width: 14, height: 14 },
-  })), [graph.edges]);
+  const relationByEdgeId = useMemo(() => new Map(
+    graph.edges.map((edge) => [`${edge.from}__${edge.to}`, edge.relation]),
+  ), [graph.edges]);
+  const edges = useMemo<FlowEdge[]>(() => layout.edges.map((edge) => {
+    const relation = relationByEdgeId.get(edge.id) ?? "continue";
+    const color = relation === "accept" ? "#36b37e" : relation === "continue" ? "#4c9aff" : "#8b96a8";
+    return {
+      ...edge,
+      selectable: false,
+      focusable: false,
+      animated: false,
+      zIndex: 1,
+      style: { stroke: color, strokeWidth: 2, strokeDasharray: relation === "rebase" ? "6 4" : undefined, opacity: 1 },
+      markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
+    };
+  }), [layout.edges, relationByEdgeId]);
   const hovered = graph.nodes.find((node) => node.id === preview?.id);
 
   return <div className="timeline-flow" aria-label="照片生成时间线" data-gesture-provider="xyflow">
@@ -122,6 +126,7 @@ export function TimelineCanvas({ events, snapshot, selectedNodeId, onSelectCandi
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
+      nodeOrigin={[0.5, 0.5]}
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={false}

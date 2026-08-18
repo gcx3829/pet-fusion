@@ -23,7 +23,7 @@ export interface TimelineEdge {
   id: string;
   from: string;
   to: string;
-  relation: "rebase" | "accept";
+  relation: "rebase" | "continue" | "accept";
 }
 
 export interface TimelineGraph { nodes: TimelineNode[]; edges: TimelineEdge[]; }
@@ -69,8 +69,10 @@ function candidateNode(candidate: SearchCandidate, snapshot?: SearchSnapshot | n
 }
 
 /** Only durable photo states become nodes. Prompt/Generate/Critic events are
- * metadata on those photo states; each automatic round has a direct rebase
- * edge from the original source and never from a previous candidate. */
+ * metadata on those photo states. Edges after Round 0 describe the reviewed
+ * candidate whose feedback planned the next Group; they are decision lineage,
+ * not image-input lineage. The backend still rebases every generation request
+ * to the immutable source. */
 export function buildTimelineGraph(
   _events: SearchEvent[],
   snapshot?: SearchSnapshot | null,
@@ -96,7 +98,6 @@ export function buildTimelineGraph(
     const node = candidateNode(candidate, snapshot);
     if (!node) continue;
     nodes.push(node);
-    if (media.sourceImageUrl) edges.push({ id: `source->${node.id}`, from: "source", to: node.id, relation: "rebase" });
   }
 
   if (media.sourceImageUrl && media.generationActive) {
@@ -122,10 +123,11 @@ export function buildTimelineGraph(
         placeholder: true,
         badges: ["GENERATING"],
       });
-      edges.push({ id: `source->${id}`, from: "source", to: id, relation: "rebase" });
     }
   }
 
+  let hasAcceptedOutput = false;
+  let acceptedSourceId: string | null = null;
   if (snapshot?.status === "accepted") {
     const accepted = candidates.find((candidate) => candidate.candidate_id === media.acceptedCandidateId)
       ?? candidates.find((candidate) => candidate.candidate_id === snapshot.global_winner_id)
@@ -144,7 +146,64 @@ export function buildTimelineGraph(
         status: "complete",
         badges: [media.fusionImageUrl ? "FINAL" : "ACCEPTED"],
       });
-      if (nodes.some((node) => node.id === sourceId)) edges.push({ id: `${sourceId}->final`, from: sourceId, to: "final", relation: "accept" });
+      hasAcceptedOutput = nodes.some((node) => node.id === sourceId);
+      acceptedSourceId = hasAcceptedOutput ? sourceId : null;
+    }
+  }
+
+  // Fusion is not a future Search stage and must not reserve Timeline space.
+  // Materialize the final node only after a candidate has actually been
+  // accepted; React Flow will then receive a new graph and fit the compact
+  // layout around the real terminal node.
+  const choiceNodes = nodes.filter((node) => node.kind === "candidate");
+
+  const groups = new Map<number, TimelineNode[]>();
+  for (const node of choiceNodes) {
+    const roundIndex = node.roundIndex ?? 0;
+    groups.set(roundIndex, [...(groups.get(roundIndex) ?? []), node]);
+  }
+  const orderedGroups = [...groups.entries()].sort(([left], [right]) => left - right);
+  const chooseContinuation = (groupIndex: number): TimelineNode => {
+    const [roundIndex, groupNodes] = orderedGroups[groupIndex];
+    const explicitCandidateId = snapshot?.prompt_history.find((entry) => (
+      entry.round_index === roundIndex + 1
+    ))?.human_selected_candidate_id;
+    return groupNodes.find((node) => node.candidateId === explicitCandidateId)
+      ?? groupNodes.find((node) => node.candidateId && candidates.find((candidate) => (
+        candidate.candidate_id === node.candidateId && candidate.is_round_winner
+      )))
+      ?? groupNodes.find((node) => node.candidateId && candidates.find((candidate) => (
+        candidate.candidate_id === node.candidateId && candidate.is_global_winner
+      )))
+      ?? groupNodes[0];
+  };
+
+  if (media.sourceImageUrl && orderedGroups.length) {
+    orderedGroups[0][1].forEach((node) => edges.push({
+      id: `source__${node.id}`,
+      from: "source",
+      to: node.id,
+      relation: "rebase",
+    }));
+    for (let groupIndex = 0; groupIndex < orderedGroups.length - 1; groupIndex += 1) {
+      const continuation = chooseContinuation(groupIndex);
+      orderedGroups[groupIndex + 1][1].forEach((node) => edges.push({
+        id: `${continuation.id}__${node.id}`,
+        from: continuation.id,
+        to: node.id,
+        relation: "continue",
+      }));
+    }
+    if (nodes.some((node) => node.id === "final")) {
+      const lastGroupNodes = orderedGroups.at(-1)![1];
+      const terminal = lastGroupNodes.find((node) => node.id === acceptedSourceId)
+        ?? chooseContinuation(orderedGroups.length - 1);
+      edges.push({
+        id: `${terminal.id}__final`,
+        from: terminal.id,
+        to: "final",
+        relation: hasAcceptedOutput ? "accept" : "continue",
+      });
     }
   }
   return { nodes, edges };

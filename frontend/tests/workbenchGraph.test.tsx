@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { rawCandidateUrl } from "../src/lib/raw";
 import { buildTimelineGraph } from "../src/features/timeline/buildTimelineGraph";
+import { layoutTimelineGraph } from "../src/features/timeline/timelineLayout";
 import { TimelineCanvas } from "../src/features/timeline/TimelineCanvas";
 import { WorkerToolbar } from "../src/features/workbench/WorkerToolbar";
 import { WorkerViewport } from "../src/features/workbench/WorkerViewport";
@@ -43,13 +44,15 @@ describe("workbench raw-first graph", () => {
     expect(rawCandidateUrl({ protected_asset_url: "/protected/only", image_url: "" } as unknown as SearchCandidate)).toBe("");
   });
 
-  it("只生成照片节点，并让每轮候选直接从 source rebase", () => {
+  it("只生成照片节点，并以 continuation 串联每轮选择", () => {
     const graph = buildTimelineGraph([], snapshot(), { sourceImageUrl: "/source.jpg", guidanceActive: true });
     expect(graph.nodes.every((node) => ["source", "candidate", "final"].includes(node.kind) && Boolean(node.imageUrl))).toBe(true);
-    expect(graph.edges.some((edge) => edge.from === "candidate:a" && edge.to === "candidate:b")).toBe(false);
+    expect(graph.edges.some((edge) => edge.from === "candidate:a" && edge.to === "candidate:b" && edge.relation === "continue")).toBe(true);
     expect(graph.nodes.find((node) => node.id === "candidate:b")?.imageUrl).toBe("/raw/b");
     expect(graph.edges.some((edge) => edge.from === "source" && edge.to === "candidate:a")).toBe(true);
-    expect(graph.edges.some((edge) => edge.from === "source" && edge.to === "candidate:b")).toBe(true);
+    expect(graph.edges.some((edge) => edge.from === "source" && edge.to === "candidate:b")).toBe(false);
+    expect(graph.nodes.some((node) => node.kind === "final")).toBe(false);
+    expect(graph.edges.some((edge) => edge.to === "final")).toBe(false);
   });
 
   it("deduplicates replayed durable events before deriving node state", () => {
@@ -57,6 +60,24 @@ describe("workbench raw-first graph", () => {
     const graph = buildTimelineGraph([event, event], snapshot("running"));
     expect(new Set(graph.nodes.map((node) => node.id)).size).toBe(graph.nodes.length);
     expect(new Set(graph.edges.map((edge) => edge.id)).size).toBe(graph.edges.length);
+  });
+
+  it("Timeline adapter 使用中心坐标、确定性 edge id 和受限 edge type", () => {
+    const graph = buildTimelineGraph([], snapshot("accepted"), {
+      sourceImageUrl: "/source.jpg",
+      acceptedCandidateId: "b",
+    });
+    const layout = layoutTimelineGraph(graph);
+    expect(layout.positions.source.y).toBe(0);
+    expect(layout.positions.final.y).toBe(0);
+    expect(layout.positions["candidate:a"].x).toBeLessThan(layout.positions["candidate:b"].x);
+    expect(layout.positions.final.x - layout.positions["candidate:b"].x).toBe(214);
+    expect(layout.edges.map((edge) => edge.id)).toEqual([
+      "source__candidate:a",
+      "candidate:a__candidate:b",
+      "candidate:b__final",
+    ]);
+    expect(layout.edges.every((edge) => edge.type === "straight" || edge.type === "default")).toBe(true);
   });
 
   it("没有 source 图片时，过程事件不会伪造照片节点", () => {
@@ -76,7 +97,7 @@ describe("workbench raw-first graph", () => {
       currentRound: 1,
     });
 
-    const pending = graph.nodes.filter((node) => node.placeholder);
+    const pending = graph.nodes.filter((node) => node.kind === "candidate" && node.placeholder);
     expect(pending.map((node) => node.id)).toEqual(["pending:1:0", "pending:1:1", "pending:1:2"]);
     expect(pending.every((node) => node.imageUrl === "/source.jpg" && node.progress === "indeterminate")).toBe(true);
     expect(graph.edges.map((edge) => `${edge.from}->${edge.to}`)).toEqual([
@@ -84,6 +105,29 @@ describe("workbench raw-first graph", () => {
       "source->pending:1:1",
       "source->pending:1:2",
     ]);
+    expect(graph.nodes.find((node) => node.id === "final")).toBeUndefined();
+  });
+
+  it("接受候选后才创建最终节点，并按当前真实深度重新布局", () => {
+    const beforeAccept = buildTimelineGraph([], snapshot(), { sourceImageUrl: "/source.jpg" });
+    expect(beforeAccept.nodes.some((node) => node.id === "final")).toBe(false);
+
+    const afterAccept = buildTimelineGraph([], snapshot("accepted"), {
+      sourceImageUrl: "/source.jpg",
+      acceptedCandidateId: "b",
+    });
+    const layout = layoutTimelineGraph(afterAccept);
+    expect(afterAccept.nodes.find((node) => node.id === "final")).toMatchObject({
+      label: "已接受",
+      detail: "等待 Fusion Mask",
+      candidateId: "b",
+    });
+    expect(afterAccept.edges).toContainEqual(expect.objectContaining({
+      from: "candidate:b",
+      to: "final",
+      relation: "accept",
+    }));
+    expect(layout.positions.final.x - layout.positions["candidate:b"].x).toBe(214);
   });
 
   it("allows Fusion only after accepted and only through an explicit action", () => {

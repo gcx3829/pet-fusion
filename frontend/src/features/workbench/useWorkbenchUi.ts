@@ -112,7 +112,9 @@ export function useWorkbenchUi({ hasSearch, accepted, roundIndex }: UseWorkbench
 
   const enterFusion = useCallback(() => {
     if (!accepted) return;
-    setState((current) => ({ ...current, workerMode: "fusion", sidebarTab: "fusion" }));
+    setState((current) => current.workerMode === "fusion" && current.sidebarTab === "fusion"
+      ? current
+      : { ...current, workerMode: "fusion", sidebarTab: "fusion" });
   }, [accepted]);
 
   const actions = useMemo<WorkbenchUiActions>(() => ({
@@ -123,7 +125,9 @@ export function useWorkbenchUi({ hasSearch, accepted, roundIndex }: UseWorkbench
       const nextZoom = clampZoom(zoom);
       return nextZoom === current.zoom ? current : { ...current, zoom: nextZoom };
     }),
-    setSelectedNodeId: (selectedNodeId) => setState((current) => ({ ...current, selectedNodeId })),
+    setSelectedNodeId: (selectedNodeId) => setState((current) => current.selectedNodeId === selectedNodeId
+      ? current
+      : { ...current, selectedNodeId }),
     setBrushTool: (brushTool) => setState((current) => ({ ...current, brushTool })),
     setBrushSize: (brushSize) => setState((current) => ({ ...current, brushSize: Math.round(Math.max(4, Math.min(512, brushSize))) })),
     setBrushFlow: (brushFlow) => setState((current) => ({ ...current, brushFlow: Math.max(1, Math.min(100, Math.round(brushFlow))) })),
