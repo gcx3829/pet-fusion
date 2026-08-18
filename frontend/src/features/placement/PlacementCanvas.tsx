@@ -209,7 +209,7 @@ export function PlacementCanvas({
           <strong>Guidance Mask ≠ Fusion Mask</strong>
           <span>Guidance Mask 只告诉 GPT Image 2 关注哪里，不锁定像素；当前搜索、Critic 和人工审片始终查看 Raw Candidate。</span>
         </div>
-        <small>Fusion Mask 编辑器尚未启用，接受候选后再由用户选择融合区域与羽化。</small>
+        <small>下方 Guidance Mask 画笔用于软引导模型；它不是像素锁。接受候选后，Fusion Mask 仍是独立的本地融合工具。</small>
       </div>
 
       <fieldset className="placement-fields" disabled={disabled || !backgroundUrl}>

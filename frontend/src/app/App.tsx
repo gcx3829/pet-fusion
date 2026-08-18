@@ -3,7 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icon } from "../components/Icon";
 import { CandidateGallery } from "../features/candidates/CandidateGallery";
 import { FusionEditor } from "../features/fusion/FusionEditor";
-import { PlacementCanvas } from "../features/placement/PlacementCanvas";
+import {
+  GuidanceMaskEditor,
+  type GuidanceMaskEditorHandle,
+  type GuidanceMaskEditorState,
+} from "../features/placement/GuidanceMaskEditor";
 import { HumanReview } from "../features/search/HumanReview";
 import { PromptHistory } from "../features/search/PromptHistory";
 import { SearchControls } from "../features/search/SearchControls";
@@ -12,12 +16,17 @@ import { SourcePanel } from "../features/sources/SourcePanel";
 import {
   createProject,
   createSearchIdempotencyKey,
+  assetContentUrl,
   getSearch,
+  uploadGuidanceMask,
   resumeSearch,
   startSearch,
 } from "../lib/api";
 import { useSearchEvents } from "../lib/events";
 import { useObjectUrl } from "../lib/files";
+import { createGuidanceMaskUploadCache } from "../lib/guidanceSearch";
+import { maskDocumentFingerprint, resizeMaskDocument } from "../lib/maskDocument";
+import { exportMaskFile } from "../lib/maskRasterizer";
 import type {
   PlacementIntent,
   ProjectRecord,
@@ -69,15 +78,29 @@ function errorMessage(error: unknown): string | null {
 export function App() {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<SourceDraft>(initialDraft);
-  const [placement, setPlacement] = useState<PlacementIntent>(initialPlacement);
+  // The visible placement/orientation controls were replaced by the local
+  // Guidance Mask brush. Keep this legacy payload only because the current
+  // API and older SQLite rows still require a placement object when no custom
+  // mask is uploaded.
+  const placement = initialPlacement;
   const [userIntent, setUserIntent] = useState("让宠物自然地坐在这里，像旅行中由同一台相机一起拍到的照片。");
   const [options, setOptions] = useState<SearchOptions>(initialOptions);
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [search, setSearch] = useState<SearchRecord | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
+  const [guidanceState, setGuidanceState] = useState<GuidanceMaskEditorState | null>(null);
   const [eventRevision, setEventRevision] = useState(0);
   const searchIdempotencyKey = useRef<string | null>(null);
+  const guidanceEditorRef = useRef<GuidanceMaskEditorHandle | null>(null);
+  const guidanceUploadCacheRef = useRef(createGuidanceMaskUploadCache());
   const backgroundUrl = useObjectUrl(draft.background);
+  const backgroundAsset = project?.source_manifest?.background;
+  const fusionBackgroundUrl = backgroundAsset
+    ? backgroundAsset.asset_url
+      ?? backgroundAsset.content_url
+      ?? backgroundAsset.url
+      ?? assetContentUrl(backgroundAsset.asset_id)
+    : backgroundUrl;
 
   const invalidateSearch = useCallback(() => {
     if (!search) return;
@@ -104,6 +127,34 @@ export function App() {
         nextProject = await createProject(draft);
         setProject(nextProject);
       }
+      let guidanceMaskAssetId: string | null = null;
+      if (guidanceState?.dirty) {
+        const editor = guidanceEditorRef.current;
+        if (!editor) throw new Error("Guidance Mask 画布尚未准备好");
+        const currentDocument = editor.getDocument();
+        if (!currentDocument.strokes.length) {
+          throw new Error("自定义 Guidance Mask 不能为空；请至少绘制一个可编辑区域");
+        }
+        const projectBackground = nextProject.source_manifest?.background;
+        const uploadDocument = (
+          projectBackground?.width
+          && projectBackground.height
+        )
+          ? resizeMaskDocument(
+              currentDocument,
+              projectBackground.width,
+              projectBackground.height,
+            )
+          : currentDocument;
+        const documentHash = maskDocumentFingerprint(uploadDocument);
+        const registration = await guidanceUploadCacheRef.current.getOrUpload(
+          nextProject.project_id,
+          documentHash,
+          () => exportMaskFile(uploadDocument, "guidance-mask.png"),
+          uploadGuidanceMask,
+        );
+        guidanceMaskAssetId = registration.asset.asset_id;
+      }
       searchIdempotencyKey.current ??= createSearchIdempotencyKey();
       const nextSearch = await startSearch(
         nextProject.project_id,
@@ -111,6 +162,7 @@ export function App() {
         userIntent,
         options,
         searchIdempotencyKey.current,
+        guidanceMaskAssetId,
       );
       return nextSearch;
     },
@@ -169,13 +221,14 @@ export function App() {
   const resetWorkbench = () => {
     if (search) queryClient.removeQueries({ queryKey: ["search", search.search_id] });
     setDraft(initialDraft);
-    setPlacement(initialPlacement);
     setOptions(initialOptions);
     setProject(null);
     setSearch(null);
     setSelectedCandidateId(null);
+    setGuidanceState(null);
     setEventRevision(0);
     searchIdempotencyKey.current = null;
+    guidanceUploadCacheRef.current.clear();
     submitMutation.reset();
     resumeMutation.reset();
   };
@@ -191,7 +244,7 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <a className="brand" href="#top" aria-label="Pet Fusion 首页">
+        <a className="brand" href="#workbench" aria-label="Pet Fusion 首页">
           <span className="brand-mark"><Icon name="aperture" /></span>
           <span>
             <strong>PET FUSION</strong>
@@ -215,18 +268,6 @@ export function App() {
       </header>
 
       <main id="workbench" className="workbench">
-        <section className="workbench-intro" id="top">
-          <div>
-            <p className="kicker"><span>PF—01</span> PHOTOGRAPHIC COMPOSITING WORKBENCH</p>
-            <h1>让它真的<br /><em>出现在那一刻。</em></h1>
-          </div>
-          <div className="intro-note">
-            <span className="note-rule" />
-            <p>从原始旅行照重新采样每一轮，直接审片 Raw，保留历史最佳。</p>
-            <small>宽引导 · 独立审片 · 用户融合</small>
-          </div>
-        </section>
-
         <div className="workspace-grid">
           <aside className="control-rail">
             <SourcePanel
@@ -250,12 +291,18 @@ export function App() {
           </aside>
 
           <div className="review-stage">
-            <PlacementCanvas
-              backgroundUrl={backgroundUrl}
-              value={placement}
-              onChange={setPlacement}
-              disabled={Boolean(search) || submitMutation.isPending}
-            />
+            {backgroundUrl && (
+              <GuidanceMaskEditor
+                ref={guidanceEditorRef}
+                backgroundSrc={backgroundUrl}
+                width={backgroundAsset?.width}
+                height={backgroundAsset?.height}
+                placement={placement}
+                disabled={submitMutation.isPending}
+                locked={Boolean(search)}
+                onStateChange={setGuidanceState}
+              />
+            )}
 
             {searchQuery.isError && (
               <div className="network-notice" role="alert">
@@ -297,6 +344,9 @@ export function App() {
                 snapshot={snapshot}
                 selectedCandidateId={selectedCandidateId}
                 placement={placement}
+                backgroundSrc={fusionBackgroundUrl}
+                backgroundWidth={backgroundAsset?.width}
+                backgroundHeight={backgroundAsset?.height}
               />
             )}
 

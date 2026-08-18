@@ -40,7 +40,7 @@ export function SearchControls({
     <section className="panel search-controls" aria-labelledby="search-heading">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">03 / SEARCH EXPOSURE</p>
+          <p className="eyebrow">04 / SEARCH EXPOSURE</p>
           <h2 id="search-heading">自动搜索</h2>
         </div>
         <span className={`status-stamp status-${status}`}>

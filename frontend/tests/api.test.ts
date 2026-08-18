@@ -93,6 +93,48 @@ describe("API client", () => {
     });
   });
 
+  it("有自定义 Guidance Mask 时才把已注册资产 ID 放进 Search payload", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      search_id: "search-guidance",
+      thread_id: "search-guidance",
+      status: "queued",
+      guidance_mask_asset_id: "ast-guidance",
+      events_url: "/api/v1/searches/search-guidance/events",
+    }, 201));
+
+    await startSearch("project-01", placement, "自然坐在这里", {
+      candidate_count: 3,
+      max_rounds: 2,
+      budget_usd: 1.5,
+      review_each_round: false,
+    }, "stable-guidance-request", "ast-guidance");
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      guidance_mask_asset_id: "ast-guidance",
+    });
+  });
+
+  it("上传 Guidance Mask 只在本地 PNG 校验通过后发起 project-scoped 请求", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      project_id: "project-01",
+      source_manifest_hash: "a".repeat(64),
+      asset: { asset_id: "ast-guidance", asset_url: "/api/v1/assets/ast-guidance" },
+    }, 201));
+
+    const { uploadGuidanceMask } = await import("../src/lib/api");
+    const registration = await uploadGuidanceMask(
+      "project-01",
+      new File(["mask"], "guidance.png", { type: "image/png" }),
+    );
+
+    expect(registration.asset.asset_id).toBe("ast-guidance");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/projects/project-01/guidance-masks");
+    expect((fetchMock.mock.calls[0][1]?.body as FormData).get("mask")).toBeInstanceOf(File);
+  });
+
   it("将后端 asset_url 候选规范为 Gallery 可用的数据", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
       search_id: "search-01",
@@ -104,6 +146,17 @@ describe("API client", () => {
         variant_index: 1,
         asset_id: "asset-01",
         asset_url: "/api/v1/assets/asset-01",
+        raw_width: 120,
+        raw_height: 100,
+        crop_mapping: {
+          schema_version: "crop-mapping/v1",
+          full_width: 400,
+          full_height: 300,
+          crop_box: { x: 100, y: 75, width: 200, height: 150 },
+          canvas_width: 120,
+          canvas_height: 100,
+          padding: { left: 10, top: 5, right: 10, bottom: 5 },
+        },
         generation_depth: 0,
         model: "fake-gpt-image-2",
       }],
@@ -129,6 +182,17 @@ describe("API client", () => {
       image_url: "/api/v1/assets/asset-01",
       model: "fake-gpt-image-2",
       is_global_winner: false,
+      raw_width: 120,
+      raw_height: 100,
+      crop_mapping: {
+        schema_version: "crop-mapping/v1",
+        full_width: 400,
+        full_height: 300,
+        crop_box: { x: 100, y: 75, width: 200, height: 150 },
+        canvas_width: 120,
+        canvas_height: 100,
+        padding: { left: 10, top: 5, right: 10, bottom: 5 },
+      },
     });
     expect(snapshot.prompt_history).toEqual([expect.objectContaining({
       round_index: 0,

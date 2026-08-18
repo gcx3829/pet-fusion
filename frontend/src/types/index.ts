@@ -46,6 +46,35 @@ export interface AssetRef {
   asset_url?: string;
 }
 
+export interface CropPixelBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CropPadding {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * Mapping emitted by the backend for a model-sized candidate.  The model
+ * canvas can contain padding around the actual crop; Fusion must remove that
+ * padding and place the crop back into this full-resolution box.
+ */
+export interface CropMapping {
+  schema_version?: "crop-mapping/v1";
+  full_width: number;
+  full_height: number;
+  crop_box: CropPixelBox;
+  canvas_width: number;
+  canvas_height: number;
+  padding: CropPadding;
+}
+
 export interface SourceManifest {
   manifest_hash?: string;
   background?: AssetRef;
@@ -55,6 +84,12 @@ export interface SourceManifest {
 export interface ProjectRecord {
   project_id: string;
   source_manifest?: SourceManifest;
+}
+
+export interface GuidanceMaskRegistration {
+  project_id: string;
+  source_manifest_hash: string;
+  asset: AssetRef;
 }
 
 export interface SearchOptions {
@@ -109,6 +144,9 @@ export interface SearchCandidate {
   raw_image_url?: string;
   raw_asset_id?: string;
   raw_asset_url?: string;
+  raw_width?: number;
+  raw_height?: number;
+  crop_mapping?: CropMapping;
   /** Legacy diagnostic only; never used as ``image_url``. */
   protected_asset_id?: string;
   protected_asset_url?: string;

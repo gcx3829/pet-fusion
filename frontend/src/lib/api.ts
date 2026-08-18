@@ -5,6 +5,7 @@ import type {
   FusionBox,
   FusionMaskRegistration,
   FusionResult,
+  GuidanceMaskRegistration,
   CriticIssue,
   ProjectRecord,
   ResumeAction,
@@ -17,6 +18,7 @@ import type {
   SourceManifest,
   PlacementIntent,
   PromptHistoryEntry,
+  CropMapping,
 } from "../types";
 import { MAX_UPLOAD_BYTES, prepareImageForUpload } from "./files";
 
@@ -50,6 +52,65 @@ function stringValue(value: unknown, fallback = ""): string {
 
 function numberValue(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeCropMapping(value: unknown): CropMapping | undefined {
+  if (!isObject(value) || !isObject(value.crop_box) || !isObject(value.padding)) {
+    return undefined;
+  }
+  const cropBox = value.crop_box;
+  const padding = value.padding;
+  const mapping: CropMapping = {
+    schema_version: value.schema_version === "crop-mapping/v1"
+      ? "crop-mapping/v1"
+      : undefined,
+    full_width: numberValue(value.full_width),
+    full_height: numberValue(value.full_height),
+    crop_box: {
+      x: numberValue(cropBox.x),
+      y: numberValue(cropBox.y),
+      width: numberValue(cropBox.width),
+      height: numberValue(cropBox.height),
+    },
+    canvas_width: numberValue(value.canvas_width),
+    canvas_height: numberValue(value.canvas_height),
+    padding: {
+      left: numberValue(padding.left),
+      top: numberValue(padding.top),
+      right: numberValue(padding.right),
+      bottom: numberValue(padding.bottom),
+    },
+  };
+  const values = [
+    mapping.full_width,
+    mapping.full_height,
+    mapping.crop_box.x,
+    mapping.crop_box.y,
+    mapping.crop_box.width,
+    mapping.crop_box.height,
+    mapping.canvas_width,
+    mapping.canvas_height,
+    mapping.padding.left,
+    mapping.padding.top,
+    mapping.padding.right,
+    mapping.padding.bottom,
+  ];
+  if (
+    values.some((item) => !Number.isInteger(item) || item < 0)
+    || mapping.full_width <= 0
+    || mapping.full_height <= 0
+    || mapping.crop_box.width <= 0
+    || mapping.crop_box.height <= 0
+    || mapping.canvas_width <= 0
+    || mapping.canvas_height <= 0
+    || mapping.crop_box.x + mapping.crop_box.width > mapping.full_width
+    || mapping.crop_box.y + mapping.crop_box.height > mapping.full_height
+    || mapping.padding.left + mapping.padding.right >= mapping.canvas_width
+    || mapping.padding.top + mapping.padding.bottom >= mapping.canvas_height
+  ) {
+    return undefined;
+  }
+  return mapping;
 }
 
 function resolveApiUrl(pathOrUrl: string): string {
@@ -246,6 +307,9 @@ function normalizeCandidate(
       value.raw_asset_url,
       stringValue(value.raw_image_url),
     ) || rawAsset?.asset_url || rawAsset?.content_url || rawAsset?.url,
+    raw_width: numberValue(value.raw_width, numberValue(rawAsset?.width, numberValue(value.width))) || undefined,
+    raw_height: numberValue(value.raw_height, numberValue(rawAsset?.height, numberValue(value.height))) || undefined,
+    crop_mapping: normalizeCropMapping(value.crop_mapping),
     protected_asset_id: stringValue(value.protected_asset_id) || protectedAsset?.asset_id,
     protected_asset_url: stringValue(
       value.protected_asset_url,
@@ -336,6 +400,7 @@ export async function startSearch(
   userIntent: string,
   options: SearchOptions,
   idempotencyKey = createSearchIdempotencyKey(),
+  guidanceMaskAssetId?: string | null,
 ): Promise<SearchRecord> {
   const payload = await request(`/projects/${encodeURIComponent(projectId)}/searches`, {
     method: "POST",
@@ -350,6 +415,7 @@ export async function startSearch(
       max_rounds: options.max_rounds,
       budget_usd: options.budget_usd,
       review_each_round: options.review_each_round,
+      ...(guidanceMaskAssetId ? { guidance_mask_asset_id: guidanceMaskAssetId } : {}),
     }),
   });
   const object = asObject(payload);
@@ -360,6 +426,32 @@ export async function startSearch(
     thread_id: stringValue(object.thread_id) || undefined,
     status: normalizeStatus(object.status),
     events_url: stringValue(object.events_url) || undefined,
+  };
+}
+
+export async function uploadGuidanceMask(
+  projectId: string,
+  file: File,
+): Promise<GuidanceMaskRegistration> {
+  if (file.type !== "image/png") {
+    throw new Error("Guidance Mask 必须是 PNG alpha 图片");
+  }
+  if (!file.size) throw new Error("Guidance Mask 不能为空");
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error(`Guidance Mask 超过 ${MAX_UPLOAD_BYTES} 字节上传限制`);
+  }
+  const form = new FormData();
+  form.append("mask", file);
+  const object = asObject(await request(
+    `/projects/${encodeURIComponent(projectId)}/guidance-masks`,
+    { method: "POST", body: form },
+  ));
+  const asset = normalizeAsset(object.asset);
+  if (!asset) throw new Error("Guidance Mask 上传成功，但响应缺少资产引用");
+  return {
+    project_id: stringValue(object.project_id, projectId),
+    source_manifest_hash: stringValue(object.source_manifest_hash),
+    asset,
   };
 }
 
