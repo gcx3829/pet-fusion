@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "../../components/Icon";
+import { rawCandidateUrl } from "../../lib/raw";
 import type { DimensionScores, SearchCandidate, SearchStatusValue } from "../../types";
 
 interface CandidateGalleryProps {
@@ -7,6 +8,7 @@ interface CandidateGalleryProps {
   status: SearchStatusValue;
   expectedCount: number;
   activeRoundIndex?: number;
+  selectedCandidateId?: string | null;
   onSelect?: (candidateId: string | null) => void;
 }
 
@@ -19,7 +21,7 @@ const metrics: { key: keyof DimensionScores; short: string; label: string }[] = 
 
 function ImageFrame({ candidate }: { candidate: SearchCandidate }) {
   const [failed, setFailed] = useState(false);
-  const rawImageUrl = candidate.raw_image_url ?? candidate.image_url;
+  const rawImageUrl = rawCandidateUrl(candidate);
   if (!rawImageUrl || failed) {
     return (
       <div className="candidate-image-fallback" role="img" aria-label="候选图片暂不可用">
@@ -39,7 +41,7 @@ function ImageFrame({ candidate }: { candidate: SearchCandidate }) {
 }
 
 function scoreLabel(score?: number): string {
-  return typeof score === "number" ? score.toFixed(1) : "—";
+  return typeof score === "number" ? score.toFixed(1) : "N/A";
 }
 
 export function CandidateGallery({
@@ -47,6 +49,7 @@ export function CandidateGallery({
   status,
   expectedCount,
   activeRoundIndex,
+  selectedCandidateId,
   onSelect,
 }: CandidateGalleryProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -64,10 +67,10 @@ export function CandidateGallery({
   }, [activeRoundIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selected = useMemo(
-    () => candidates.find((candidate) => candidate.candidate_id === selectedId)
+    () => candidates.find((candidate) => candidate.candidate_id === (selectedCandidateId ?? selectedId))
       ?? candidates.find((candidate) => candidate.is_global_winner)
       ?? candidates[0],
-    [candidates, selectedId],
+    [candidates, selectedCandidateId, selectedId],
   );
   const isActive = status === "queued" || status === "running";
 
