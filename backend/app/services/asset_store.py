@@ -114,6 +114,70 @@ class AssetStore:
     def put_image_bytes(self, data: bytes) -> AssetRef:
         return self.put_normalized(self.normalize_image(data))
 
+    def normalize_guidance_mask(self, data: bytes) -> NormalizedImage:
+        """Normalize a user Guidance Mask to a PNG alpha plane.
+
+        Guidance Masks are deliberately stricter than ordinary project uploads:
+        only a non-animated PNG with an actual alpha channel is accepted. RGB
+        pixels, colour channels, EXIF, and profiles are discarded; the stored
+        working asset is an RGBA PNG whose RGB channels are constant and whose
+        alpha plane is the authored mask.
+        """
+
+        try:
+            with Image.open(io.BytesIO(data)) as opened:
+                if opened.format != "PNG":
+                    raise UploadValidationError("Guidance Mask must be a PNG image")
+                if getattr(opened, "is_animated", False):
+                    raise UploadValidationError("Animated Guidance Masks are not supported")
+                has_alpha = "A" in opened.getbands()
+                indexed_transparency = opened.mode == "P" and "transparency" in opened.info
+                if not has_alpha and not indexed_transparency:
+                    raise UploadValidationError(
+                        "Guidance Mask PNG must contain an alpha channel"
+                    )
+                width, height = opened.size
+                if width <= 0 or height <= 0:
+                    raise UploadValidationError("Guidance Mask dimensions must be positive")
+                if width * height > self.max_image_pixels:
+                    raise UploadValidationError(
+                        f"Guidance Mask exceeds the {self.max_image_pixels} pixel safety limit"
+                    )
+                opened.load()
+                alpha = (
+                    opened.getchannel("A")
+                    if has_alpha
+                    else opened.convert("RGBA").getchannel("A")
+                ).copy()
+                if alpha.getextrema() == (0, 0):
+                    raise UploadValidationError(
+                        "Guidance Mask must contain at least one non-zero alpha pixel"
+                    )
+        except UploadValidationError:
+            raise
+        except (
+            Image.DecompressionBombError,
+            UnidentifiedImageError,
+            OSError,
+            ValueError,
+        ) as exc:
+            raise UploadValidationError("Guidance Mask is not a decodable PNG") from exc
+
+        output = io.BytesIO()
+        canonical = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
+        canonical.putalpha(alpha)
+        canonical.save(output, format="PNG", compress_level=9, optimize=False)
+        png_bytes = output.getvalue()
+        return NormalizedImage(
+            png_bytes=png_bytes,
+            sha256=hashlib.sha256(png_bytes).hexdigest(),
+            width=alpha.width,
+            height=alpha.height,
+        )
+
+    def put_guidance_mask_bytes(self, data: bytes) -> AssetRef:
+        return self.put_normalized(self.normalize_guidance_mask(data))
+
     def put_normalized(self, image: NormalizedImage) -> AssetRef:
         asset_id = f"ast_{image.sha256[:32]}"
         target = (self.root / image.sha256[:2] / f"{image.sha256}.png").resolve()

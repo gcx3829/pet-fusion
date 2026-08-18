@@ -6,7 +6,11 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Header, status
 
 from app.api.dependencies import ContainerDependency
-from app.domain.errors import ConflictError, UnsupportedMilestoneActionError
+from app.domain.errors import (
+    ConflictError,
+    ErrorEnvelope,
+    UnsupportedMilestoneActionError,
+)
 from app.domain.searches import (
     CreateSearchRequest,
     CreateSearchResponse,
@@ -80,6 +84,20 @@ async def _run_inline_search(container: object, search_id: str) -> None:
     "/projects/{project_id}/searches",
     response_model=CreateSearchResponse,
     status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorEnvelope,
+            "description": "Project was not found",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorEnvelope,
+            "description": "Idempotency or Guidance Mask lineage conflict",
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorEnvelope,
+            "description": "Invalid search request",
+        },
+    },
 )
 async def create_search(
     project_id: str,

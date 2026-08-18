@@ -7,7 +7,7 @@ from typing import cast
 
 from langchain_core.runnables import RunnableConfig
 
-from app.domain.assets import SourceManifest
+from app.domain.assets import AssetRef, SourceManifest
 from app.domain.candidates import CandidateResponse
 from app.domain.directives import DirectivePolicy, stable_directives_hash
 from app.domain.errors import SourceManifestMismatchError
@@ -107,6 +107,11 @@ class SearchRunner:
             "status": search.status.value,
             "source_manifest": project.source_manifest.model_dump(mode="json"),
             "source_manifest_hash": search.source_manifest_hash,
+            "guidance_mask_asset": (
+                search.guidance_mask_asset.model_dump(mode="json")
+                if search.guidance_mask_asset is not None
+                else None
+            ),
             "placement": search.placement.model_dump(mode="json"),
             "user_intent": search.user_intent,
             "active_directives": [item.model_dump(mode="json") for item in active_directives],
@@ -285,6 +290,14 @@ class SearchRunner:
                     checkpoint_manifest = SourceManifest.model_validate(
                         checkpoint_state.get("source_manifest")
                     )
+                    checkpoint_guidance_payload = checkpoint_state.get(
+                        "guidance_mask_asset"
+                    )
+                    checkpoint_guidance = (
+                        AssetRef.model_validate(checkpoint_guidance_payload)
+                        if checkpoint_guidance_payload is not None
+                        else None
+                    )
                     if (
                         checkpoint_state.get("schema_version") != SEARCH_STATE_SCHEMA_VERSION
                         or checkpoint_state.get("search_id") != search.search_id
@@ -293,6 +306,7 @@ class SearchRunner:
                         != search.source_manifest_hash
                         or checkpoint_manifest != project.source_manifest
                         or project.source_manifest.manifest_hash != search.source_manifest_hash
+                        or checkpoint_guidance != search.guidance_mask_asset
                     ):
                         raise SourceManifestMismatchError(
                             "Checkpoint conflicts with immutable search source state"

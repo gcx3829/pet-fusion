@@ -333,6 +333,10 @@ def test_fusion_v9_table_migrates_additively(tmp_path: Path) -> None:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(fusions)").fetchall()
         }
+        search_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(search_runs)").fetchall()
+        }
         tables = {
             row[0]
             for row in connection.execute(
@@ -345,6 +349,11 @@ def test_fusion_v9_table_migrates_additively(tmp_path: Path) -> None:
         }
     assert {"source_background_asset_id", "input_mask_asset_id"} <= columns
     assert "fusion_mask_inputs" in tables
+    assert "guidance_mask_bindings" in tables
+    assert {
+        "guidance_mask_asset_id",
+        "guidance_mask_source_manifest_hash",
+    } <= search_columns
     assert MIGRATION_VERSION in versions
 
 

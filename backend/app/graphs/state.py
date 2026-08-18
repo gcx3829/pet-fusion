@@ -20,6 +20,8 @@ class SearchState(TypedDict, total=False):
     ]
     source_manifest: dict[str, object]
     source_manifest_hash: str
+    # Project-bound Guidance Mask reference only; never raster bytes.
+    guidance_mask_asset: dict[str, object] | None
     placement: dict[str, object]
     user_intent: str
     canonical_prompt: str

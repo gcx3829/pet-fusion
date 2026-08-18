@@ -33,6 +33,8 @@ GENERATOR_SCHEMA_VERSION = "generator-request/v1"
 GENERATOR_OUTPUT_SEMANTICS_VERSION = "raw-authority/v1"
 GENERATOR_INPUT_PROXY_VERSION = "generator-input-proxy/v2"
 GENERATOR_MASK_VERSION = "provider-mask/v1"
+GENERATOR_GUIDANCE_MASK_SEMANTICS_VERSION = "guidance-mask-user-alpha-editable/v1"
+GENERATOR_GUIDANCE_MASK_RESIZE_VERSION = "guidance-mask-resize-lanczos/v1"
 GENERATOR_BACKGROUND_MAX_SIDE = 1024
 GENERATOR_REFERENCE_MAX_SIDE = 768
 GENERATOR_MODEL_MASK_X_PADDING = 0.045
@@ -54,6 +56,9 @@ class GenerationRequest(BaseModel):
     search_id: str
     source_manifest: SourceManifest
     placement: PlacementIntent
+    # This is a reference to the immutable, project-bound user mask. The
+    # raster is deliberately not part of the request/checkpoint state.
+    guidance_mask: AssetRef | None = None
     prompt: str
     prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     round_index: int = Field(ge=0)
@@ -73,6 +78,21 @@ class GeneratedImage:
 
 class ImageGenerator(Protocol):
     async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]: ...
+
+
+def _provider_alpha_from_user_alpha(user_alpha: Image.Image) -> Image.Image:
+    """Convert the UI mask convention to the OpenAI edit-mask convention.
+
+    The browser-authored mask uses alpha=0 for "keep the original" and
+    alpha=255 for "allow editing". OpenAI's image-edit mask reverses that
+    meaning: transparent pixels are editable and opaque pixels are preserved.
+    Keep this conversion as a tiny pure operation so the 0/128/255 contract is
+    easy to test and remains independent of the provider transport.
+    """
+
+    if user_alpha.mode != "L":
+        user_alpha = user_alpha.convert("L")
+    return ImageOps.invert(user_alpha)
 
 
 class DeterministicFakeImageGenerator:
@@ -203,6 +223,55 @@ class OpenAIImageGenerator:
             }
         )
 
+    @staticmethod
+    def _guidance_provider_alpha(
+        guidance_mask: AssetRef,
+        *,
+        source_size: tuple[int, int],
+        proxy_size: tuple[int, int],
+    ) -> Image.Image:
+        """Load and resize a user Guidance Mask into provider alpha semantics.
+
+        ``guidance_mask`` is stored at the immutable source-background
+        resolution. The provider receives a bounded background proxy, so the
+        alpha plane must be resized with a high-quality filter before its
+        semantics are inverted. We intentionally do not threshold the result:
+        soft brush edges and partial flow values must survive the resize.
+        """
+
+        if guidance_mask.mime_type != "image/png":
+            raise SourceManifestMismatchError(
+                "Search Guidance Mask must be a canonical PNG asset"
+            )
+        if (guidance_mask.width, guidance_mask.height) != source_size:
+            raise SourceManifestMismatchError(
+                "Search Guidance Mask dimensions do not match the source background"
+            )
+        try:
+            with Image.open(guidance_mask.filesystem_path) as opened:
+                has_alpha = "A" in opened.getbands() or "transparency" in opened.info
+                if not has_alpha:
+                    raise SourceManifestMismatchError(
+                        "Search Guidance Mask does not contain an alpha channel"
+                    )
+                user_alpha = opened.convert("RGBA").getchannel("A").copy()
+        except SourceManifestMismatchError:
+            raise
+        except (Image.DecompressionBombError, OSError, ValueError) as exc:
+            raise SourceManifestMismatchError(
+                "Search Guidance Mask is not a readable PNG asset"
+            ) from exc
+
+        if user_alpha.size != source_size:
+            # The metadata check above catches a tampered AssetRef, while this
+            # second check catches bytes that no longer match those metadata.
+            raise SourceManifestMismatchError(
+                "Search Guidance Mask bytes do not match its recorded dimensions"
+            )
+        if user_alpha.size != proxy_size:
+            user_alpha = user_alpha.resize(proxy_size, Image.Resampling.LANCZOS)
+        return _provider_alpha_from_user_alpha(user_alpha)
+
     @classmethod
     def _provider_mask(
         cls,
@@ -212,30 +281,43 @@ class OpenAIImageGenerator:
         """Build the same-size RGBA mask expected by the image edit endpoint.
 
         The provider mask uses the inverse alpha convention: transparent pixels
-        are the edit region and opaque pixels are preserved. The expanded window
-        gives the model room to blend contact and edge context. No local floor is
-        applied during Search; Fusion/Export own any later pixel compositing.
+        are the edit region and opaque pixels are preserved. With no authored
+        Guidance Mask, the placement window is expanded to give the model room
+        to blend contact and edge context. With an authored mask, its soft alpha
+        plane is used exactly (after proxy resizing and semantic inversion).
+        No local floor is applied during Search; Fusion/Export own any later
+        pixel compositing.
         """
 
         with Image.open(io.BytesIO(background_input.png_bytes)) as opened:
             width, height = opened.size
-        placement = cls._model_mask_placement(request.placement)
-        editable_box = normalized_placement_to_pixel_box(
-            placement,
-            width=width,
-            height=height,
-        )
-        editable = Image.new("L", (width, height), 0)
-        ImageDraw.Draw(editable).rectangle(
-            (
-                editable_box.x,
-                editable_box.y,
-                editable_box.right - 1,
-                editable_box.bottom - 1,
-            ),
-            fill=255,
-        )
-        provider_alpha = ImageOps.invert(editable)
+        if request.guidance_mask is not None:
+            provider_alpha = cls._guidance_provider_alpha(
+                request.guidance_mask,
+                source_size=(
+                    request.source_manifest.background.width,
+                    request.source_manifest.background.height,
+                ),
+                proxy_size=(width, height),
+            )
+        else:
+            placement = cls._model_mask_placement(request.placement)
+            editable_box = normalized_placement_to_pixel_box(
+                placement,
+                width=width,
+                height=height,
+            )
+            editable = Image.new("L", (width, height), 0)
+            ImageDraw.Draw(editable).rectangle(
+                (
+                    editable_box.x,
+                    editable_box.y,
+                    editable_box.right - 1,
+                    editable_box.bottom - 1,
+                ),
+                fill=255,
+            )
+            provider_alpha = ImageOps.invert(editable)
         mask = Image.new("RGBA", (width, height), (255, 255, 255, 255))
         mask.putalpha(provider_alpha)
         output = io.BytesIO()
@@ -355,6 +437,7 @@ class GeneratorService:
 
     @staticmethod
     def build_request_key(request: GenerationRequest) -> str:
+        guidance_mask = request.guidance_mask
         payload = {
             "schema_version": GENERATOR_SCHEMA_VERSION,
             "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
@@ -379,6 +462,16 @@ class GeneratorService:
             "transparent_format": "png",
             "multi_candidate_strategy": GENERATOR_MULTI_CANDIDATE_STRATEGY,
         }
+        # Keep the legacy placement-only request key byte-for-byte stable. A
+        # Guidance Mask introduces an explicit content/transform contract and
+        # therefore receives a distinct key namespace only when supplied.
+        if guidance_mask is not None:
+            payload["guidance_mask"] = {
+                "asset_id": guidance_mask.asset_id,
+                "sha256": guidance_mask.sha256,
+                "semantics_version": GENERATOR_GUIDANCE_MASK_SEMANTICS_VERSION,
+                "resize_version": GENERATOR_GUIDANCE_MASK_RESIZE_VERSION,
+            }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -404,6 +497,28 @@ class GeneratorService:
                     "Automatic search cannot read a previous candidate as generator input"
                 )
             self.asset_store.assert_intact(asset)
+        stored_guidance_mask = search.guidance_mask_asset
+        if (request.guidance_mask is None) != (stored_guidance_mask is None):
+            raise SourceManifestMismatchError(
+                "Generator Guidance Mask differs from the immutable Search record"
+            )
+        if request.guidance_mask is not None:
+            if stored_guidance_mask != request.guidance_mask:
+                raise SourceManifestMismatchError(
+                    "Generator Guidance Mask differs from the immutable Search record"
+                )
+            guidance = request.guidance_mask
+            if guidance.mime_type != "image/png" or (
+                guidance.width,
+                guidance.height,
+            ) != (
+                manifest.background.width,
+                manifest.background.height,
+            ):
+                raise SourceManifestMismatchError(
+                    "Generator Guidance Mask does not match the source background"
+                )
+            self.asset_store.assert_intact(guidance)
 
     def _emit_candidate_ready(self, search_id: str, candidate: CandidateRecord) -> None:
         self.app_store.emit_event(
@@ -469,6 +584,16 @@ class GeneratorService:
             "model": request.model,
             "quality": request.quality,
             "size": request.size,
+            "guidance_mask": (
+                {
+                    "asset_id": request.guidance_mask.asset_id,
+                    "sha256": request.guidance_mask.sha256,
+                    "semantics_version": GENERATOR_GUIDANCE_MASK_SEMANTICS_VERSION,
+                    "resize_version": GENERATOR_GUIDANCE_MASK_RESIZE_VERSION,
+                }
+                if request.guidance_mask is not None
+                else None
+            ),
             "input_proxy": {
                 "schema_version": GENERATOR_INPUT_PROXY_VERSION,
                 "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,

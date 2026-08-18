@@ -1,4 +1,4 @@
-MIGRATION_VERSION = 10
+MIGRATION_VERSION = 12
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS search_runs (
         status IN ('queued', 'running', 'waiting_for_human', 'accepted', 'failed', 'cancelled')
     ),
     source_manifest_hash TEXT NOT NULL,
+    guidance_mask_asset_id TEXT REFERENCES assets(asset_id),
+    guidance_mask_source_manifest_hash TEXT,
     placement_json TEXT NOT NULL,
     user_intent TEXT NOT NULL,
     candidate_count INTEGER NOT NULL,
@@ -68,6 +70,17 @@ CREATE TABLE IF NOT EXISTS search_runs (
 
 CREATE INDEX IF NOT EXISTS idx_search_runs_queue
 ON search_runs(status, lease_until, created_at);
+
+CREATE TABLE IF NOT EXISTS guidance_mask_bindings (
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    source_manifest_hash TEXT NOT NULL,
+    asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, source_manifest_hash, asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_guidance_mask_bindings_project
+ON guidance_mask_bindings(project_id, source_manifest_hash, created_at);
 
 CREATE TABLE IF NOT EXISTS candidates (
     candidate_id TEXT PRIMARY KEY,

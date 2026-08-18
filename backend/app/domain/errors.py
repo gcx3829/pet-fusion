@@ -1,3 +1,35 @@
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ErrorDetail(BaseModel):
+    """One API-safe request validation detail."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    field: str
+    message: str
+
+
+class ErrorBody(BaseModel):
+    """Stable public error body used by exception handlers and OpenAPI."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str
+    message: str
+    details: list[ErrorDetail] | None = None
+
+
+class ErrorEnvelope(BaseModel):
+    """Every non-success JSON response is wrapped under ``error``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    error: ErrorBody
+
+
 class DomainError(Exception):
     code = "DOMAIN_ERROR"
     status_code = 422

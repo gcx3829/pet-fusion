@@ -5,7 +5,7 @@ from typing import Any, cast
 
 from langgraph.graph import END, START, StateGraph
 
-from app.domain.assets import SourceManifest
+from app.domain.assets import AssetRef, SourceManifest
 from app.domain.candidates import CandidateRecord, CandidateResponse
 from app.domain.directives import (
     DirectiveCategory,
@@ -14,6 +14,7 @@ from app.domain.directives import (
     PlannerResult,
     stable_directives_hash,
 )
+from app.domain.errors import SourceManifestMismatchError
 from app.domain.evaluations import (
     CandidateEvaluation,
     GlobalWinner,
@@ -45,7 +46,7 @@ from app.services.prompt_compiler import (
 from app.services.proxy_builder import CriticProxyBuilder
 from app.services.stop_policy import DeterministicStopPolicy
 
-SEARCH_STATE_SCHEMA_VERSION = "search-state/v4"
+SEARCH_STATE_SCHEMA_VERSION = "search-state/v5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,9 +240,25 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         if current.status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
             return {"status": current.status.value, "current_candidates": []}
         manifest = SourceManifest.model_validate(state["source_manifest"])
+        guidance_mask = current.guidance_mask_asset
+        checkpoint_guidance = state.get("guidance_mask_asset")
+        # Both the Search row and checkpoint bind the same immutable mask. Do not
+        # silently fill a missing checkpoint reference from the row: doing so
+        # would let a corrupted replay change a paid provider input while keeping
+        # the same LangGraph thread history.
+        checkpoint_guidance_asset = (
+            AssetRef.model_validate(checkpoint_guidance)
+            if checkpoint_guidance is not None
+            else None
+        )
+        if checkpoint_guidance_asset != guidance_mask:
+            raise SourceManifestMismatchError(
+                "Checkpoint Guidance Mask differs from the immutable Search record"
+            )
         request = GenerationRequest(
             search_id=state["search_id"],
             source_manifest=manifest,
+            guidance_mask=guidance_mask,
             placement=PlacementIntent.model_validate(state["placement"]),
             prompt=state["generation_prompt"],
             prompt_hash=state["generation_prompt_hash"],

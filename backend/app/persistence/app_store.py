@@ -17,6 +17,7 @@ from app.domain.errors import ConflictError, NotFoundError
 from app.domain.evaluations import CandidateEvaluation
 from app.domain.exports import ExportResult
 from app.domain.fusions import FusionResult
+from app.domain.guidance_masks import GuidanceMaskBinding
 from app.domain.projects import ProjectRecord
 from app.domain.searches import (
     CreateSearchRequest,
@@ -58,6 +59,7 @@ class AppStore:
         with self._migration_lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA_SQL)
+            self._migrate_guidance_mask_binding_scope(connection)
             provider_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(provider_calls)")
@@ -82,6 +84,8 @@ class AppStore:
                 ("round_history_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("prompt_history_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("interrupt_payload_json", "TEXT"),
+                ("guidance_mask_asset_id", "TEXT"),
+                ("guidance_mask_source_manifest_hash", "TEXT"),
             ):
                 if column not in search_columns:
                     connection.execute(
@@ -93,9 +97,13 @@ class AppStore:
                 "WHERE idempotency_key IS NOT NULL"
             )
             # Version 10 adds explicit search-scoped alpha-mask registration and
-            # two audit columns.  ``CREATE TABLE IF NOT EXISTS`` handles old
-            # databases with no Fusion tables; these additive columns handle a
-            # database created by the initial v9 Fusion slice.
+            # two audit columns. Version 11 adds project-scoped Guidance Mask
+            # bindings and the two search lineage columns above. Version 12
+            # removes the old global uniqueness constraint from content-addressed
+            # masks so identical bytes can be independently authorized by two
+            # projects. ``CREATE TABLE IF NOT EXISTS`` handles old databases with
+            # no Fusion or Guidance tables; these additive columns handle
+            # databases created by earlier schema versions.
             fusion_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(fusions)")
@@ -108,6 +116,72 @@ class AppStore:
                 (MIGRATION_VERSION, utcnow().isoformat()),
             )
             connection.commit()
+
+    @staticmethod
+    def _migrate_guidance_mask_binding_scope(connection: sqlite3.Connection) -> None:
+        """Replace v11's global asset uniqueness with project-scoped bindings.
+
+        Asset IDs describe content, not ownership. A single canonical PNG may
+        therefore be referenced by multiple project bindings, while every Search
+        lookup still requires the exact ``project_id + manifest_hash + asset_id``
+        tuple. SQLite cannot drop a UNIQUE constraint in place, so the v11 table
+        is rebuilt once when its single-column asset index is detected.
+        """
+
+        has_global_asset_uniqueness = False
+        for index_row in connection.execute(
+            "PRAGMA index_list(guidance_mask_bindings)"
+        ).fetchall():
+            if int(index_row["unique"]) != 1:
+                continue
+            index_columns = [
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM pragma_index_info(?)",
+                    (str(index_row["name"]),),
+                ).fetchall()
+            ]
+            if index_columns == ["asset_id"]:
+                has_global_asset_uniqueness = True
+                break
+        if not has_global_asset_uniqueness:
+            return
+
+        # Keep the table rebuild atomic. ``executescript`` above has completed,
+        # so this also serializes API/worker processes that initialize the same
+        # SQLite database concurrently.
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "ALTER TABLE guidance_mask_bindings "
+            "RENAME TO guidance_mask_bindings_v11"
+        )
+        connection.execute(
+            """
+            CREATE TABLE guidance_mask_bindings (
+                project_id TEXT NOT NULL REFERENCES projects(project_id),
+                source_manifest_hash TEXT NOT NULL,
+                asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, source_manifest_hash, asset_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO guidance_mask_bindings(
+                project_id, source_manifest_hash, asset_id, created_at
+            )
+            SELECT project_id, source_manifest_hash, asset_id, created_at
+            FROM guidance_mask_bindings_v11
+            """
+        )
+        connection.execute("DROP TABLE guidance_mask_bindings_v11")
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_guidance_mask_bindings_project
+            ON guidance_mask_bindings(project_id, source_manifest_hash, created_at)
+            """
+        )
 
     def register_asset(self, asset: AssetRef) -> None:
         with self._connection() as connection:
@@ -132,6 +206,140 @@ class AppStore:
                 ),
             )
             connection.commit()
+
+    @staticmethod
+    def _asset_from_row(row: sqlite3.Row) -> AssetRef:
+        return AssetRef(
+            asset_id=row["asset_id"],
+            sha256=row["sha256"],
+            path=row["path"],
+            mime_type=row["mime_type"],
+            width=row["width"],
+            height=row["height"],
+        )
+
+    @staticmethod
+    def _guidance_binding_from_row(row: sqlite3.Row) -> GuidanceMaskBinding:
+        return GuidanceMaskBinding(
+            project_id=row["project_id"],
+            source_manifest_hash=row["source_manifest_hash"],
+            asset=AppStore._asset_from_row(row),
+            created_at=row["created_at"],
+        )
+
+    def register_guidance_mask(
+        self,
+        *,
+        project_id: str,
+        source_manifest_hash: str,
+        asset: AssetRef,
+    ) -> GuidanceMaskBinding:
+        """Authorize one canonical alpha PNG for one project source manifest.
+
+        Asset IDs are content addresses and may be shared by projects that each
+        uploaded the same bytes. Authorization is always the full project/source/
+        asset tuple, never possession of the global asset ID alone.
+        """
+
+        now = utcnow().isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            project_row = connection.execute(
+                "SELECT source_manifest_json, manifest_hash FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            if project_row is None:
+                connection.rollback()
+                raise NotFoundError(f"Project {project_id} was not found")
+            manifest = SourceManifest.model_validate_json(project_row["source_manifest_json"])
+            manifest.assert_integrity()
+            if (
+                str(project_row["manifest_hash"]) != manifest.manifest_hash
+                or manifest.manifest_hash != source_manifest_hash
+            ):
+                connection.rollback()
+                raise ConflictError(
+                    "Guidance Mask source manifest does not match the project"
+                )
+            background = manifest.background
+            if asset.mime_type != "image/png" or (asset.width, asset.height) != (
+                background.width,
+                background.height,
+            ):
+                connection.rollback()
+                raise ConflictError(
+                    "Guidance Mask must be a canonical PNG matching the background dimensions"
+                )
+            asset_row = connection.execute(
+                "SELECT * FROM assets WHERE asset_id = ?", (asset.asset_id,)
+            ).fetchone()
+            if asset_row is None or not self._asset_matches_row(asset, asset_row):
+                connection.rollback()
+                raise ConflictError("Guidance Mask asset is not registered canonically")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO guidance_mask_bindings(
+                    project_id, source_manifest_hash, asset_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (project_id, source_manifest_hash, asset.asset_id, now),
+            )
+            row = connection.execute(
+                """
+                SELECT b.project_id, b.source_manifest_hash, b.created_at, a.*
+                FROM guidance_mask_bindings AS b
+                JOIN assets AS a ON a.asset_id = b.asset_id
+                WHERE b.project_id = ? AND b.source_manifest_hash = ? AND b.asset_id = ?
+                """,
+                (project_id, source_manifest_hash, asset.asset_id),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise ConflictError("Guidance Mask binding could not be persisted")
+            connection.commit()
+        return self._guidance_binding_from_row(row)
+
+    def get_guidance_mask(
+        self,
+        *,
+        project_id: str,
+        source_manifest_hash: str,
+        asset_id: str,
+    ) -> GuidanceMaskBinding:
+        """Resolve only a mask explicitly bound to this exact project source."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT b.project_id, b.source_manifest_hash, b.created_at, a.*
+                FROM guidance_mask_bindings AS b
+                JOIN assets AS a ON a.asset_id = b.asset_id
+                WHERE b.project_id = ? AND b.source_manifest_hash = ? AND b.asset_id = ?
+                """,
+                (project_id, source_manifest_hash, asset_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(
+                f"Guidance Mask {asset_id} was not found for project {project_id}"
+            )
+        return self._guidance_binding_from_row(row)
+
+    def list_guidance_masks(self, *, project_id: str) -> list[GuidanceMaskBinding]:
+        """List masks for the project's current immutable source manifest only."""
+
+        project = self.get_project(project_id)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT b.project_id, b.source_manifest_hash, b.created_at, a.*
+                FROM guidance_mask_bindings AS b
+                JOIN assets AS a ON a.asset_id = b.asset_id
+                WHERE b.project_id = ? AND b.source_manifest_hash = ?
+                ORDER BY b.created_at, b.asset_id
+                """,
+                (project_id, project.source_manifest.manifest_hash),
+            ).fetchall()
+        return [self._guidance_binding_from_row(row) for row in rows]
 
     def get_asset(self, asset_id: str) -> AssetRef:
         with self._connection() as connection:
@@ -635,6 +843,50 @@ class AppStore:
         resolved_search_id = search_id
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            project_row = connection.execute(
+                "SELECT manifest_hash FROM projects WHERE project_id = ?",
+                (project.project_id,),
+            ).fetchone()
+            if project_row is None:
+                connection.rollback()
+                raise NotFoundError(f"Project {project.project_id} was not found")
+            project.source_manifest.assert_integrity()
+            if str(project_row["manifest_hash"]) != project.source_manifest.manifest_hash:
+                connection.rollback()
+                raise ConflictError("Project source manifest changed before Search creation")
+            guidance_mask_asset: AssetRef | None = None
+            if request.guidance_mask_asset_id is not None:
+                guidance_row = connection.execute(
+                    """
+                    SELECT b.project_id, b.source_manifest_hash, b.created_at, a.*
+                    FROM guidance_mask_bindings AS b
+                    JOIN assets AS a ON a.asset_id = b.asset_id
+                    WHERE b.project_id = ? AND b.source_manifest_hash = ?
+                      AND b.asset_id = ?
+                    """,
+                    (
+                        project.project_id,
+                        project.source_manifest.manifest_hash,
+                        request.guidance_mask_asset_id,
+                    ),
+                ).fetchone()
+                if guidance_row is None:
+                    connection.rollback()
+                    raise ConflictError(
+                        "Guidance Mask is not registered for this project source manifest"
+                    )
+                guidance_mask_asset = self._asset_from_row(guidance_row)
+                if guidance_mask_asset.mime_type != "image/png" or (
+                    guidance_mask_asset.width,
+                    guidance_mask_asset.height,
+                ) != (
+                    project.source_manifest.background.width,
+                    project.source_manifest.background.height,
+                ):
+                    connection.rollback()
+                    raise ConflictError(
+                        "Guidance Mask dimensions or MIME type do not match the project"
+                    )
             if idempotency_key is not None:
                 existing = connection.execute(
                     """
@@ -656,10 +908,11 @@ class AppStore:
                 """
                 INSERT INTO search_runs(
                     search_id, thread_id, project_id, status, source_manifest_hash,
+                    guidance_mask_asset_id, guidance_mask_source_manifest_hash,
                     placement_json, user_intent, candidate_count, max_rounds,
                     budget_usd, review_each_round, idempotency_key,
                     idempotency_fingerprint, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     search_id,
@@ -667,6 +920,12 @@ class AppStore:
                     project.project_id,
                     SearchStatus.QUEUED.value,
                     project.source_manifest.manifest_hash,
+                    guidance_mask_asset.asset_id if guidance_mask_asset is not None else None,
+                    (
+                        project.source_manifest.manifest_hash
+                        if guidance_mask_asset is not None
+                        else None
+                    ),
                     request.placement.model_dump_json(),
                     request.user_intent,
                     request.candidate_count,
@@ -694,12 +953,58 @@ class AppStore:
                 """,
                 (search_id,),
             ).fetchall()
+            guidance_mask_row = None
+            if row is not None and "guidance_mask_asset_id" in row.keys():
+                asset_id = row["guidance_mask_asset_id"]
+                if asset_id is not None:
+                    if (
+                        row["guidance_mask_source_manifest_hash"]
+                        if "guidance_mask_source_manifest_hash" in row.keys()
+                        else None
+                    ) != row["source_manifest_hash"]:
+                        raise ConflictError(
+                            "Search Guidance Mask source lineage does not match the search"
+                        )
+                    binding_row = connection.execute(
+                        """
+                        SELECT 1 FROM guidance_mask_bindings
+                        WHERE project_id = ? AND source_manifest_hash = ? AND asset_id = ?
+                        """,
+                        (row["project_id"], row["source_manifest_hash"], asset_id),
+                    ).fetchone()
+                    if binding_row is None:
+                        raise ConflictError(
+                            "Search Guidance Mask is not bound to its project source"
+                        )
+                    guidance_mask_row = connection.execute(
+                        "SELECT * FROM assets WHERE asset_id = ?", (asset_id,)
+                    ).fetchone()
         if row is None:
             raise NotFoundError(f"Search {search_id} was not found")
-        return self._search_from_row(row, candidate_rows)
+        guidance_mask_asset_id = (
+            row["guidance_mask_asset_id"]
+            if "guidance_mask_asset_id" in row.keys()
+            else None
+        )
+        if guidance_mask_asset_id is not None and guidance_mask_row is None:
+            raise ConflictError("Search references a missing Guidance Mask asset")
+        return self._search_from_row(
+            row,
+            candidate_rows,
+            guidance_mask_asset=(
+                self._asset_from_row(guidance_mask_row)
+                if guidance_mask_row is not None
+                else None
+            ),
+        )
 
     @staticmethod
-    def _search_from_row(row: sqlite3.Row, candidate_rows: list[sqlite3.Row]) -> SearchRunRecord:
+    def _search_from_row(
+        row: sqlite3.Row,
+        candidate_rows: list[sqlite3.Row],
+        *,
+        guidance_mask_asset: AssetRef | None = None,
+    ) -> SearchRunRecord:
         from app.domain.searches import PlacementIntent
 
         return SearchRunRecord(
@@ -708,6 +1013,7 @@ class AppStore:
             project_id=row["project_id"],
             status=row["status"],
             source_manifest_hash=row["source_manifest_hash"],
+            guidance_mask_asset=guidance_mask_asset,
             placement=PlacementIntent.model_validate_json(row["placement_json"]),
             user_intent=row["user_intent"],
             candidate_count=row["candidate_count"],

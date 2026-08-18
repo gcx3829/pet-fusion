@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.domain.assets import AssetRef, PublicAssetRef
 from app.domain.candidates import CandidateRecord, CandidateResponse
 from app.domain.evaluations import CandidateEvaluation
 
@@ -57,6 +58,11 @@ class CreateSearchRequest(BaseModel):
     max_rounds: int = Field(default=1, ge=1, le=3)
     budget_usd: float | None = Field(default=None, gt=0)
     review_each_round: bool = False
+    guidance_mask_asset_id: str | None = Field(
+        default=None,
+        pattern=r"^ast_[0-9a-f]{32}$",
+        description="Previously registered project-scoped Guidance Mask asset",
+    )
 
 
 class PromptHistoryEntry(BaseModel):
@@ -83,6 +89,7 @@ class SearchRunRecord(BaseModel):
     project_id: str
     status: SearchStatus
     source_manifest_hash: str
+    guidance_mask_asset: AssetRef | None = None
     placement: PlacementIntent
     user_intent: str
     candidate_count: int
@@ -109,6 +116,7 @@ class CreateSearchResponse(BaseModel):
     thread_id: str
     project_id: str
     status: SearchStatus
+    guidance_mask_asset_id: str | None = None
     events_url: str
     created_at: datetime
 
@@ -119,6 +127,11 @@ class CreateSearchResponse(BaseModel):
             thread_id=search.thread_id,
             project_id=search.project_id,
             status=search.status,
+            guidance_mask_asset_id=(
+                search.guidance_mask_asset.asset_id
+                if search.guidance_mask_asset is not None
+                else None
+            ),
             events_url=f"/api/v1/searches/{search.search_id}/events",
             created_at=search.created_at,
         )
@@ -130,6 +143,8 @@ class SearchResponse(BaseModel):
     project_id: str
     status: SearchStatus
     round_index: int
+    guidance_mask_asset_id: str | None = None
+    guidance_mask_asset: PublicAssetRef | None = None
     round_winner_id: str | None
     candidate_count: int
     candidates: list[CandidateResponse]
@@ -193,6 +208,16 @@ class SearchResponse(BaseModel):
             project_id=search.project_id,
             status=search.status,
             round_index=search.round_index,
+            guidance_mask_asset_id=(
+                search.guidance_mask_asset.asset_id
+                if search.guidance_mask_asset is not None
+                else None
+            ),
+            guidance_mask_asset=(
+                PublicAssetRef.from_internal(search.guidance_mask_asset)
+                if search.guidance_mask_asset is not None
+                else None
+            ),
             round_winner_id=search.round_winner_id,
             candidate_count=search.candidate_count,
             candidates=response_candidates,

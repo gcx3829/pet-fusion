@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 from uuid import uuid4
 
@@ -7,7 +8,8 @@ from fastapi import APIRouter, File, Form, UploadFile, status
 
 from app.api.dependencies import ContainerDependency
 from app.domain.assets import AssetRef, SourceManifest
-from app.domain.errors import UploadValidationError
+from app.domain.errors import ErrorEnvelope, UploadValidationError
+from app.domain.guidance_masks import GuidanceMaskResponse
 from app.domain.projects import ProjectRecord, ProjectResponse
 from app.persistence.app_store import utcnow
 
@@ -69,3 +71,71 @@ async def create_project(
     )
     container.app_store.create_project(project)
     return ProjectResponse.from_record(project)
+
+
+@router.post(
+    "/{project_id}/guidance-masks",
+    response_model=GuidanceMaskResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorEnvelope,
+            "description": "Project was not found",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorEnvelope,
+            "description": "Project source lineage conflict",
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorEnvelope,
+            "description": "Invalid Guidance Mask upload"
+        },
+    },
+)
+async def register_guidance_mask(
+    project_id: str,
+    mask: Annotated[UploadFile, File()],
+    container: ContainerDependency,
+) -> GuidanceMaskResponse:
+    """Register one same-size alpha PNG against this project's source manifest."""
+
+    project = container.app_store.get_project(project_id)
+    content = await _read_upload(mask, max_bytes=container.settings.max_upload_bytes)
+    normalized = await asyncio.to_thread(
+        container.asset_store.normalize_guidance_mask,
+        content,
+    )
+    background = project.source_manifest.background
+    if (normalized.width, normalized.height) != (background.width, background.height):
+        raise UploadValidationError(
+            "Guidance Mask dimensions must match the source background"
+        )
+    asset = await asyncio.to_thread(container.asset_store.put_normalized, normalized)
+    container.asset_store.assert_png_lineage_asset(asset)
+    container.app_store.register_asset(asset)
+    binding = container.app_store.register_guidance_mask(
+        project_id=project.project_id,
+        source_manifest_hash=project.source_manifest.manifest_hash,
+        asset=asset,
+    )
+    return GuidanceMaskResponse.from_binding(binding)
+
+
+@router.get(
+    "/{project_id}/guidance-masks",
+    response_model=list[GuidanceMaskResponse],
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorEnvelope,
+            "description": "Project was not found",
+        }
+    },
+)
+def list_guidance_masks(
+    project_id: str,
+    container: ContainerDependency,
+) -> list[GuidanceMaskResponse]:
+    return [
+        GuidanceMaskResponse.from_binding(binding)
+        for binding in container.app_store.list_guidance_masks(project_id=project_id)
+    ]
