@@ -3,13 +3,17 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createFusion, uploadFusionMask } from "../src/lib/api";
-import { FusionEditor } from "../src/features/fusion/FusionEditor";
+import { FusionEditor, type FusionEditorState } from "../src/features/fusion/FusionEditor";
+import { renderLocalFusion } from "../src/features/fusion/renderLocalFusion";
 import type { MaskBrushEditorHandle } from "../src/features/mask/MaskBrushEditor";
 import type { PlacementIntent, SearchSnapshot } from "../src/types";
 
 vi.mock("../src/lib/api", () => ({
   createFusion: vi.fn(),
   uploadFusionMask: vi.fn(),
+}));
+vi.mock("../src/features/fusion/renderLocalFusion", () => ({
+  renderLocalFusion: vi.fn(),
 }));
 
 let brushProps: Record<string, unknown> | null = null;
@@ -86,6 +90,7 @@ function snapshot(): SearchSnapshot {
 describe("FusionEditor brush mode", () => {
   beforeEach(() => {
     brushProps = null;
+    vi.mocked(renderLocalFusion).mockResolvedValue(new Blob(["local-fusion"], { type: "image/png" }));
     vi.mocked(uploadFusionMask).mockResolvedValue({
       search_id: "search-brush",
       source_manifest_hash: "a".repeat(64),
@@ -101,6 +106,71 @@ describe("FusionEditor brush mode", () => {
       mask_asset: { asset_id: "mask", asset_url: "/api/v1/assets/mask" },
       feather_radius_px: 0,
     });
+  });
+
+  it("demo 模式在浏览器本地合成，不上传 mask 或调用后端 Fusion", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fusion-demo-result");
+    render(
+      <FusionEditor
+        demoMode
+        snapshot={snapshot()}
+        placement={placement}
+        backgroundSrc="/mock/fusion-source.svg"
+        backgroundWidth={400}
+        backgroundHeight={300}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+
+    await waitFor(() => expect(renderLocalFusion).toHaveBeenCalledTimes(1));
+    expect(renderLocalFusion).toHaveBeenCalledWith(expect.objectContaining({
+      originalSrc: "/mock/fusion-source.svg",
+      generatedSrc: "/api/v1/assets/raw",
+      width: 400,
+      height: 300,
+      mask: expect.any(File),
+    }));
+    expect(uploadFusionMask).not.toHaveBeenCalled();
+    expect(createFusion).not.toHaveBeenCalled();
+    expect(await screen.findByAltText("用户 Fusion Mask 预览")).toHaveAttribute("src", "blob:fusion-demo-result");
+  });
+
+  it("从 Timeline 离开再返回 Fusion 时恢复已完成的最终图而不是空白画布", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fusion-restored-result");
+    let latestState: FusionEditorState | undefined;
+    const firstView = render(
+      <FusionEditor
+        demoMode
+        snapshot={snapshot()}
+        placement={placement}
+        backgroundSrc="/mock/fusion-source.svg"
+        backgroundWidth={400}
+        backgroundHeight={300}
+        onStateChange={(state) => { latestState = state; }}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+    await waitFor(() => expect(latestState?.result?.fusion_asset.asset_url).toBe("blob:fusion-restored-result"));
+    const restoredResult = latestState?.result;
+    firstView.unmount();
+
+    render(
+      <FusionEditor
+        demoMode
+        restoredResult={restoredResult}
+        snapshot={snapshot()}
+        placement={placement}
+        backgroundSrc="/mock/fusion-source.svg"
+        backgroundWidth={400}
+        backgroundHeight={300}
+      />,
+    );
+
+    expect(await screen.findByAltText("用户 Fusion Mask 预览")).toHaveAttribute("src", "blob:fusion-restored-result");
+    expect(screen.queryByTestId("brush-editor")).not.toBeInTheDocument();
   });
 
   it("笔刷保存只在点击提交时发出 upload + create 两个请求，并固定服务端羽化为 0", async () => {

@@ -10,6 +10,7 @@ interface WorkerToolbarProps {
   brushFeather: number;
   canUndo?: boolean;
   canRedo?: boolean;
+  historyDepth?: number;
   fusionUnlocked?: boolean;
   onUndo?: () => void;
   onRedo?: () => void;
@@ -31,6 +32,7 @@ export function WorkerToolbar({
   brushFeather,
   canUndo = false,
   canRedo = false,
+  historyDepth = 0,
   fusionUnlocked = false,
   onUndo,
   onRedo,
@@ -52,6 +54,7 @@ export function WorkerToolbar({
         <button className="toolbar-button" type="button" aria-label="重做" disabled={!canRedo || !canEdit} onClick={onRedo}>
           <Icon name="redo" />
         </button>
+        {canEdit && <output className="toolbar-history-depth" aria-label="操作记录">{String(historyDepth).padStart(2, "0")} STEP</output>}
       </div>
 
       <span className="toolbar-divider" aria-hidden="true" />

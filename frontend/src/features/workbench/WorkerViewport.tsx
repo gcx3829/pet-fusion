@@ -7,8 +7,8 @@ import {
   type GuidanceMaskEditorState,
 } from "../placement/GuidanceMaskEditor";
 import { RawCandidateViewer } from "../candidates/RawCandidateViewer";
-import type { MaskBrushEditorHandle } from "../mask/MaskBrushEditor";
-import type { PlacementIntent, SearchSnapshot } from "../../types";
+import type { MaskBrushEditorHandle, MaskHistoryState } from "../mask/MaskBrushEditor";
+import type { FusionResult, PlacementIntent, SearchSnapshot } from "../../types";
 import type { MaskBrushSettings } from "../../lib/maskDocument";
 import type { BrushTool, WorkerMode } from "./useWorkbenchUi";
 import { EditorGestureViewport } from "./EditorGestureViewport";
@@ -33,9 +33,11 @@ interface WorkerViewportProps {
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
   onFusionBrushHandleChange?: (handle: MaskBrushEditorHandle | null) => void;
-  onFusionBrushHistoryChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
+  onFusionBrushHistoryChange?: (state: MaskHistoryState) => void;
   fusionEditorRef?: RefObject<FusionEditorHandle | null>;
   onFusionStateChange?: (state: FusionEditorState) => void;
+  fusionDemoMode?: boolean;
+  restoredFusionResult?: FusionResult | null;
 }
 
 export function WorkerViewport({
@@ -61,6 +63,8 @@ export function WorkerViewport({
   onFusionBrushHistoryChange,
   fusionEditorRef,
   onFusionStateChange,
+  fusionDemoMode = false,
+  restoredFusionResult = null,
 }: WorkerViewportProps) {
   if (mode === "create") {
     return backgroundUrl ? (
@@ -130,6 +134,8 @@ export function WorkerViewport({
           controlledTool={brushTool === "hand" ? undefined : brushTool}
           interactionDisabled={brushTool === "hand"}
           controlledBrush={brushSettings}
+          demoMode={fusionDemoMode}
+          restoredResult={restoredFusionResult}
           showChrome={false}
           onBrushHandleChange={onFusionBrushHandleChange}
           onBrushHistoryChange={onFusionBrushHistoryChange}

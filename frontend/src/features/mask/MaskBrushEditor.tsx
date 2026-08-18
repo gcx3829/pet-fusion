@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useId,
   useImperativeHandle,
@@ -54,12 +55,19 @@ export interface MaskBrushEditorProps {
   onUserEdit?: (action: "stroke" | "undo" | "redo" | "clear" | "reset") => void;
   /** Optional local hand-off. This callback must decide whether to upload. */
   onExportFile?: (file: File) => void | Promise<void>;
-  onHistoryChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
+  onHistoryChange?: (state: MaskHistoryState) => void;
   /** Optional shell-level controls. Internal controls remain available for legacy embeddings. */
   controlledTool?: MaskStrokeTool;
   controlledBrush?: Partial<MaskBrushSettings>;
   /** Workbench mode keeps every control in the shared top toolbar. */
   showChrome?: boolean;
+}
+
+export interface MaskHistoryState {
+  canUndo: boolean;
+  canRedo: boolean;
+  undoDepth: number;
+  redoDepth: number;
 }
 
 export interface MaskBrushEditorHandle {
@@ -485,15 +493,14 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       context.stroke();
     }, [cursor, disabled, effectiveBrush.size, effectiveTool, previewSize.height, previewSize.width, sourceHeight, sourceWidth]);
 
-    const finishStroke = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const commitActiveStroke = useCallback((pointerId: number, finalPoint?: NormalizedPoint) => {
       const active = activeStrokeRef.current;
-      if (!active || active.pointerId !== event.pointerId) return;
+      if (!active || active.pointerId !== pointerId) return;
       activeStrokeRef.current = null;
-      safeRelease(event.currentTarget, event.pointerId);
-      const finalPoint = pointerToPoint(event, event.currentTarget);
+      if (pointerCanvasRef.current) safeRelease(pointerCanvasRef.current, pointerId);
       setHistory((current) => {
         const currentStroke = current.present.strokes[active.strokeIndex];
-        const present = currentStroke
+        const present = currentStroke && finalPoint
           ? replaceStroke(
               current.present,
               active.strokeIndex,
@@ -507,31 +514,78 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         };
       });
       onUserEdit?.("stroke");
+    }, [onUserEdit, sourceHeight, sourceWidth]);
+
+    const rollbackActiveStroke = useCallback((pointerId?: number) => {
+      const active = activeStrokeRef.current;
+      if (!active || (pointerId !== undefined && active.pointerId !== pointerId)) return;
+      activeStrokeRef.current = null;
+      if (pointerCanvasRef.current) safeRelease(pointerCanvasRef.current, active.pointerId);
+      setHistory((current) => ({ ...current, present: active.before }));
+    }, []);
+
+    const finishStroke = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      commitActiveStroke(event.pointerId, pointerToPoint(event, event.currentTarget));
     };
 
     const cancelPointerStroke = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      const active = activeStrokeRef.current;
-      if (!active || active.pointerId !== event.pointerId) return;
-      activeStrokeRef.current = null;
-      safeRelease(event.currentTarget, event.pointerId);
-      setHistory((current) => ({ ...current, present: active.before }));
+      rollbackActiveStroke(event.pointerId);
     };
+
+    useEffect(() => {
+      const handleWindowPointerUp = (event: PointerEvent) => {
+        const canvas = pointerCanvasRef.current;
+        commitActiveStroke(
+          event.pointerId,
+          canvas ? pointerToPoint(event, canvas) : undefined,
+        );
+      };
+      const handleWindowPointerCancel = (event: PointerEvent) => rollbackActiveStroke(event.pointerId);
+      const handleWindowMouseUp = (event: MouseEvent) => {
+        const active = activeStrokeRef.current;
+        const canvas = pointerCanvasRef.current;
+        if (active) commitActiveStroke(
+          active.pointerId,
+          canvas ? pointerToPoint(event, canvas) : undefined,
+        );
+      };
+      const handleWindowBlur = () => {
+        const active = activeStrokeRef.current;
+        if (active) commitActiveStroke(active.pointerId);
+      };
+      // Capture phase is intentional: React Flow and browser gesture layers
+      // may stop the bubbling pointerup after a drag. A completed visible
+      // stroke must still enter history instead of leaving the editor stuck.
+      window.addEventListener("pointerup", handleWindowPointerUp, true);
+      window.addEventListener("pointercancel", handleWindowPointerCancel, true);
+      window.addEventListener("mouseup", handleWindowMouseUp, true);
+      window.addEventListener("blur", handleWindowBlur);
+      return () => {
+        window.removeEventListener("pointerup", handleWindowPointerUp, true);
+        window.removeEventListener("pointercancel", handleWindowPointerCancel, true);
+        window.removeEventListener("mouseup", handleWindowMouseUp, true);
+        window.removeEventListener("blur", handleWindowBlur);
+        const active = activeStrokeRef.current;
+        if (active && pointerCanvasRef.current) safeRelease(pointerCanvasRef.current, active.pointerId);
+        activeStrokeRef.current = null;
+      };
+    }, [commitActiveStroke, rollbackActiveStroke]);
 
     const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
       // A second touch belongs to a pinch gesture. Roll back the provisional
       // first-finger stroke so zooming never leaves an accidental mask dab.
       if (event.pointerType === "touch" && event.isPrimary === false) {
-        cancelActiveStroke();
+        rollbackActiveStroke();
         return;
       }
       // Some test harnesses and embedded pointer implementations omit
       // `button` for a primary pointer. Only an explicit non-primary button
       // should be ignored.
-      if (
-        disabled
-        || activeStrokeRef.current
-        || (event.button !== undefined && event.button !== 0)
-      ) return;
+      if (disabled || (event.button !== undefined && event.button !== 0)) return;
+      const staleStroke = activeStrokeRef.current;
+      if (staleStroke) {
+        commitActiveStroke(staleStroke.pointerId);
+      }
       event.preventDefault();
       const canvas = event.currentTarget;
       const point = pointerToPoint(event, canvas);
@@ -619,18 +673,8 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       onUserEdit?.("stroke");
     };
 
-    const cancelActiveStroke = () => {
-      const active = activeStrokeRef.current;
-      if (!active) return;
-      activeStrokeRef.current = null;
-      if (pointerCanvasRef.current) {
-        safeRelease(pointerCanvasRef.current, active.pointerId);
-      }
-      setHistory((current) => ({ ...current, present: active.before }));
-    };
-
     const undo = () => {
-      cancelActiveStroke();
+      rollbackActiveStroke();
       setHistory((current) => {
         const previous = current.past[current.past.length - 1];
         if (!previous) return current;
@@ -644,7 +688,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     };
 
     const redo = () => {
-      cancelActiveStroke();
+      rollbackActiveStroke();
       setHistory((current) => {
         const next = current.future[0];
         if (!next) return current;
@@ -658,7 +702,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     };
 
     const clear = () => {
-      cancelActiveStroke();
+      rollbackActiveStroke();
       setHistory((current) => {
         if (!current.present.strokes.length) return current;
         return {
@@ -671,7 +715,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     };
 
     const reset = () => {
-      cancelActiveStroke();
+      rollbackActiveStroke();
       setHistory({
         past: [],
         present: cloneMaskDocument(initialRef.current),
@@ -720,8 +764,13 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     const canRedo = history.future.length > 0;
 
     useEffect(() => {
-      onHistoryChange?.({ canUndo, canRedo });
-    }, [canRedo, canUndo, onHistoryChange]);
+      onHistoryChange?.({
+        canUndo,
+        canRedo,
+        undoDepth: history.past.length,
+        redoDepth: history.future.length,
+      });
+    }, [canRedo, canUndo, history.future.length, history.past.length, onHistoryChange]);
 
     return (
       <div className={`mask-brush-editor ${className}`.trim()}>
@@ -829,7 +878,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
             onPointerMove={disabled ? undefined : handlePointerMove}
             onPointerUp={finishStroke}
             onPointerCancel={cancelPointerStroke}
-            onLostPointerCapture={cancelPointerStroke}
+            onLostPointerCapture={(event) => commitActiveStroke(event.pointerId)}
             onPointerLeave={() => setCursor(null)}
             onPointerEnter={disabled ? undefined : (event) => setCursor(pointerToPoint(event, event.currentTarget))}
             onKeyDown={handleCanvasKeyDown}

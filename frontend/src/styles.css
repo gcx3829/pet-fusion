@@ -2770,6 +2770,7 @@ select:focus-visible,
 .toolbar-button[aria-pressed="true"] { border-color: var(--border); color: var(--text); background: #272a31; }
 .toolbar-button[aria-pressed="true"] { color: var(--info); box-shadow: inset 0 -2px var(--info); }
 .toolbar-button:disabled { cursor: not-allowed; opacity: .3; }
+.toolbar-history-depth { min-width: 46px; padding-left: 4px; color: var(--text-faint); font: 8px var(--mono); letter-spacing: .05em; }
 .toolbar-divider { width: 1px; height: 22px; flex: 0 0 1px; margin: 0 4px; background: var(--border-subtle); }
 .toolbar-divider--loose { margin-left: 8px; }
 .erase-glyph { width: 14px; height: 10px; border: 1px solid currentColor; border-radius: 1px; transform: rotate(-35deg); }
@@ -2844,6 +2845,15 @@ select:focus-visible,
 .fusion-sidebar-card strong { color: var(--success); font: 11px var(--mono); }
 .fusion-sidebar-card span { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .fusion-sidebar .primary-button { justify-content: center; }
+.fusion-demo-notice { display: grid; gap: 5px; padding: 9px 10px; border: 1px solid rgb(76 154 255 / 42%); color: var(--text-muted); background: rgb(76 154 255 / 7%); }
+.fusion-demo-notice strong { color: var(--info); font: 9px var(--mono); letter-spacing: .08em; }
+.fusion-demo-notice span { font-size: 10px; line-height: 1.45; }
+.fusion-export-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 46px; padding: 7px 9px; border: 1px solid rgb(76 154 255 / 50%); color: var(--info); background: rgb(76 154 255 / 6%); text-align: left; }
+.fusion-export-button:hover { border-color: var(--info); background: rgb(76 154 255 / 12%); }
+.fusion-export-button > svg { width: 17px; height: 17px; justify-self: center; }
+.fusion-export-button > span { display: grid; gap: 3px; }
+.fusion-export-button strong { color: var(--text); font: 10px var(--mono); font-weight: 500; }
+.fusion-export-button small { color: var(--text-faint); font: 8px var(--mono); }
 
 .timeline-workbench-panel { display: grid; grid-template-rows: 46px minmax(0, 1fr) 30px; min-height: 0; overflow: hidden; border: 0; border-top: 1px solid var(--border-subtle); border-radius: 0; background: var(--app-chrome); box-shadow: none; }
 .timeline-workbench-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border-subtle); }
@@ -2949,6 +2959,24 @@ select:focus-visible,
   .timeline-workbench-footer { gap: 7px; padding: 0 9px; }
   .timeline-invariant { display: none !important; }
 }
+
+/* Restricted choice-flow primitives. Geometry is supplied by the pure layout
+   module; these rules only define the fixed-size Photoshop-like presentation. */
+.choice-flow-view { width: 100%; height: 100%; min-width: 0; min-height: 0; background: #17191d; }
+.choice-flow-view .react-flow__node { padding: 0; border: 0; background: transparent; box-shadow: none; }
+.choice-flow-view .react-flow__handle { width: 7px; height: 7px; border: 1px solid #101216; background: var(--info); }
+.choice-flow-node { position: relative; display: grid; align-content: center; gap: 4px; overflow: hidden; padding: 10px 14px; border: 1px solid #454b56; border-radius: 3px; color: var(--text); background: #23262c; box-shadow: 0 5px 18px rgb(0 0 0 / 26%); }
+.choice-flow-node strong { overflow: hidden; font: 600 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.choice-flow-node small { overflow: hidden; color: var(--text-faint); font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.choice-flow-node--initial { border-left: 3px solid var(--info); }
+.choice-flow-node--output { border-right: 3px solid var(--success); }
+.choice-flow-node--choice { padding: 0; }
+.choice-flow-node--choice > button { position: absolute; inset: 0; display: grid; grid-template-columns: 68px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; padding: 0 12px 0 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
+.choice-flow-node--choice > button:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
+.choice-flow-node--choice img { width: 68px; height: 100%; object-fit: cover; }
+.choice-flow-node--choice span { display: grid; min-width: 0; gap: 3px; }
+.choice-flow-node--choice em { position: absolute; right: 6px; bottom: 4px; color: var(--info); font: 6px var(--mono); font-style: normal; }
+.choice-flow-node--choice.is-selected { border-color: var(--info); box-shadow: 0 0 0 1px var(--info), 0 7px 22px rgb(0 0 0 / 34%); }
 
 @media (prefers-reduced-motion: reduce) {
   .timeline-flow .react-flow__edge.animated path { animation: none !important; }

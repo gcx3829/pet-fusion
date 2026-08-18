@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6688a5"/>
+      <stop offset="0.58" stop-color="#c5ad8d"/>
+      <stop offset="1" stop-color="#625447"/>
+    </linearGradient>
+    <linearGradient id="seat" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#665c54"/>
+      <stop offset="1" stop-color="#2b2d31"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="17"/>
+    </filter>
+  </defs>
+  <rect width="1280" height="800" fill="url(#sky)"/>
+  <rect x="0" y="0" width="1280" height="64" fill="#24282d"/>
+  <rect x="0" y="64" width="82" height="736" fill="#30343a"/>
+  <path d="M82 565 C330 480 610 492 1280 425 L1280 800 L82 800Z" fill="url(#seat)"/>
+  <path d="M82 565 C330 480 610 492 1280 425" fill="none" stroke="#9b8a79" stroke-width="10"/>
+  <rect x="150" y="116" width="454" height="322" rx="18" fill="#b6d2df" stroke="#1f252c" stroke-width="18"/>
+  <path d="M170 392 L330 238 L446 336 L582 196 L582 420 L170 420Z" fill="#718270"/>
+  <circle cx="505" cy="181" r="38" fill="#f0c98e" opacity=".86"/>
+  <rect x="712" y="112" width="390" height="260" rx="22" fill="#50555c"/>
+  <rect x="742" y="140" width="330" height="202" rx="12" fill="#7a7470"/>
+  <ellipse cx="774" cy="622" rx="182" ry="42" fill="#07080a" opacity=".48" filter="url(#shadow)"/>
+  <g transform="translate(620 275)">
+    <path d="M72 210 C24 155 35 63 102 34 L138 0 L167 52 C219 39 267 51 298 91 L342 43 L354 119 C388 199 354 314 282 356 C232 385 136 373 93 329 C66 301 58 252 72 210Z" fill="#202327" stroke="#090a0c" stroke-width="10"/>
+    <path d="M112 72 L140 28 L161 80 M298 91 L337 60 L337 125" fill="#343940" stroke="#090a0c" stroke-width="8"/>
+    <ellipse cx="166" cy="139" rx="20" ry="14" fill="#b8c66d"/>
+    <ellipse cx="267" cy="139" rx="20" ry="14" fill="#b8c66d"/>
+    <circle cx="166" cy="139" r="5" fill="#0a0b0d"/>
+    <circle cx="267" cy="139" r="5" fill="#0a0b0d"/>
+    <path d="M202 172 L226 172 L214 188Z" fill="#bf8c82"/>
+    <path d="M119 215 C157 198 181 218 214 245 C248 216 286 198 326 220 L307 331 C250 370 158 365 101 320Z" fill="#ece8db"/>
+    <path d="M102 272 L58 351 M305 278 L346 352" stroke="#17191d" stroke-width="30" stroke-linecap="round"/>
+    <path d="M349 298 C430 286 457 233 423 180" fill="none" stroke="#202327" stroke-width="32" stroke-linecap="round"/>
+  </g>
+  <path d="M0 690 H1280" stroke="#17191d" stroke-width="18" opacity=".7"/>
+  <text x="112" y="752" fill="#dce4ed" font-family="ui-monospace, monospace" font-size="24" letter-spacing="5">MOCK RAW · GENERATED CAT REGION</text>
+</svg>
+

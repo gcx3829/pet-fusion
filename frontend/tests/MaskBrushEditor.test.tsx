@@ -165,7 +165,7 @@ describe("MaskBrushEditor", () => {
     await waitFor(() => expect(documents.at(-1)?.strokes).toHaveLength(1));
   });
 
-  it("pointer capture 意外丢失时回滚未完成笔划并允许继续绘制", async () => {
+  it("pointer capture 意外丢失时提交已经可见的笔划并允许继续绘制", async () => {
     const documents: MaskDocument[] = [];
     render(
       <MaskBrushEditor
@@ -180,11 +180,58 @@ describe("MaskBrushEditor", () => {
 
     fireEvent.pointerDown(canvas, { pointerId: 4, button: 0, clientX: 10, clientY: 10 });
     fireEvent.lostPointerCapture(canvas, { pointerId: 4, clientX: 20, clientY: 20 });
-    await waitFor(() => expect(documents.at(-1)?.strokes).toHaveLength(0));
+    await waitFor(() => expect(documents.at(-1)?.strokes).toHaveLength(1));
 
     fireEvent.pointerDown(canvas, { pointerId: 5, button: 0, clientX: 30, clientY: 30 });
     fireEvent.pointerUp(canvas, { pointerId: 5, clientX: 40, clientY: 40 });
-    await waitFor(() => expect(documents.at(-1)?.strokes).toHaveLength(1));
+    await waitFor(() => expect(documents.at(-1)?.strokes).toHaveLength(2));
+  });
+
+  it("React Flow 吞掉 canvas pointerup 时由 window capture 收尾并写入操作历史", async () => {
+    const documents: MaskDocument[] = [];
+    const historyStates: Array<{ canUndo: boolean; undoDepth: number }> = [];
+    render(
+      <MaskBrushEditor
+        originalSrc={null}
+        generatedSrc={null}
+        width={100}
+        height={100}
+        onDocumentChange={(document) => documents.push(document)}
+        onHistoryChange={(state) => historyStates.push(state)}
+      />,
+    );
+    const canvas = screen.getByLabelText("Mask 画布，按住鼠标绘制");
+
+    fireEvent.pointerDown(canvas, { pointerId: 41, button: 0, clientX: 15, clientY: 20 });
+    fireEvent.pointerMove(canvas, { pointerId: 41, clientX: 70, clientY: 75 });
+    fireEvent.pointerUp(window, { pointerId: 41, clientX: 85, clientY: 80 });
+
+    await waitFor(() => expect(historyStates.at(-1)).toMatchObject({ canUndo: true, undoDepth: 1 }));
+    expect(documents.at(-1)?.strokes).toHaveLength(1);
+  });
+
+  it("只收到原生 mouseup 且鼠标复用同一 pointerId 时仍逐笔提交", async () => {
+    const historyStates: Array<{ undoDepth: number }> = [];
+    render(
+      <MaskBrushEditor
+        originalSrc={null}
+        generatedSrc={null}
+        width={100}
+        height={100}
+        onHistoryChange={(state) => historyStates.push(state)}
+      />,
+    );
+    const canvas = screen.getByLabelText("Mask 画布，按住鼠标绘制");
+
+    fireEvent.pointerDown(canvas, { pointerId: 1, button: 0, clientX: 15, clientY: 20 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, buttons: 1, clientX: 45, clientY: 45 });
+    fireEvent.mouseUp(window, { clientX: 45, clientY: 45 });
+    await waitFor(() => expect(historyStates.at(-1)?.undoDepth).toBe(1));
+
+    fireEvent.pointerDown(canvas, { pointerId: 1, button: 0, clientX: 55, clientY: 60 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, buttons: 1, clientX: 80, clientY: 80 });
+    fireEvent.mouseUp(window, { clientX: 80, clientY: 80 });
+    await waitFor(() => expect(historyStates.at(-1)?.undoDepth).toBe(2));
   });
 
   it("通过 ref 导出原图尺寸的本地 PNG 文件", async () => {

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6688a5"/>
+      <stop offset="0.58" stop-color="#c5ad8d"/>
+      <stop offset="1" stop-color="#625447"/>
+    </linearGradient>
+    <linearGradient id="seat" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#665c54"/>
+      <stop offset="1" stop-color="#2b2d31"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="800" fill="url(#sky)"/>
+  <rect x="0" y="0" width="1280" height="64" fill="#24282d"/>
+  <rect x="0" y="64" width="82" height="736" fill="#30343a"/>
+  <path d="M82 565 C330 480 610 492 1280 425 L1280 800 L82 800Z" fill="url(#seat)"/>
+  <path d="M82 565 C330 480 610 492 1280 425" fill="none" stroke="#9b8a79" stroke-width="10"/>
+  <rect x="150" y="116" width="454" height="322" rx="18" fill="#b6d2df" stroke="#1f252c" stroke-width="18"/>
+  <path d="M170 392 L330 238 L446 336 L582 196 L582 420 L170 420Z" fill="#718270"/>
+  <circle cx="505" cy="181" r="38" fill="#f0c98e" opacity=".86"/>
+  <rect x="712" y="112" width="390" height="260" rx="22" fill="#50555c"/>
+  <rect x="742" y="140" width="330" height="202" rx="12" fill="#7a7470"/>
+  <path d="M0 690 H1280" stroke="#17191d" stroke-width="18" opacity=".7"/>
+  <text x="112" y="752" fill="#dce4ed" font-family="ui-monospace, monospace" font-size="24" letter-spacing="5">MOCK SOURCE · ORIGINAL PIXELS</text>
+</svg>
+

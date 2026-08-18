@@ -4,7 +4,8 @@ import { createFusion, uploadFusionMask } from "../../lib/api";
 import type { MaskBrushSettings, MaskStrokeTool } from "../../lib/maskDocument";
 import { rawCandidateUrl } from "../../lib/raw";
 import type { FusionBox, FusionResult, PlacementIntent, SearchSnapshot } from "../../types";
-import { MaskBrushEditor, type MaskBrushEditorHandle } from "../mask/MaskBrushEditor";
+import { MaskBrushEditor, type MaskBrushEditorHandle, type MaskHistoryState } from "../mask/MaskBrushEditor";
+import { renderLocalFusion } from "./renderLocalFusion";
 
 export interface FusionEditorState { pending: boolean; error: string | null; result: FusionResult | null; ready: boolean; }
 export interface FusionEditorHandle { apply: () => Promise<void>; }
@@ -20,9 +21,13 @@ interface FusionEditorProps {
   controlledTool?: MaskStrokeTool;
   controlledBrush?: Partial<MaskBrushSettings>;
   onBrushHandleChange?: (handle: MaskBrushEditorHandle | null) => void;
-  onBrushHistoryChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
+  onBrushHistoryChange?: (state: MaskHistoryState) => void;
   interactionDisabled?: boolean;
   onStateChange?: (state: FusionEditorState) => void;
+  /** Keeps a completed Fusion visible after Timeline navigation remounts the editor. */
+  restoredResult?: FusionResult | null;
+  /** Development-only local compositor used by ?demo=fusion. */
+  demoMode?: boolean;
   /** False in the main worker; legacy/embedded use can keep controls outside that shell. */
   showChrome?: boolean;
 }
@@ -40,6 +45,7 @@ function assetUrl(result: FusionResult): string { return result.fusion_asset.ass
 export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(function FusionEditor({
   snapshot, selectedCandidateId, placement = fallbackPlacement, backgroundSrc, backgroundWidth, backgroundHeight,
   controlledTool, controlledBrush, onBrushHandleChange, onBrushHistoryChange, interactionDisabled = false, onStateChange, showChrome = true,
+  demoMode = false, restoredResult = null,
 }, ref) {
   const hasBrush = Boolean(backgroundSrc && backgroundWidth && backgroundHeight);
   const [mode, setMode] = useState<FusionMode>(hasBrush ? "brush" : "box");
@@ -48,9 +54,10 @@ export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(fu
   const [maskFile, setMaskFile] = useState<File | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<FusionResult | null>(null);
+  const [result, setResult] = useState<FusionResult | null>(restoredResult);
   const brushRef = useRef<MaskBrushEditorHandle | null>(null);
   const epochRef = useRef(0);
+  const demoResultUrlRef = useRef<string | null>(null);
   const candidate = useMemo(() => snapshot.candidates.find((item) => item.candidate_id === selectedCandidateId)
     ?? snapshot.candidates.find((item) => item.candidate_id === snapshot.global_winner_id)
     ?? snapshot.candidates.find((item) => item.is_global_winner), [selectedCandidateId, snapshot.candidates, snapshot.global_winner_id]);
@@ -59,10 +66,37 @@ export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(fu
   const boxError = effectiveMode === "box" ? validateBox(box) : null;
   const ready = accepted && Boolean(candidate) && !boxError && (effectiveMode !== "alpha" || Boolean(maskFile));
 
+  const revokeDemoResult = useCallback(() => {
+    if (!demoResultUrlRef.current) return;
+    URL.revokeObjectURL(demoResultUrlRef.current);
+    demoResultUrlRef.current = null;
+  }, []);
+  const bindBrushHandle = useCallback((handle: MaskBrushEditorHandle | null) => {
+    brushRef.current = handle;
+    onBrushHandleChange?.(handle);
+  }, [onBrushHandleChange]);
+  const clearCompletedResult = useCallback(() => {
+    revokeDemoResult();
+    setResult(null);
+    setError(null);
+  }, [revokeDemoResult]);
+
   useEffect(() => {
     epochRef.current += 1;
-    setPending(false); setError(null); setResult(null); setMaskFile(null); setBox(defaultBox(placement));
-  }, [candidate?.candidate_id, placement.height, placement.width, placement.x, placement.y, snapshot.search_id]);
+    revokeDemoResult();
+    setPending(false); setError(null);
+    setResult((current) => current?.search_id === snapshot.search_id && current.candidate_id === candidate?.candidate_id
+      ? current
+      : null);
+    setMaskFile(null); setBox(defaultBox(placement));
+  }, [candidate?.candidate_id, placement.height, placement.width, placement.x, placement.y, revokeDemoResult, snapshot.search_id]);
+  useEffect(() => {
+    if (
+      restoredResult
+      && restoredResult.search_id === snapshot.search_id
+      && restoredResult.candidate_id === candidate?.candidate_id
+    ) setResult(restoredResult);
+  }, [candidate?.candidate_id, restoredResult, snapshot.search_id]);
   useEffect(() => onStateChange?.({ pending, error, result, ready }), [error, onStateChange, pending, ready, result]);
 
   const apply = useCallback(async () => {
@@ -75,6 +109,38 @@ export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(fu
         if (!brushRef.current?.getDocument().strokes.length) throw new Error("请先在图片上绘制 Fusion 区域");
         const file = await brushRef.current.exportMaskFile(`${candidate.candidate_id}-fusion-mask.png`);
         if (epochRef.current !== epoch) return;
+        if (demoMode) {
+          const generatedSrc = rawCandidateUrl(candidate);
+          if (!backgroundSrc || !generatedSrc || !backgroundWidth || !backgroundHeight) {
+            throw new Error("Fusion mock 缺少底片、Raw candidate 或原图尺寸");
+          }
+          const blob = await renderLocalFusion({
+            originalSrc: backgroundSrc,
+            generatedSrc,
+            mask: file,
+            width: backgroundWidth,
+            height: backgroundHeight,
+          });
+          if (epochRef.current !== epoch) return;
+          const fusionUrl = URL.createObjectURL(blob);
+          if (epochRef.current !== epoch) {
+            URL.revokeObjectURL(fusionUrl);
+            return;
+          }
+          revokeDemoResult();
+          demoResultUrlRef.current = fusionUrl;
+          setResult({
+            fusion_key: `fusion-demo:${candidate.candidate_id}`,
+            search_id: snapshot.search_id,
+            candidate_id: candidate.candidate_id,
+            source_manifest_hash: "fusion-demo-local",
+            raw_asset: { asset_id: "fusion-demo-raw", asset_url: generatedSrc },
+            fusion_asset: { asset_id: "fusion-demo-result", asset_url: fusionUrl },
+            mask_asset: { asset_id: "fusion-demo-local-mask" },
+            feather_radius_px: 0,
+          });
+          return;
+        }
         maskAssetId = (await uploadFusionMask(snapshot.search_id, file)).asset.asset_id;
       } else if (effectiveMode === "alpha") {
         if (!maskFile) throw new Error("请先选择 PNG alpha Fusion Mask");
@@ -88,13 +154,13 @@ export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(fu
     } finally {
       if (epochRef.current === epoch) setPending(false);
     }
-  }, [box, candidate, effectiveMode, feather, maskFile, pending, ready, snapshot.search_id]);
+  }, [backgroundHeight, backgroundSrc, backgroundWidth, box, candidate, demoMode, effectiveMode, feather, maskFile, pending, ready, revokeDemoResult, snapshot.search_id]);
   useImperativeHandle(ref, () => ({ apply }), [apply]);
 
   const canvas = result
     ? <img className="worker-image" src={assetUrl(result)} alt="用户 Fusion Mask 预览" />
     : effectiveMode === "brush" && hasBrush && candidate
-      ? <div className="fusion-editor-surface"><MaskBrushEditor key={`${snapshot.search_id}:${candidate.candidate_id}`} ref={(handle) => { brushRef.current = handle; onBrushHandleChange?.(handle); }} originalSrc={backgroundSrc} generatedSrc={rawCandidateUrl(candidate)} generatedCropMapping={candidate.crop_mapping} width={backgroundWidth ?? 1} height={backgroundHeight ?? 1} disabled={pending || interactionDisabled} controlledTool={controlledTool} controlledBrush={controlledBrush} showChrome={showChrome} onHistoryChange={onBrushHistoryChange} onDocumentChange={() => { setResult(null); setError(null); }} /></div>
+      ? <div className="fusion-editor-surface"><MaskBrushEditor key={`${snapshot.search_id}:${candidate.candidate_id}`} ref={bindBrushHandle} originalSrc={backgroundSrc} generatedSrc={rawCandidateUrl(candidate)} generatedCropMapping={candidate.crop_mapping} width={backgroundWidth ?? 1} height={backgroundHeight ?? 1} disabled={pending || interactionDisabled} controlledTool={controlledTool} controlledBrush={controlledBrush} showChrome={showChrome} onHistoryChange={onBrushHistoryChange} onUserEdit={clearCompletedResult} /></div>
       : null;
 
   if (!showChrome) {

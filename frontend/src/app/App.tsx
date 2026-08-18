@@ -7,6 +7,14 @@ import { WorkerViewport } from "../features/workbench/WorkerViewport";
 import { useWorkbenchUi } from "../features/workbench/useWorkbenchUi";
 import { ASSET_DRAG_TYPE, AssetBrowser, localAssetKey } from "../features/sources/AssetBrowser";
 import type { FusionEditorHandle, FusionEditorState } from "../features/fusion/FusionEditor";
+import {
+  FUSION_DEMO_CANDIDATE_ID,
+  FUSION_DEMO_HEIGHT,
+  FUSION_DEMO_SNAPSHOT,
+  FUSION_DEMO_SOURCE_URL,
+  FUSION_DEMO_WIDTH,
+  isFusionDemoEnabled,
+} from "../features/fusion/fusionDemo";
 import { PromptInspector } from "../features/search/PromptInspector";
 import { CriticInspector } from "../features/review/CriticInspector";
 import { TimelineCanvas } from "../features/timeline/TimelineCanvas";
@@ -27,7 +35,7 @@ import { useSearchEvents } from "../lib/events";
 import { useObjectUrl } from "../lib/files";
 import { createGuidanceMaskUploadCache } from "../lib/guidanceSearch";
 import { maskDocumentFingerprint, resizeMaskDocument } from "../lib/maskDocument";
-import type { MaskBrushEditorHandle } from "../features/mask/MaskBrushEditor";
+import type { MaskBrushEditorHandle, MaskHistoryState } from "../features/mask/MaskBrushEditor";
 import { exportMaskFile } from "../lib/maskRasterizer";
 import type {
   PlacementIntent,
@@ -63,6 +71,13 @@ const initialOptions: SearchOptions = {
   review_each_round: false,
 };
 
+const emptyMaskHistory: MaskHistoryState = {
+  canUndo: false,
+  canRedo: false,
+  undoDepth: 0,
+  redoDepth: 0,
+};
+
 const terminalStatuses: SearchStatusValue[] = [
   "waiting_for_human",
   "accepted",
@@ -78,6 +93,7 @@ function errorMessage(error: unknown): string | null {
 
 export function App() {
   const queryClient = useQueryClient();
+  const fusionDemoMode = isFusionDemoEnabled(window.location.search);
   const [draft, setDraft] = useState<SourceDraft>(initialDraft);
   // The visible placement/orientation controls were replaced by the local
   // Guidance Mask brush. Keep this legacy payload only because the current
@@ -96,7 +112,7 @@ export function App() {
   const guidanceEditorRef = useRef<GuidanceMaskEditorHandle | null>(null);
   const fusionBrushRef = useRef<MaskBrushEditorHandle | null>(null);
   const fusionEditorRef = useRef<FusionEditorHandle | null>(null);
-  const [fusionHistory, setFusionHistory] = useState({ canUndo: false, canRedo: false });
+  const [fusionHistory, setFusionHistory] = useState<MaskHistoryState>(emptyMaskHistory);
   const [fusionState, setFusionState] = useState<FusionEditorState>({ pending: false, error: null, result: null, ready: false });
   const guidanceUploadCacheRef = useRef(createGuidanceMaskUploadCache());
   const backgroundUrl = useObjectUrl(draft.background);
@@ -216,10 +232,10 @@ export function App() {
     },
   });
 
-  const snapshot = searchQuery.data;
+  const snapshot = fusionDemoMode ? FUSION_DEMO_SNAPSHOT : searchQuery.data;
   const status: SearchStatusValue = snapshot?.status ?? search?.status ?? "idle";
   const candidates = snapshot?.candidates ?? [];
-  const sourceLocked = Boolean(project) || submitMutation.isPending;
+  const sourceLocked = fusionDemoMode || Boolean(project) || submitMutation.isPending;
   const canStart = Boolean(
     draft.background
     && draft.references.length >= 1
@@ -228,7 +244,7 @@ export function App() {
   );
   const accepted = status === "accepted";
   const [ui, uiActions] = useWorkbenchUi({
-    hasSearch: Boolean(search),
+    hasSearch: fusionDemoMode || Boolean(search),
     accepted,
     roundIndex: snapshot?.round_index,
   });
@@ -239,6 +255,14 @@ export function App() {
     setSelectedCandidateId(null);
     setAcceptedCandidateId(null);
   }, [snapshot?.round_index]);
+
+  useEffect(() => {
+    if (!fusionDemoMode) return;
+    setAcceptedCandidateId((current) => current === FUSION_DEMO_CANDIDATE_ID ? current : FUSION_DEMO_CANDIDATE_ID);
+    setSelectedCandidateId((current) => current === FUSION_DEMO_CANDIDATE_ID ? current : FUSION_DEMO_CANDIDATE_ID);
+    uiActions.setSelectedNodeId(`candidate:${FUSION_DEMO_CANDIDATE_ID}`);
+    uiActions.enterFusion();
+  }, [fusionDemoMode, uiActions.enterFusion, uiActions.setSelectedNodeId]);
 
   const selectCandidate = useCallback((candidateId: string | null) => {
     setSelectedCandidateId(candidateId);
@@ -260,7 +284,10 @@ export function App() {
     setProject(null);
     setSearch(null);
     setSelectedCandidateId(null);
+    setAcceptedCandidateId(null);
     setGuidanceState(null);
+    setFusionHistory(emptyMaskHistory);
+    setFusionState({ pending: false, error: null, result: null, ready: false });
     setEventRevision(0);
     searchIdempotencyKey.current = null;
     guidanceUploadCacheRef.current.clear();
@@ -274,7 +301,6 @@ export function App() {
 
   const registerFusionBrush = useCallback((handle: MaskBrushEditorHandle | null) => {
     fusionBrushRef.current = handle;
-    if (!handle) setFusionHistory({ canUndo: false, canRedo: false });
   }, []);
 
   const handleBackgroundDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
@@ -288,6 +314,26 @@ export function App() {
   const fusionImageUrl = fusionState.result
     ? fusionState.result.fusion_asset.asset_url ?? fusionState.result.fusion_asset.content_url ?? fusionState.result.fusion_asset.url ?? null
     : null;
+  const effectiveBackgroundUrl = fusionDemoMode ? FUSION_DEMO_SOURCE_URL : backgroundUrl;
+  const effectiveBackgroundWidth = fusionDemoMode ? FUSION_DEMO_WIDTH : backgroundAsset?.width;
+  const effectiveBackgroundHeight = fusionDemoMode ? FUSION_DEMO_HEIGHT : backgroundAsset?.height;
+  const effectiveFusionBackgroundUrl = fusionDemoMode ? FUSION_DEMO_SOURCE_URL : fusionBackgroundUrl;
+
+  useEffect(() => {
+    if (!fusionImageUrl?.startsWith("blob:")) return;
+    return () => URL.revokeObjectURL(fusionImageUrl);
+  }, [fusionImageUrl]);
+
+  const exportFullSizeFusion = useCallback(() => {
+    if (!fusionImageUrl || !fusionState.result) return;
+    const anchor = document.createElement("a");
+    anchor.href = fusionImageUrl;
+    anchor.download = `pet-fusion-${fusionState.result.candidate_id}.png`;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }, [fusionImageUrl, fusionState.result]);
 
   const sidebarContent = ui.sidebarTab === "assets" ? (
     <AssetBrowser
@@ -324,9 +370,11 @@ export function App() {
   ) : (
     <section className="fusion-sidebar" id="sidebar-panel-fusion" role="tabpanel" aria-label="Fusion 融合">
       <div className="inspector-title"><p className="workbench-kicker">FUSION / EXPLICIT ACTION</p><h2>Fusion</h2><p>Fusion 是 accepted Raw 之后的独立预览层，不会改写 Search/Critic 的权威资产。</p></div>
+      {fusionDemoMode && <div className="fusion-demo-notice" role="status"><strong>LOCAL FUSION DEMO</strong><span>底片、Raw 和最终合成都在浏览器本地，不调用后端。</span></div>}
       <div className="fusion-sidebar-card"><Icon name="spark" /><strong>{fusionState.result ? "Fusion 已生成" : accepted ? "Fusion ready" : "接受 Raw 后可用"}</strong><span>{fusionState.error ?? (accepted ? "在主画布绘制区域，然后在这里应用 Fusion Mask。" : "当前 Search 仍以 Raw candidate 为唯一审片来源。")}</span></div>
       {accepted && ui.workerMode !== "fusion" && <button className="primary-button" type="button" onClick={() => uiActions.setWorkerMode("fusion")}>在主画布打开 Fusion</button>}
       {accepted && ui.workerMode === "fusion" && !fusionState.result && <button className="primary-button" type="button" disabled={!fusionState.ready || fusionState.pending} onClick={() => void fusionEditorRef.current?.apply()}>{fusionState.pending ? "正在融合…" : "应用 Fusion Mask"}</button>}
+      {fusionState.result && <button className="fusion-export-button" type="button" onClick={exportFullSizeFusion}><Icon name="export" /><span><strong>导出全尺寸 PNG</strong><small>{effectiveBackgroundWidth ?? fusionState.result.fusion_asset.width ?? "原图"} × {effectiveBackgroundHeight ?? fusionState.result.fusion_asset.height ?? "尺寸"}</small></span></button>}
     </section>
   );
 
@@ -349,6 +397,7 @@ export function App() {
           brushFeather={ui.brushFeather}
           canUndo={ui.workerMode === "create" ? Boolean(guidanceState?.canUndo) : ui.workerMode === "fusion" && fusionHistory.canUndo}
           canRedo={ui.workerMode === "create" ? Boolean(guidanceState?.canRedo) : ui.workerMode === "fusion" && fusionHistory.canRedo}
+          historyDepth={ui.workerMode === "create" ? guidanceState?.document.strokes.length ?? 0 : ui.workerMode === "fusion" ? fusionHistory.undoDepth : 0}
           fusionUnlocked={accepted}
           onUndo={() => ui.workerMode === "fusion" ? fusionBrushRef.current?.undo() : guidanceEditorRef.current?.undo()}
           onRedo={() => ui.workerMode === "fusion" ? fusionBrushRef.current?.redo() : guidanceEditorRef.current?.redo()}
@@ -372,9 +421,9 @@ export function App() {
           )}
           <WorkerViewport
             mode={ui.workerMode}
-            backgroundUrl={ui.workerMode === "fusion" ? fusionBackgroundUrl : backgroundUrl}
-            backgroundWidth={backgroundAsset?.width}
-            backgroundHeight={backgroundAsset?.height}
+            backgroundUrl={ui.workerMode === "fusion" ? effectiveFusionBackgroundUrl : effectiveBackgroundUrl}
+            backgroundWidth={effectiveBackgroundWidth}
+            backgroundHeight={effectiveBackgroundHeight}
             placement={placement}
             guidanceEditorRef={guidanceEditorRef}
             guidanceState={guidanceState}
@@ -393,6 +442,8 @@ export function App() {
             onFusionBrushHistoryChange={setFusionHistory}
             fusionEditorRef={fusionEditorRef}
             onFusionStateChange={setFusionState}
+            fusionDemoMode={fusionDemoMode}
+            restoredFusionResult={fusionState.result}
           />
         </div>
       )}
@@ -411,7 +462,7 @@ export function App() {
             uiActions.setSelectedNodeId("final");
             uiActions.setWorkerMode(fusionImageUrl ? "fusion" : "generation");
           }}
-          sourceImageUrl={backgroundUrl}
+          sourceImageUrl={effectiveBackgroundUrl}
           guidanceActive={Boolean(guidanceState?.dirty || guidanceState?.document.strokes.length)}
           fusionImageUrl={fusionImageUrl}
           acceptedCandidateId={acceptedCandidateId}
