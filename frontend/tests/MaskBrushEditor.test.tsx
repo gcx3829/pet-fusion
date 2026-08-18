@@ -57,6 +57,64 @@ describe("MaskBrushEditor", () => {
     vi.restoreAllMocks();
   });
 
+  it("工具栏切换绘制/擦除后，紧接着落笔也同步使用最新工具和参数", async () => {
+    const documents: MaskDocument[] = [];
+    const view = render(
+      <MaskBrushEditor
+        originalSrc={null}
+        generatedSrc={null}
+        width={100}
+        height={100}
+        controlledTool="paint"
+        controlledBrush={{ size: 18, flow: 0.12, feather: 0.08 }}
+        onDocumentChange={(document) => documents.push(document)}
+      />,
+    );
+    const canvas = screen.getByLabelText("Mask 画布，按住鼠标绘制");
+
+    view.rerender(
+      <MaskBrushEditor
+        originalSrc={null}
+        generatedSrc={null}
+        width={100}
+        height={100}
+        controlledTool="erase"
+        controlledBrush={{ size: 44, flow: 0.07, feather: 0.61 }}
+        onDocumentChange={(document) => documents.push(document)}
+      />,
+    );
+    fireEvent.pointerDown(canvas, { pointerId: 21, button: 0, clientX: 30, clientY: 30 });
+    fireEvent.pointerUp(canvas, { pointerId: 21, button: 0, clientX: 32, clientY: 32 });
+
+    await waitFor(() => expect(documents.at(-1)?.strokes).toHaveLength(1));
+    expect(documents.at(-1)?.strokes[0]).toMatchObject({
+      tool: "erase",
+      settings: { size: 44, flow: 0.07, feather: 0.61 },
+    });
+  });
+
+  it("手型/禁用状态只使用原生 grab 光标，不绘制画笔圆环", () => {
+    context.ellipse.mockClear();
+    render(
+      <MaskBrushEditor
+        originalSrc={null}
+        generatedSrc={null}
+        width={100}
+        height={100}
+        disabled
+        controlledTool="paint"
+        controlledBrush={{ size: 48, flow: 0.2, feather: 0.3 }}
+      />,
+    );
+    const canvas = screen.getByLabelText("Mask 画布，按住鼠标绘制");
+
+    fireEvent.pointerEnter(canvas, { pointerId: 31, clientX: 40, clientY: 40 });
+    fireEvent.pointerMove(canvas, { pointerId: 31, clientX: 60, clientY: 60 });
+
+    expect(context.ellipse).not.toHaveBeenCalled();
+    expect(canvas).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("按笔划 undo/redo，且画笔编辑本身不触发 fetch", async () => {
     const documents: MaskDocument[] = [];
     const fetchMock = vi.fn();

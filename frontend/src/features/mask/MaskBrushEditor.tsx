@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -53,6 +54,12 @@ export interface MaskBrushEditorProps {
   onUserEdit?: (action: "stroke" | "undo" | "redo" | "clear" | "reset") => void;
   /** Optional local hand-off. This callback must decide whether to upload. */
   onExportFile?: (file: File) => void | Promise<void>;
+  onHistoryChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
+  /** Optional shell-level controls. Internal controls remain available for legacy embeddings. */
+  controlledTool?: MaskStrokeTool;
+  controlledBrush?: Partial<MaskBrushSettings>;
+  /** Workbench mode keeps every control in the shared top toolbar. */
+  showChrome?: boolean;
 }
 
 export interface MaskBrushEditorHandle {
@@ -276,6 +283,10 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     onDocumentChange,
     onUserEdit,
     onExportFile,
+    onHistoryChange,
+    controlledTool,
+    controlledBrush,
+    showChrome = true,
   }, ref) {
     const sourceWidth = positiveDimension(width);
     const sourceHeight = positiveDimension(height);
@@ -300,10 +311,22 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       ...DEFAULT_MASK_BRUSH,
       size: Math.max(4, Math.min(DEFAULT_MASK_BRUSH.size, Math.max(sourceWidth, sourceHeight) * 0.16)),
     }));
+    // Shell controls are authoritative for the current stroke. Reading them
+    // synchronously avoids the one-render race where a fast erase/paint
+    // gesture could still use the previously selected tool or brush values.
+    const effectiveTool = controlledTool ?? tool;
+    const effectiveBrush = useMemo(
+      () => normalizeBrushSettings({ ...brush, ...controlledBrush }),
+      [brush, controlledBrush?.feather, controlledBrush?.flow, controlledBrush?.size],
+    );
     const [cursor, setCursor] = useState<NormalizedPoint | null>(null);
     const [imageRevision, setImageRevision] = useState(0);
     const [exporting, setExporting] = useState(false);
     const [exportError, setExportError] = useState<string | null>(null);
+
+    useEffect(() => {
+      if (disabled) setCursor(null);
+    }, [disabled]);
 
     const stageRef = useRef<HTMLDivElement>(null);
     const generatedCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -444,9 +467,9 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       const context = canvas.getContext("2d");
       if (!context) return;
       context.clearRect(0, 0, previewSize.width, previewSize.height);
-      if (!cursor) return;
-      const radiusX = brush.size * previewSize.width / sourceWidth / 2;
-      const radiusY = brush.size * previewSize.height / sourceHeight / 2;
+      if (disabled || !cursor) return;
+      const radiusX = effectiveBrush.size * previewSize.width / sourceWidth / 2;
+      const radiusY = effectiveBrush.size * previewSize.height / sourceHeight / 2;
       context.beginPath();
       context.ellipse(
         cursor.x * previewSize.width,
@@ -457,10 +480,10 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         0,
         Math.PI * 2,
       );
-      context.strokeStyle = tool === "paint" ? "rgba(221, 169, 95, 0.95)" : "rgba(141, 174, 176, 0.95)";
+      context.strokeStyle = effectiveTool === "paint" ? "rgba(221, 169, 95, 0.95)" : "rgba(141, 174, 176, 0.95)";
       context.lineWidth = 1.5;
       context.stroke();
-    }, [brush.size, cursor, previewSize.height, previewSize.width, sourceHeight, sourceWidth, tool]);
+    }, [cursor, disabled, effectiveBrush.size, effectiveTool, previewSize.height, previewSize.width, sourceHeight, sourceWidth]);
 
     const finishStroke = (event: ReactPointerEvent<HTMLCanvasElement>) => {
       const active = activeStrokeRef.current;
@@ -495,6 +518,12 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     };
 
     const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      // A second touch belongs to a pinch gesture. Roll back the provisional
+      // first-finger stroke so zooming never leaves an accidental mask dab.
+      if (event.pointerType === "touch" && event.isPrimary === false) {
+        cancelActiveStroke();
+        return;
+      }
       // Some test harnesses and embedded pointer implementations omit
       // `button` for a primary pointer. Only an explicit non-primary button
       // should be ignored.
@@ -507,9 +536,9 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       const canvas = event.currentTarget;
       const point = pointerToPoint(event, canvas);
       const stroke: MaskStroke = {
-        tool,
+        tool: effectiveTool,
         points: [point],
-        settings: normalizeBrushSettings(brush),
+        settings: effectiveBrush,
       };
       // Mask documents are updated immutably. Keeping the previous reference
       // makes undo O(1) here and avoids deep-copying all old strokes per dab.
@@ -532,7 +561,12 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     };
 
     const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      const point = pointerToPoint(event, event.currentTarget);
+      const nativeEvent = event.nativeEvent;
+      const coalesced = typeof nativeEvent.getCoalescedEvents === "function"
+        ? nativeEvent.getCoalescedEvents()
+        : [];
+      const points = [...coalesced, nativeEvent].map((sample) => pointerToPoint(sample, event.currentTarget));
+      const point = points[points.length - 1] ?? pointerToPoint(event, event.currentTarget);
       setCursor(point);
       const active = activeStrokeRef.current;
       if (!active || active.pointerId !== event.pointerId) return;
@@ -540,11 +574,9 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       setHistory((current) => {
         const currentStroke = current.present.strokes[active.strokeIndex];
         if (!currentStroke) return current;
-        const nextStroke = appendStrokePoint(
+        const nextStroke = points.reduce(
+          (stroke, sample) => appendStrokePoint(stroke, sample, sourceWidth, sourceHeight),
           currentStroke,
-          point,
-          sourceWidth,
-          sourceHeight,
         );
         return {
           ...current,
@@ -572,9 +604,9 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       if (event.key !== " " && event.key !== "Enter") return;
       event.preventDefault();
       const stroke: MaskStroke = {
-        tool,
+        tool: effectiveTool,
         points: [currentCursor],
-        settings: normalizeBrushSettings(brush),
+        settings: effectiveBrush,
       };
       setHistory((current) => ({
         past: appendHistoryStep(current.past, current.present),
@@ -687,14 +719,18 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     const canUndo = history.past.length > 0;
     const canRedo = history.future.length > 0;
 
+    useEffect(() => {
+      onHistoryChange?.({ canUndo, canRedo });
+    }, [canRedo, canUndo, onHistoryChange]);
+
     return (
       <div className={`mask-brush-editor ${className}`.trim()}>
-        <div className="mask-brush-toolbar" aria-label="Mask 画笔工具">
+        {showChrome && <div className="mask-brush-toolbar" aria-label="Mask 画笔工具">
           <div className="mask-tool-group" role="group" aria-label="绘制模式">
             <button
               type="button"
               className="mask-tool-button"
-              aria-pressed={tool === "paint"}
+              aria-pressed={effectiveTool === "paint"}
               onClick={() => setTool("paint")}
               disabled={disabled}
             >
@@ -703,7 +739,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
             <button
               type="button"
               className="mask-tool-button"
-              aria-pressed={tool === "erase"}
+              aria-pressed={effectiveTool === "erase"}
               onClick={() => setTool("erase")}
               disabled={disabled}
             >
@@ -715,44 +751,44 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
             <button type="button" aria-label="重做笔划" onClick={redo} disabled={disabled || !canRedo}>重做</button>
             <button type="button" aria-label="清空 Mask" onClick={clear} disabled={disabled || !history.present.strokes.length}>清空</button>
           </div>
-        </div>
+        </div>}
 
-        <div className="mask-brush-controls">
+        {showChrome && <div className="mask-brush-controls">
           <label>
-            <span>笔刷大小 <output>{Math.round(brush.size)} px</output></span>
+            <span>笔刷大小 <output>{Math.round(effectiveBrush.size)} px</output></span>
             <input
               aria-label="笔刷大小"
               type="range"
               min="1"
               max={maxSize}
               step="1"
-              value={Math.min(maxSize, brush.size)}
+              value={Math.min(maxSize, effectiveBrush.size)}
               onChange={(event) => updateBrush("size", Number(event.target.value))}
               disabled={disabled}
             />
           </label>
           <label>
-            <span>流量 <output>{Math.round(brush.flow * 100)}%</output></span>
+            <span>流量 <output>{Math.round(effectiveBrush.flow * 100)}%</output></span>
             <input
               aria-label="笔刷流量"
               type="range"
               min="1"
               max="100"
               step="1"
-              value={Math.round(brush.flow * 100)}
+              value={Math.round(effectiveBrush.flow * 100)}
               onChange={(event) => updateBrush("flow", Number(event.target.value) / 100)}
               disabled={disabled}
             />
           </label>
           <label>
-            <span>羽化 <output>{Math.round(brush.feather * 100)}%</output></span>
+            <span>羽化 <output>{Math.round(effectiveBrush.feather * 100)}%</output></span>
             <input
               aria-label="笔刷羽化"
               type="range"
               min="0"
               max="100"
               step="1"
-              value={Math.round(brush.feather * 100)}
+              value={Math.round(effectiveBrush.feather * 100)}
               onChange={(event) => updateBrush("feather", Number(event.target.value) / 100)}
               disabled={disabled}
             />
@@ -767,12 +803,19 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
               {exporting ? "编码中…" : "导出本地 Mask PNG"}
             </button>
           )}
-        </div>
+        </div>}
 
         <div
           ref={stageRef}
           className="mask-brush-stage"
-          style={{ aspectRatio: `${sourceWidth} / ${sourceHeight}` }}
+          style={{
+            aspectRatio: `${previewSize.width} / ${previewSize.height}`,
+            width: `${previewSize.width}px`,
+            height: `${previewSize.height}px`,
+            minHeight: 0,
+            "--mask-preview-width": `${previewSize.width}px`,
+            "--mask-preview-ratio": previewSize.width / previewSize.height,
+          } as CSSProperties}
           data-mask-width={sourceWidth}
           data-mask-height={sourceHeight}
         >
@@ -783,30 +826,30 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
             className="mask-layer mask-layer-input"
             aria-label="Mask 画布，按住鼠标绘制"
             onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
+            onPointerMove={disabled ? undefined : handlePointerMove}
             onPointerUp={finishStroke}
             onPointerCancel={cancelPointerStroke}
             onLostPointerCapture={cancelPointerStroke}
             onPointerLeave={() => setCursor(null)}
-            onPointerEnter={(event) => setCursor(pointerToPoint(event, event.currentTarget))}
+            onPointerEnter={disabled ? undefined : (event) => setCursor(pointerToPoint(event, event.currentTarget))}
             onKeyDown={handleCanvasKeyDown}
             role="application"
             aria-describedby={instructionsId}
             aria-disabled={disabled}
             tabIndex={disabled ? -1 : 0}
           />
-          <div className="mask-layer-label mask-layer-label-bottom">
+          {showChrome && <div className="mask-layer-label mask-layer-label-bottom">
             {mode === "guidance" ? "原片 · 观察底图" : "生成图 · alpha 255"}
-          </div>
-          <div className="mask-layer-label mask-layer-label-top">
+          </div>}
+          {showChrome && <div className="mask-layer-label mask-layer-label-top">
             {mode === "guidance" ? "Guidance · 可编辑区域" : "原图 · alpha 0"}
-          </div>
+          </div>}
         </div>
-        <div className="mask-brush-footer">
+        {showChrome && <div className="mask-brush-footer">
           <span id={instructionsId}>按住鼠标或触控笔绘制；键盘方向键移动，空格绘制；笔迹只保存在本地浏览器内存</span>
           <span>{mode === "guidance" ? "绘制后：0 = 保持原图，255 = 模型可编辑" : "绘制后：0 = 原图，255 = 生成图"}</span>
           <span>{history.present.strokes.length} 个笔划</span>
-        </div>
+        </div>}
         {exportError ? <p className="mask-export-error" role="alert">{exportError}</p> : null}
       </div>
     );
