@@ -185,6 +185,14 @@ ruff → mypy → pytest → TypeScript typecheck → Vitest → Vite production
 
 需要单独调试时，可分别在 `backend/` 运行 `uv run --locked pytest`，在 `frontend/` 运行 `pnpm test`。pytest harness 也会强制 fake provider 并屏蔽两套 OpenAI credential/base URL 环境别名，避免已配置 live shell 时单测意外付费。额外的离线架构契约覆盖 Search 的 Critic/Planner 子图、Local Fix 的隔离路径、checkpoint 禁止图像数据，以及 fake/live provider 与 Export 路由边界；见 [`backend/tests/unit/test_architecture_contract.py`](backend/tests/unit/test_architecture_contract.py)。
 
+需要检查覆盖率时运行：
+
+```bash
+./scripts/coverage.sh
+```
+
+该命令同样强制使用 fake provider，并生成后端与前端 HTML/JSON 报告。当前最低门槛为后端总覆盖率 85%，前端语句/行覆盖率 70%、分支/函数覆盖率 60%；报告分别写入 `backend/coverage/` 与 `frontend/coverage/`，不会进入 Git。
+
 ## 环境变量与密钥
 
 `.env.example` 的安全默认值是：
