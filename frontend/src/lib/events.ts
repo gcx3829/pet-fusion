@@ -69,6 +69,8 @@ export function useSearchEvents(
   const onEventRef = useRef(onSearchEvent);
   const activeSearchIdRef = useRef<string | null>(null);
   const lastEventIdRef = useRef<number>(0);
+  const seenEventIdsRef = useRef(new Set<string>());
+  const seenEventOrderRef = useRef<string[]>([]);
 
   useEffect(() => {
     onEventRef.current = onSearchEvent;
@@ -78,6 +80,8 @@ export function useSearchEvents(
     if (!search) {
       activeSearchIdRef.current = null;
       lastEventIdRef.current = 0;
+      seenEventIdsRef.current.clear();
+      seenEventOrderRef.current = [];
       setEvents([]);
       setConnectionState("idle");
       return;
@@ -85,6 +89,8 @@ export function useSearchEvents(
     if (activeSearchIdRef.current !== search.search_id) {
       activeSearchIdRef.current = search.search_id;
       lastEventIdRef.current = 0;
+      seenEventIdsRef.current.clear();
+      seenEventOrderRef.current = [];
       setEvents([]);
     }
     if (typeof EventSource === "undefined") {
@@ -98,12 +104,15 @@ export function useSearchEvents(
       ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}after=${lastEventIdRef.current}`
       : baseUrl;
     const source = new EventSource(after);
-    const seenIds = new Set<string>();
-
     const receive = (message: MessageEvent<string>, forcedType?: string) => {
       const event = eventFromMessage(message, forcedType);
-      if (!event || seenIds.has(event.id)) return;
-      seenIds.add(event.id);
+      if (!event || seenEventIdsRef.current.has(event.id)) return;
+      seenEventIdsRef.current.add(event.id);
+      seenEventOrderRef.current.push(event.id);
+      if (seenEventOrderRef.current.length > 256) {
+        const expiredId = seenEventOrderRef.current.shift();
+        if (expiredId) seenEventIdsRef.current.delete(expiredId);
+      }
       const numericId = Number(event.id);
       if (Number.isSafeInteger(numericId) && numericId > lastEventIdRef.current) {
         lastEventIdRef.current = numericId;

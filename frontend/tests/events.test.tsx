@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useSearchEvents } from "../src/lib/events";
 import type { SearchRecord } from "../src/types";
@@ -46,8 +46,8 @@ class MockEventSource {
 }
 
 function Probe({ search, reconnectKey }: { search: SearchRecord; reconnectKey: number }) {
-  useSearchEvents(search, undefined, reconnectKey);
-  return null;
+  const { events } = useSearchEvents(search, undefined, reconnectKey);
+  return <output data-testid="event-count">{events.length}</output>;
 }
 
 const search: SearchRecord = {
@@ -74,5 +74,8 @@ describe("useSearchEvents", () => {
     expect(MockEventSource.instances[1].url).toBe(
       "/api/v1/searches/search-01/events?after=7",
     );
+
+    MockEventSource.instances[1].emit("search.waiting_for_human", 7);
+    expect(screen.getByTestId("event-count")).toHaveTextContent("1");
   });
 });
