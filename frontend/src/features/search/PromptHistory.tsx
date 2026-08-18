@@ -5,7 +5,7 @@ interface PromptHistoryProps {
 }
 
 function shortHash(value?: string): string {
-  if (!value) return "—";
+  if (!value) return "N/A";
   return `${value.slice(0, 12)}…`;
 }
 

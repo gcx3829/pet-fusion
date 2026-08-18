@@ -367,18 +367,16 @@ function normalizePromptHistory(value: unknown): PromptHistoryEntry[] {
 export async function createProject(draft: SourceDraft): Promise<ProjectRecord> {
   if (!draft.background) throw new Error("请先选择旅行原片");
   const form = new FormData();
-  const background = draft.background.size > MAX_UPLOAD_BYTES
+  const background = draft.background.size > 18 * 1024 * 1024
     ? (await prepareImageForUpload(draft.background, "background")).file
     : draft.background;
   form.append("background", background);
   for (const reference of draft.references) {
-    const prepared = reference.size > MAX_UPLOAD_BYTES
+    const prepared = reference.size > 8 * 1024 * 1024
       ? (await prepareImageForUpload(reference, "reference")).file
       : reference;
     form.append("cat_references", prepared);
   }
-  if (draft.catName.trim()) form.append("cat_name", draft.catName.trim());
-  if (draft.catTraits.trim()) form.append("cat_traits", draft.catTraits.trim());
   const object = asObject(await request("/projects", { method: "POST", body: form }));
   const projectId = stringValue(object.project_id, stringValue(object.id));
   if (!projectId) throw new Error("项目创建成功，但响应缺少 project_id");

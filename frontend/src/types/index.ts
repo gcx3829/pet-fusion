@@ -31,8 +31,8 @@ export interface PlacementIntent {
 export interface SourceDraft {
   background: File | null;
   references: File[];
-  catName: string;
-  catTraits: string;
+  /** Browser-local project library; only assigned roles are uploaded. */
+  assets?: File[];
 }
 
 export interface AssetRef {

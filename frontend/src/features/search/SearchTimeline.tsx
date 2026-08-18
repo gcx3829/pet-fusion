@@ -110,7 +110,7 @@ export function SearchTimeline({
       <div className="timeline-footer">
         <span>ROUND <b>{roundIndex}</b></span>
         <span>ACTIVE DIRECTIVES <b>{activeDirectives.length}</b></span>
-        <span>CHECKPOINT <b>{status === "idle" ? "—" : "DURABLE"}</b></span>
+        <span>CHECKPOINT <b>{status === "idle" ? "N/A" : "DURABLE"}</b></span>
       </div>
       {!!activeDirectives.length && (
         <div className="directive-stack">
