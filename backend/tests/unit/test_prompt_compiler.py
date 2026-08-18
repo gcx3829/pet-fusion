@@ -27,6 +27,9 @@ def test_round_directives_do_not_mutate_canonical_prompt_lineage() -> None:
     assert "y=0.5000" not in canonical_prompt
     assert "width=0.2000" not in canonical_prompt
     assert "height=0.3000" not in canonical_prompt
+    assert "Pose:" not in canonical_prompt
+    assert "Facing:" not in canonical_prompt
+    assert "Photographer direction: Place the same cat naturally" in canonical_prompt
     feedback_prompt, feedback_hash = compile_generation_prompt(
         canonical_prompt=canonical_prompt,
         active_directives=(),

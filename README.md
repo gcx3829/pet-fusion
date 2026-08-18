@@ -15,12 +15,12 @@
 - **GPT Image 2** 负责真正的视觉重建与合成；
 - **LangGraph** 负责 Critic、反馈规划、候选排名、Global Winner、停止策略和崩溃恢复；
 - **本地图像代码**负责裁切、Guidance/Fusion Mask、可选像素融合、全分辨率回贴、ICC 和 EXIF 交付；
-- **用户界面**负责摄影师式的位置、尺寸、姿态意图和候选审片。
+- **用户界面**负责本地 Guidance Mask 画笔、摄影师文字意图和候选审片；旧 placement 字段仅作为 API/历史数据兼容。
 
 ## 核心工作流
 
 ```text
-原始旅游照 + 1～5 张宠物参考图 + 位置/姿态意图
+原始旅游照 + 1～5 张宠物参考图 + Guidance Mask 画笔 + 摄影师文字意图
                     ↓
              Canonical Prompt
                     ↓
@@ -47,7 +47,7 @@
 
 1. 建立一个项目并上传一张旅行照；
 2. 为同一只宠物上传 1～5 张参考图；
-3. 在画布上指定宠物的大致位置、尺寸、姿态和朝向；
+3. 在 Guidance Mask 画布中用 PS 风格画笔刷出模型可编辑区域；姿态、朝向和接触关系直接写入 prompt；
 4. 一次生成多个候选；
 5. 自动从身份、透视、光线、光学一致性、物理融合和背景保护等维度审片；
 6. 进行最多若干轮、可恢复、预算受控的 Rebase 搜索；
@@ -96,8 +96,9 @@ OpenAI      GPT Image 2 + GPT-5.6 系列多模态模型
 → 确定性 Ranker、历史 Global Winner、停止策略与 immutable-source rebase
 → SQLite checkpoint 与业务事件持久化
 → REST / SSE 返回候选
-→ React 工作台展示 placement、候选和时间线
+→ React 工作台展示 Guidance Mask、候选和时间线
 → raw candidate 作为 Search/Critic/人工审片权威图
+→ Search 前可用本地 PS 风格 Guidance 画笔编辑软引导区域；仅自定义时上传一次 alpha PNG
 → 用户可选 Fusion Mask + 羽化回贴、全分辨率导出 JPEG/PNG、ICC/EXIF 尽力保留
 ```
 
@@ -210,7 +211,7 @@ OPENAI_BASE_URL=
 所有业务接口使用 `/api/v1` 前缀：
 
 1. `POST /projects`：multipart 上传背景图和 `cat_references`；
-2. `POST /projects/{project_id}/searches`：提交 placement 与搜索选项；必须携带稳定的 `Idempotency-Key` 请求头，同一项目、同一 key、同一请求会返回原搜索；
+2. `POST /projects/{project_id}/searches`：提交搜索选项；旧 `placement` 字段仍为 API 兼容字段，提供 Guidance Mask 时位置由画笔决定、姿态与朝向由 photographer prompt 决定；必须携带稳定的 `Idempotency-Key` 请求头，同一项目、同一 key、同一请求会返回原搜索；
 3. `GET /searches/{search_id}`：读取搜索状态和候选；
 4. `GET /searches/{search_id}/events`：通过 SSE 接收持久化时间线；
 5. `GET /assets/{asset_id}`：读取后端校验过的图片资产。
@@ -219,7 +220,8 @@ OPENAI_BASE_URL=
 8. `GET /searches/{search_id}/exports/{export_key}`：读取幂等、内容寻址的导出记录。
 9. `POST /searches/{search_id}/local-fixes`：对已接受搜索的历史候选（省略 `candidate_id` 时为 Global Winner）执行一次 isolated Local Fix；mask 可为内部 PNG asset ID 或结构化 full-resolution box，结果包含可重放 `request_key`；
 10. `GET /searches/{search_id}/local-fixes/{fix_id}`：读取 SQLite provider-call audit 中的 Local Fix 结果。
-11. `POST /searches/{search_id}/fusion-masks`：将同尺寸 RGBA PNG alpha mask 上传并绑定到已接受搜索；`POST /searches/{search_id}/fusions`：以矩形或已绑定 alpha mask + 羽化生成独立 Fusion 预览；`GET /searches/{search_id}/fusions/{fusion_key}`：幂等读取 Fusion 结果。Fusion 不改写 raw，也不回流 Critic/Search。
+11. `POST /projects/{project_id}/guidance-masks`：注册同尺寸 RGBA PNG Guidance Mask；Search 启动请求可携带 `guidance_mask_asset_id`。前端画笔编辑、预览和撤销/重做均为本地操作，同一 project + document hash 的重试只上传一次；未自定义时继续使用 placement fallback。Guidance Mask 是软引导而非像素锁，Search 启动后锁定。
+12. `POST /searches/{search_id}/fusion-masks`：将同尺寸 RGBA PNG alpha mask 上传并绑定到已接受搜索；`POST /searches/{search_id}/fusions`：以矩形或已绑定 alpha mask + 羽化生成独立 Fusion 预览；`GET /searches/{search_id}/fusions/{fusion_key}`：幂等读取 Fusion 结果。Fusion 不改写 raw，也不回流 Critic/Search。
 
 浏览器在开发模式下通过 Vite 的 `/api` 代理访问后端，因此不会接触服务端密钥。
 `scripts/dev.sh` 会根据 `PET_FUSION_API_HOST` 和 `PET_FUSION_API_PORT` 自动配置 Vite 代理；也可用 `VITE_DEV_API_TARGET=http://host:port ./scripts/dev.sh` 显式覆盖。需要让浏览器跨域直连时，则在 `frontend/.env.local` 中设置 `VITE_API_BASE_URL`。
