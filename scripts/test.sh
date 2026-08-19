@@ -32,6 +32,8 @@ export FAKE_GENERATOR=1
 export PET_FUSION_FAKE_GENERATOR=1
 export FAKE_CRITIC=1
 export PET_FUSION_FAKE_CRITIC=1
+export FAKE_PROMPT_REFINER=1
+export PET_FUSION_FAKE_PROMPT_REFINER=1
 export RUN_OPENAI_LIVE_TESTS=0
 # Mask both supported credential aliases so a developer's live shell or dotenv
 # configuration cannot leak into the deterministic suite. Tests that exercise a

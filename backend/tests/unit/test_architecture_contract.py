@@ -24,6 +24,7 @@ from app.services.local_fix_service import (
     LocalFixService,
 )
 from app.services.openai_critic_client import OfficialOpenAICriticProvider
+from app.services.prompt_refiner_service import DeterministicFakePromptRefiner
 
 
 def test_offline_architecture_contract_keeps_graphs_explicit_and_checkpoint_safe(
@@ -50,7 +51,16 @@ def test_offline_architecture_contract_keeps_graphs_explicit_and_checkpoint_safe
         "feedback_planner:validate_directive_budget",
         "feedback_planner:replace_or_retain_directives",
         "feedback_planner:emit_next_round_plan",
+        "multimodal_prompt_subgraph:prepare_prompt_refiner_request",
+        "multimodal_prompt_subgraph:validate_prompt_refiner_request",
+        "multimodal_prompt_subgraph:invoke_prompt_refiner",
+        "multimodal_prompt_subgraph:apply_prompt_refiner_result",
+        "multimodal_prompt_subgraph:apply_local_prompt_version",
     }.issubset(xray_nodes)
+    assert isinstance(
+        container.prompt_refiner_service.provider,
+        DeterministicFakePromptRefiner,
+    )
 
     local_fix_graph = build_local_fix_subgraph(
         LocalFixService(
@@ -120,6 +130,8 @@ def test_default_pytest_harness_overrides_an_unsafe_dotenv(tmp_path: Path) -> No
     unsafe_dotenv.write_text(
         "FAKE_GENERATOR=0\n"
         "PET_FUSION_FAKE_CRITIC=0\n"
+        "FAKE_PROMPT_REFINER=0\n"
+        "PET_FUSION_FAKE_PROMPT_REFINER=0\n"
         "OPENAI_API_KEY=live-key-that-tests-must-ignore\n"
         "PET_FUSION_OPENAI_BASE_URL=https://relay.invalid/v1\n",
         encoding="utf-8",
@@ -129,6 +141,7 @@ def test_default_pytest_harness_overrides_an_unsafe_dotenv(tmp_path: Path) -> No
 
     assert resolved.fake_generator is True
     assert resolved.fake_critic is True
+    assert resolved.fake_prompt_refiner is True
     assert not (
         resolved.openai_api_key and resolved.openai_api_key.get_secret_value()
     )

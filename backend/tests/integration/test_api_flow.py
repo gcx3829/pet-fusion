@@ -62,6 +62,10 @@ def test_mocked_vertical_slice_through_api_and_sse(
     initial_prompt = search["prompt_history"][0]
     assert initial_prompt["round_index"] == 0
     assert initial_prompt["tuned"] is False
+    # Placement-only legacy rows never pretend that the prompt compiler is an
+    # image-generation model.  New multimodal searches fill these separately.
+    assert initial_prompt["prompt_model"] is None
+    assert initial_prompt["generation_model"] is None
     assert "ROLE OF INPUTS" in initial_prompt["generation_prompt"]
     assert len(initial_prompt["generation_prompt_hash"]) == 64
     assert len(search["candidates"]) == 3

@@ -62,6 +62,7 @@ class RecordingImageEditsTransport:
         quality: str,
         size: str,
         mask: OpenAIImageInput | None = None,
+        request_key: str | None = None,
     ) -> OpenAIImageEditResult:
         self.calls.append(
             {
@@ -72,6 +73,7 @@ class RecordingImageEditsTransport:
                 "n": n,
                 "quality": quality,
                 "size": size,
+                "request_key": request_key,
             }
         )
         return OpenAIImageEditResult(
@@ -115,6 +117,7 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
     async def handle_request(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
         captured["authorization"] = request.headers.get("authorization")
+        captured["idempotency_key"] = request.headers.get("idempotency-key")
         captured["content_type"] = request.headers.get("content-type")
         captured["body"] = await request.aread()
         return httpx.Response(
@@ -161,6 +164,7 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
             n=1,
             quality="medium",
             size="1024x1024",
+            request_key="generator-request-key",
         )
 
     assert result.png_images == (png_bytes,)
@@ -168,6 +172,7 @@ async def test_official_transport_uses_supported_edit_shape_and_decodes_audit_fi
     assert result.usage == {"input_tokens": 7, "output_tokens": 13, "total_tokens": 20}
     assert captured["url"] == "https://relay.example.test/v1/images/edits"
     assert captured["authorization"] == "Bearer test-key-never-sent"
+    assert captured["idempotency_key"] == "generator-request-key"
     assert str(captured["content_type"]).startswith("multipart/form-data; boundary=")
     body = captured["body"]
     assert isinstance(body, bytes)
@@ -219,11 +224,19 @@ async def test_official_transport_falls_back_to_single_outputs_when_relay_reject
         n=2,
         quality="low",
         size="auto",
+        request_key="relay-request-key",
     )
 
     assert len(calls) == 3
     assert "n" in calls[0]
     assert all("n" not in call for call in calls[1:])
+    assert calls[0]["extra_headers"] == {"Idempotency-Key": "relay-request-key"}
+    assert calls[1]["extra_headers"] == {
+        "Idempotency-Key": "relay-request-key:serial:0"
+    }
+    assert calls[2]["extra_headers"] == {
+        "Idempotency-Key": "relay-request-key:serial:1"
+    }
     assert result.png_images == (image_bytes, image_bytes)
     assert result.request_id == "req_2"
     assert result.usage == {"input_tokens": 6, "output_tokens": 8, "total_tokens": 14}
@@ -343,6 +356,7 @@ async def test_openai_generator_uses_ordered_source_proxies_and_persists_safe_au
         assert mask_image.getchannel("A").getpixel((0, 0)) == 255
         assert mask_image.getchannel("A").getpixel((30, 20)) == 0
     request_key = service.build_request_key(request)
+    assert call["request_key"] == request_key
     provider_call = app_store.get_provider_call(request_key)
     assert provider_call is not None
     status, response = provider_call

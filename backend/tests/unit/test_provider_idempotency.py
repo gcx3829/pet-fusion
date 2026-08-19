@@ -6,7 +6,7 @@ import hashlib
 from app.container import AppContainer
 from app.domain.assets import SourceManifest
 from app.domain.projects import ProjectRecord
-from app.domain.searches import CreateSearchRequest
+from app.domain.searches import CreateSearchRequest, SearchStatus
 from app.persistence.app_store import utcnow
 from app.services.generator_service import (
     FAKE_IMAGE_MODEL,
@@ -19,9 +19,14 @@ from tests.conftest import make_image_bytes
 
 
 class SlowFakeImageGenerator(DeterministicFakeImageGenerator):
-    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
+    async def generate_round(
+        self,
+        request: GenerationRequest,
+        *,
+        request_key: str | None = None,
+    ) -> list[GeneratedImage]:
         await asyncio.sleep(0.05)
-        return await super().generate_round(request)
+        return await super().generate_round(request, request_key=request_key)
 
 
 async def test_same_request_key_reuses_outputs_without_second_provider_call(
@@ -174,6 +179,15 @@ async def test_concurrent_same_request_has_single_provider_owner(settings) -> No
         lease_seconds=-1,
     )
     assert claimed and status == "running"
+    # A stale provider lease is recoverable only while the owning Search is
+    # still authorized for that exact target round.  SearchRunner performs
+    # this transition before generation in production.
+    assert container.app_store.update_search(
+        search.search_id,
+        status=SearchStatus.RUNNING,
+        round_index=1,
+        expected_statuses=[SearchStatus.QUEUED],
+    )
 
     recovered = await container.generator_service.generate_round(
         stale_request, expected_manifest_hash=manifest.manifest_hash

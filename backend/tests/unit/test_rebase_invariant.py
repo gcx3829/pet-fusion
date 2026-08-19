@@ -8,7 +8,7 @@ from app.container import AppContainer
 from app.domain.assets import SourceManifest
 from app.domain.errors import SourceManifestMismatchError
 from app.domain.projects import ProjectRecord
-from app.domain.searches import CreateSearchRequest
+from app.domain.searches import CreateSearchRequest, SearchStatus
 from app.persistence.app_store import utcnow
 from app.services.generator_service import FAKE_IMAGE_MODEL, GenerationRequest
 from app.services.prompt_compiler import compile_canonical_prompt
@@ -48,6 +48,14 @@ async def test_automatic_rounds_rebase_to_same_source_manifest(settings, fake_ge
         placement=command.placement, user_intent=command.user_intent, reference_count=1
     )
     for round_index in (0, 1):
+        assert container.app_store.update_search(
+            search.search_id,
+            status=SearchStatus.RUNNING,
+            round_index=round_index,
+            expected_statuses=[
+                SearchStatus.QUEUED if round_index == 0 else SearchStatus.RUNNING
+            ],
+        )
         await container.generator_service.generate_round(
             GenerationRequest(
                 search_id=search.search_id,

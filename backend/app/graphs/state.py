@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Literal, TypedDict
+
+from pydantic import BaseModel
 
 from app.graphs.reducers import CriticEvaluationBucket, merge_evaluations_by_candidate
 
@@ -26,6 +29,32 @@ class SearchState(TypedDict, total=False):
     user_intent: str
     canonical_prompt: str
     canonical_prompt_hash: str
+    # Prompt/visual-anchor lineage is kept as structured references.  These
+    # fields are optional so checkpoints written before the prompt-contract
+    # migration remain readable.
+    prompt_version_id: str | None
+    prompt_version_hash: str | None
+    based_on_prompt_version_id: str | None
+    prompt_schema_version: str | None
+    prompt_template_version: str | None
+    prompt_model: str | None
+    refinement_mode: Literal["initial", "revision"] | None
+    generation_mode: Literal["source_rebase", "candidate_anchored_rebase"] | None
+    visual_anchor: dict[str, object] | None
+    visual_anchor_candidate_id: str | None
+    visual_anchor_raw_asset_sha256: str | None
+    visual_anchor_asset: dict[str, object] | None
+    professional_prompt_plan: dict[str, object] | None
+    prompt_summary: str | None
+    provider_proposal_hash: str | None
+    # The nested Prompt Refiner subgraph communicates through checkpoint-safe
+    # JSON values.  ``prompt_refiner_execution_mode`` is a local routing hint
+    # and is never exposed as a provider prompt; the request/result contain
+    # asset references and structured plans, never image bytes.
+    prompt_refiner_execution_mode: Literal["initial", "revision", "local"] | None
+    prompt_refiner_request: dict[str, object] | None
+    prompt_refiner_result: dict[str, object] | None
+    current_prompt_version: dict[str, object] | None
     canonical_template_version: str
     generation_prompt: str
     generation_prompt_hash: str
@@ -70,9 +99,14 @@ def assert_checkpoint_safe(value: object, *, path: str = "state") -> None:
 
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise TypeError(f"Binary checkpoint value is forbidden at {path}")
-    if isinstance(value, str) and value.startswith("data:image/"):
+    if isinstance(value, str) and value.strip().lower().startswith("data:image/"):
         raise TypeError(f"Image data URL is forbidden at {path}")
-    if isinstance(value, dict):
+    if isinstance(value, BaseModel):
+        for field_name in type(value).model_fields:
+            assert_checkpoint_safe(
+                getattr(value, field_name), path=f"{path}.{field_name}"
+            )
+    elif isinstance(value, Mapping):
         for key, child in value.items():
             assert_checkpoint_safe(child, path=f"{path}.{key}")
     elif isinstance(value, (list, tuple)):

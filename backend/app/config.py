@@ -44,6 +44,12 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("FAKE_CRITIC", "PET_FUSION_FAKE_CRITIC"),
     )
+    fake_prompt_refiner: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "FAKE_PROMPT_REFINER", "PET_FUSION_FAKE_PROMPT_REFINER"
+        ),
+    )
     openai_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("OPENAI_API_KEY", "PET_FUSION_OPENAI_API_KEY"),
@@ -72,6 +78,13 @@ class Settings(BaseSettings):
         min_length=1,
         validation_alias=AliasChoices(
             "OPENAI_CRITIC_MODEL", "PET_FUSION_OPENAI_CRITIC_MODEL"
+        ),
+    )
+    openai_prompt_model: str = Field(
+        default="gpt-5.6-terra",
+        min_length=1,
+        validation_alias=AliasChoices(
+            "OPENAI_PROMPT_MODEL", "PET_FUSION_OPENAI_PROMPT_MODEL"
         ),
     )
     cors_origins: str = Field(

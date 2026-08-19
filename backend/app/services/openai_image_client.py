@@ -40,6 +40,7 @@ class OpenAIImageEditsTransport(Protocol):
         quality: str,
         size: str,
         mask: OpenAIImageInput | None = None,
+        request_key: str | None = None,
     ) -> OpenAIImageEditResult: ...
 
 
@@ -88,6 +89,7 @@ class OfficialOpenAIImageEditsTransport:
         quality: str,
         size: str,
         mask: OpenAIImageInput | None = None,
+        request_key: str | None = None,
     ) -> OpenAIImageEditResult:
         client = self._get_client()
         try:
@@ -100,6 +102,7 @@ class OfficialOpenAIImageEditsTransport:
                 n=(n if n > 1 else None),
                 quality=quality,
                 size=size,
+                request_key=request_key,
             )
         except Exception as exc:
             if n <= 1 or "tools[0].n" not in str(exc):
@@ -119,8 +122,13 @@ class OfficialOpenAIImageEditsTransport:
                     n=None,
                     quality=quality,
                     size=size,
+                    request_key=(
+                        f"{request_key}:serial:{index}"
+                        if request_key is not None
+                        else None
+                    ),
                 )
-                for _ in range(n)
+                for index in range(n)
             ]
             return OpenAIImageEditResult(
                 png_images=tuple(
@@ -146,6 +154,7 @@ class OfficialOpenAIImageEditsTransport:
         quality: str,
         size: str,
         mask: OpenAIImageInput | None = None,
+        request_key: str | None = None,
     ) -> OpenAIImageEditResult:
         kwargs: dict[str, object] = {
             "model": model,
@@ -159,6 +168,8 @@ class OfficialOpenAIImageEditsTransport:
             kwargs["mask"] = (mask.filename, mask.png_bytes, mask.mime_type)
         if n is not None:
             kwargs["n"] = n
+        if request_key is not None:
+            kwargs["extra_headers"] = {"Idempotency-Key": request_key}
         response = await client.images.edit(**kwargs)
         encoded_images = tuple(item.b64_json for item in response.data)
         if any(not isinstance(encoded, str) for encoded in encoded_images):

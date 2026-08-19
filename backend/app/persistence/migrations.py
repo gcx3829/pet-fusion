@@ -1,4 +1,4 @@
-MIGRATION_VERSION = 12
+MIGRATION_VERSION = 13
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -163,6 +163,17 @@ CREATE TABLE IF NOT EXISTS provider_calls (
 
 CREATE INDEX IF NOT EXISTS idx_provider_calls_search_operation
 ON provider_calls(search_id, operation, status, updated_at);
+
+-- Prompt Refiner results are deliberately separate from ``provider_calls``.
+-- The latter is an audit/idempotency record and must contain only safe lineage
+-- and transport metadata; the former is the durable, user-visible structured
+-- prompt result required to replay a completed call without paying again.
+CREATE TABLE IF NOT EXISTS prompt_refiner_results (
+    request_key TEXT PRIMARY KEY REFERENCES provider_calls(request_key),
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS candidate_evaluations (
     evaluation_id TEXT PRIMARY KEY,

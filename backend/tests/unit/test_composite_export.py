@@ -263,7 +263,13 @@ class SmallCanvasGenerator:
     def __init__(self) -> None:
         self.call_count = 0
 
-    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
+    async def generate_round(
+        self,
+        request: GenerationRequest,
+        *,
+        request_key: str | None = None,
+    ) -> list[GeneratedImage]:
+        del request_key
         self.call_count += 1
         image = Image.new("RGB", (8, 6), (230, 25, 60))
         return [GeneratedImage(png_bytes=_png_bytes(image), variant_index=0)]

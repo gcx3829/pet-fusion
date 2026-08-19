@@ -12,13 +12,19 @@ from typing import Protocol
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageOps
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.assets import AssetRef, SourceManifest
 from app.domain.candidates import CandidateRecord, CandidateResponse
 from app.domain.compositing import CropMapping, CropPadding, PixelBox
 from app.domain.errors import SourceManifestMismatchError
-from app.domain.searches import PlacementIntent
+from app.domain.prompts import (
+    PromptGenerationMode,
+    PromptRefinementMode,
+    PromptVersion,
+    VisualAnchorRef,
+)
+from app.domain.searches import PlacementIntent, SearchStatus
 from app.persistence.app_store import AppStore
 from app.services.asset_store import AssetStore
 from app.services.image_pipeline import normalized_placement_to_pixel_box
@@ -37,15 +43,18 @@ GENERATOR_GUIDANCE_MASK_SEMANTICS_VERSION = "guidance-mask-user-alpha-editable/v
 GENERATOR_GUIDANCE_MASK_RESIZE_VERSION = "guidance-mask-resize-lanczos/v1"
 GENERATOR_BACKGROUND_MAX_SIDE = 1024
 GENERATOR_REFERENCE_MAX_SIDE = 768
+GENERATOR_ANCHOR_MAX_SIDE = 1024
 GENERATOR_MODEL_MASK_X_PADDING = 0.045
 GENERATOR_MODEL_MASK_Y_PADDING = 0.065
 GENERATOR_BACKGROUND_PROXY_FORMAT = "png"
 GENERATOR_OPAQUE_PROXY_FORMAT = "jpeg"
 GENERATOR_OPAQUE_PROXY_QUALITY = 82
+GENERATOR_ANCHOR_PROXY_VERSION = "selected-raw-anchor-proxy/v1"
 GENERATOR_MULTI_CANDIDATE_STRATEGY = "relay-n-fallback-serial/v1"
 PROVIDER_RESULT_POLL_SECONDS = 0.02
 PROVIDER_RESULT_WAIT_SECONDS = 30.0
 PROVIDER_CALL_LEASE_SECONDS = 5
+GENERATOR_PROVIDER_MAX_ATTEMPTS = 2
 PROVIDER_USAGE_TOTAL_FIELDS = frozenset({"input_tokens", "output_tokens", "total_tokens"})
 PROVIDER_USAGE_DETAIL_FIELDS = frozenset({"image_tokens", "text_tokens"})
 
@@ -66,6 +75,96 @@ class GenerationRequest(BaseModel):
     model: str
     quality: str
     size: str
+    # Automatic Search remains source-only.  A selected raw candidate can be
+    # supplied only through the explicit human-revision mode below.
+    generation_mode: PromptGenerationMode = PromptGenerationMode.SOURCE_REBASE
+    prompt_version_id: str | None = Field(default=None, pattern=r"^pv_[0-9a-f]{32}$")
+    prompt_version_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    parent_prompt_version_id: str | None = Field(
+        default=None, pattern=r"^pv_[0-9a-f]{32}$"
+    )
+    # Full PromptVersion is optional for backwards-compatible callers.  The
+    # paid service resolves and authorizes it from the persisted Prompt Refiner
+    # result; this field is never written to provider audit rows.
+    prompt_version: PromptVersion | None = None
+    visual_anchor: VisualAnchorRef | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def hydrate_prompt_lineage_fields(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        payload = dict(value)
+        prompt_version = payload.get("prompt_version")
+        if isinstance(prompt_version, Mapping):
+            prompt_version = PromptVersion.model_validate(prompt_version)
+            payload["prompt_version"] = prompt_version
+        if isinstance(prompt_version, PromptVersion):
+            payload.setdefault("prompt_version_id", prompt_version.prompt_version_id)
+            payload.setdefault("prompt_version_hash", prompt_version.prompt_version_hash)
+            payload.setdefault(
+                "parent_prompt_version_id", prompt_version.based_on_prompt_version_id
+            )
+        return payload
+
+    @model_validator(mode="after")
+    def validate_generation_lineage_contract(self) -> GenerationRequest:
+        if self.generation_mode is PromptGenerationMode.SOURCE_REBASE:
+            if self.visual_anchor is not None:
+                raise ValueError("source_rebase generation cannot contain a visual anchor")
+            if self.prompt_version is not None and (
+                self.prompt_version.generation_mode
+                is PromptGenerationMode.CANDIDATE_ANCHORED_REBASE
+            ):
+                raise ValueError("source_rebase generation cannot use an anchored PromptVersion")
+            return self
+
+        if self.visual_anchor is None:
+            raise ValueError(
+                "candidate_anchored_rebase generation requires a VisualAnchorRef"
+            )
+        if self.round_index < 1:
+            raise ValueError(
+                "candidate_anchored_rebase generation requires a later target round"
+            )
+        if self.prompt_version_id is None:
+            raise ValueError(
+                "candidate_anchored_rebase generation requires a PromptVersion lineage"
+            )
+        if self.prompt_version_hash is None:
+            raise ValueError(
+                "candidate_anchored_rebase generation requires a PromptVersion hash"
+            )
+        if self.parent_prompt_version_id is None:
+            raise ValueError(
+                "candidate_anchored_rebase generation requires parent PromptVersion lineage"
+            )
+        if self.prompt_version is not None:
+            version = self.prompt_version
+            if version.prompt_version_id != self.prompt_version_id:
+                raise ValueError("GenerationRequest PromptVersion ID does not match its lineage")
+            if (
+                self.prompt_version_hash is not None
+                and version.prompt_version_hash != self.prompt_version_hash
+            ):
+                raise ValueError(
+                    "GenerationRequest PromptVersion hash does not match its lineage"
+                )
+            if version.refinement_mode is not PromptRefinementMode.REVISION:
+                raise ValueError(
+                    "candidate_anchored_rebase is only available for human revisions"
+                )
+            if version.generation_mode is not PromptGenerationMode.CANDIDATE_ANCHORED_REBASE:
+                raise ValueError(
+                    "candidate_anchored_rebase requires an anchored PromptVersion"
+                )
+            if version.visual_anchor != self.visual_anchor:
+                raise ValueError("GenerationRequest visual anchor does not match PromptVersion")
+            if version.human_selected_candidate_id != self.visual_anchor.candidate_id:
+                raise ValueError(
+                    "candidate_anchored_rebase must use the human-selected candidate"
+                )
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +176,12 @@ class GeneratedImage:
 
 
 class ImageGenerator(Protocol):
-    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]: ...
+    async def generate_round(
+        self,
+        request: GenerationRequest,
+        *,
+        request_key: str | None = None,
+    ) -> list[GeneratedImage]: ...
 
 
 def _provider_alpha_from_user_alpha(user_alpha: Image.Image) -> Image.Image:
@@ -136,7 +240,13 @@ class DeterministicFakeImageGenerator:
             results.append(GeneratedImage(png_bytes=output.getvalue(), variant_index=variant_index))
         return results
 
-    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
+    async def generate_round(
+        self,
+        request: GenerationRequest,
+        *,
+        request_key: str | None = None,
+    ) -> list[GeneratedImage]:
+        del request_key
         self.call_count += 1
         self.requests.append(request)
         return await asyncio.to_thread(self._render_round, request)
@@ -149,61 +259,113 @@ class OpenAIImageGenerator:
         self.transport = transport
 
     @staticmethod
-    def _source_inputs(request: GenerationRequest) -> tuple[OpenAIImageInput, ...]:
-        assets = (request.source_manifest.background, *request.source_manifest.cat_references)
-        inputs: list[OpenAIImageInput] = []
-        for index, asset in enumerate(assets):
-            with Image.open(asset.filesystem_path) as opened:
-                oriented = ImageOps.exif_transpose(opened)
-                declares_alpha = "A" in oriented.getbands() or "transparency" in oriented.info
-                normalized = oriented.convert("RGBA" if declares_alpha else "RGB")
-                has_transparency = declares_alpha and (
-                    normalized.getchannel("A").getextrema() != (255, 255)
-                )
-                if declares_alpha and not has_transparency:
-                    normalized = normalized.convert("RGB")
-                max_side = (
-                    GENERATOR_BACKGROUND_MAX_SIDE
-                    if index == 0
-                    else GENERATOR_REFERENCE_MAX_SIDE
-                )
-                longest_side = max(normalized.size)
-                if longest_side > max_side:
-                    scale = max_side / longest_side
-                    target_size = (
+    def _asset_input(
+        asset: AssetRef,
+        *,
+        index: int,
+        role: str,
+        max_side: int,
+        force_png: bool = False,
+    ) -> OpenAIImageInput:
+        """Normalize one immutable/reference asset for the Image API call.
+
+        The selected candidate is deliberately treated as a bounded visual
+        reference, not as the editable base.  EXIF orientation is baked into
+        the proxy, alpha is preserved only when it is meaningful, and opaque
+        images use JPEG to keep relay payloads small.  The field on
+        ``OpenAIImageInput`` remains named ``png_bytes`` for compatibility with
+        the original transport adapter; ``mime_type`` is authoritative.
+        """
+
+        with Image.open(asset.filesystem_path) as opened:
+            oriented = ImageOps.exif_transpose(opened)
+            declares_alpha = "A" in oriented.getbands() or "transparency" in oriented.info
+            normalized = oriented.convert("RGBA" if declares_alpha else "RGB")
+            has_transparency = declares_alpha and (
+                normalized.getchannel("A").getextrema() != (255, 255)
+            )
+            if declares_alpha and not has_transparency:
+                normalized = normalized.convert("RGB")
+            longest_side = max(normalized.size)
+            if longest_side > max_side:
+                scale = max_side / longest_side
+                normalized = normalized.resize(
+                    (
                         max(1, round(normalized.width * scale)),
                         max(1, round(normalized.height * scale)),
-                    )
-                    normalized = normalized.resize(target_size, Image.Resampling.LANCZOS)
-                output = io.BytesIO()
-                # The provider mask must have the same dimensions and a
-                # compatible raster format as the first image. Keep the
-                # background as PNG even when it is opaque; references can
-                # still use compact JPEG proxies when they are opaque.
-                if has_transparency or index == 0:
-                    normalized.save(output, format="PNG", compress_level=9, optimize=False)
-                    mime_type = "image/png"
-                    suffix = "png"
-                else:
-                    normalized.save(
-                        output,
-                        format="JPEG",
-                        quality=GENERATOR_OPAQUE_PROXY_QUALITY,
-                        optimize=True,
-                        progressive=True,
-                        subsampling=2,
-                    )
-                    mime_type = "image/jpeg"
-                    suffix = "jpg"
-            input_bytes = output.getvalue()
-            role = "background" if index == 0 else f"reference-{index}"
+                    ),
+                    Image.Resampling.LANCZOS,
+                )
+            output = io.BytesIO()
+            # Image 1 must stay PNG because the model mask is dimensionally
+            # paired with it. Transparent visual references also stay PNG.
+            if force_png or has_transparency:
+                normalized.save(output, format="PNG", compress_level=9, optimize=False)
+                mime_type = "image/png"
+                suffix = "png"
+            else:
+                normalized.save(
+                    output,
+                    format="JPEG",
+                    quality=GENERATOR_OPAQUE_PROXY_QUALITY,
+                    optimize=True,
+                    progressive=True,
+                    subsampling=2,
+                )
+                mime_type = "image/jpeg"
+                suffix = "jpg"
+        return OpenAIImageInput(
+            filename=f"{index:02d}-{role}-{asset.asset_id}.{suffix}",
+            png_bytes=output.getvalue(),
+            mime_type=mime_type,
+        )
+
+    @classmethod
+    def _source_inputs(cls, request: GenerationRequest) -> tuple[OpenAIImageInput, ...]:
+        """Build the fixed Image API input order.
+
+        ``image[0]`` is always the immutable original background.  Human
+        candidate-anchored revision inserts the selected raw candidate at
+        ``image[1]``; immutable cat references follow it.  Automatic/source
+        rounds never include a candidate input.
+        """
+
+        inputs: list[OpenAIImageInput] = [
+            cls._asset_input(
+                request.source_manifest.background,
+                index=0,
+                role="background",
+                max_side=GENERATOR_BACKGROUND_MAX_SIDE,
+                force_png=True,
+            )
+        ]
+        next_index = 1
+        if request.generation_mode is PromptGenerationMode.CANDIDATE_ANCHORED_REBASE:
+            # GenerationRequest validation guarantees the anchor is present;
+            # keep the explicit guard for callers that bypass Pydantic.
+            if request.visual_anchor is None:
+                raise SourceManifestMismatchError(
+                    "candidate_anchored_rebase generation is missing its visual anchor"
+                )
             inputs.append(
-                OpenAIImageInput(
-                    filename=f"{index:02d}-{role}-{asset.asset_id}.{suffix}",
-                    png_bytes=input_bytes,
-                    mime_type=mime_type,
+                cls._asset_input(
+                    request.visual_anchor.raw_asset,
+                    index=next_index,
+                    role="visual-anchor",
+                    max_side=GENERATOR_ANCHOR_MAX_SIDE,
                 )
             )
+            next_index += 1
+        for reference in request.source_manifest.cat_references:
+            inputs.append(
+                cls._asset_input(
+                    reference,
+                    index=next_index,
+                    role="reference",
+                    max_side=GENERATOR_REFERENCE_MAX_SIDE,
+                )
+            )
+            next_index += 1
         return tuple(inputs)
 
     @staticmethod
@@ -328,7 +490,12 @@ class OpenAIImageGenerator:
             mime_type="image/png",
         )
 
-    async def generate_round(self, request: GenerationRequest) -> list[GeneratedImage]:
+    async def generate_round(
+        self,
+        request: GenerationRequest,
+        *,
+        request_key: str | None = None,
+    ) -> list[GeneratedImage]:
         source_inputs = await asyncio.to_thread(self._source_inputs, request)
         provider_mask = await asyncio.to_thread(
             self._provider_mask,
@@ -343,6 +510,7 @@ class OpenAIImageGenerator:
             n=request.candidate_count,
             quality=request.quality,
             size=request.size,
+            request_key=request_key,
         )
         if len(result.png_images) != request.candidate_count:
             raise RuntimeError("OpenAI Image API returned an unexpected number of candidates")
@@ -436,8 +604,20 @@ class GeneratorService:
         )
 
     @staticmethod
+    def _has_explicit_lineage(request: GenerationRequest) -> bool:
+        return (
+            request.generation_mode is not PromptGenerationMode.SOURCE_REBASE
+            or request.prompt_version_id is not None
+            or request.prompt_version_hash is not None
+            or request.parent_prompt_version_id is not None
+            or request.prompt_version is not None
+            or request.visual_anchor is not None
+        )
+
+    @staticmethod
     def build_request_key(request: GenerationRequest) -> str:
         guidance_mask = request.guidance_mask
+        visual_anchor = request.visual_anchor
         payload = {
             "schema_version": GENERATOR_SCHEMA_VERSION,
             "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
@@ -472,12 +652,275 @@ class GeneratorService:
                 "semantics_version": GENERATOR_GUIDANCE_MASK_SEMANTICS_VERSION,
                 "resize_version": GENERATOR_GUIDANCE_MASK_RESIZE_VERSION,
             }
+        # Keep the old source-only key byte-for-byte stable for callers that
+        # have not opted into the prompt-lineage contract.  Every explicit
+        # lineage request (and every candidate-anchored request) includes the
+        # mode, PromptVersion and anchor identity so a replay can never cross
+        # manual revisions or visual references.
+        has_explicit_lineage = GeneratorService._has_explicit_lineage(request)
+        if has_explicit_lineage:
+            payload["generation_mode"] = request.generation_mode.value
+            payload["placement"] = request.placement.model_dump(mode="json")
+            payload["prompt_version"] = {
+                "prompt_version_id": request.prompt_version_id,
+                "prompt_version_hash": request.prompt_version_hash,
+                "parent_prompt_version_id": request.parent_prompt_version_id,
+            }
+            payload["anchor_proxy"] = (
+                {
+                    "schema_version": GENERATOR_ANCHOR_PROXY_VERSION,
+                    "max_side": GENERATOR_ANCHOR_MAX_SIDE,
+                    "format": "png_if_transparent_else_jpeg",
+                    "opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
+                    "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
+                }
+                if visual_anchor is not None
+                else None
+            )
+        if visual_anchor is not None:
+            payload["visual_anchor"] = {
+                "schema_version": visual_anchor.schema_version,
+                "kind": visual_anchor.kind,
+                "search_id": visual_anchor.search_id,
+                "candidate_id": visual_anchor.candidate_id,
+                "round_index": visual_anchor.round_index,
+                "source_manifest_hash": visual_anchor.source_manifest_hash,
+                "raw_asset_id": visual_anchor.raw_asset.asset_id,
+                "raw_asset_sha256": visual_anchor.raw_asset_sha256,
+                "raw_asset_mime_type": visual_anchor.raw_asset.mime_type,
+                "raw_asset_width": visual_anchor.raw_asset.width,
+                "raw_asset_height": visual_anchor.raw_asset.height,
+            }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
+    def _resolve_persisted_prompt_version(
+        self,
+        request: GenerationRequest,
+        *,
+        search_id: str,
+        expected_source_manifest_hash: str,
+    ) -> PromptVersion:
+        """Resolve the exact Prompt Refiner result authorized for this round."""
+
+        from app.services.prompt_refiner_service import PromptRefinerResult
+
+        prompt_version_id = request.prompt_version_id
+        if prompt_version_id is None:
+            raise SourceManifestMismatchError(
+                "Candidate-anchored generation requires a PromptVersion ID"
+            )
+        payload = self.app_store.find_prompt_refiner_result_by_prompt_version(
+            search_id=search_id,
+            prompt_version_id=prompt_version_id,
+        )
+        if payload is not None:
+            try:
+                result = PromptRefinerResult.model_validate(payload)
+            except (TypeError, ValueError) as exc:
+                raise SourceManifestMismatchError(
+                    "Persisted Prompt Refiner result is invalid"
+                ) from exc
+            version = result.prompt_version
+        else:
+            # Automatic source-only rounds apply bounded directives locally and
+            # persist that PromptVersion in Search.prompt_history rather than
+            # pretending a non-paid local operation was a provider result.
+            search_record = self.app_store.get_search(search_id)
+            history_matches = [
+                item
+                for item in search_record.prompt_history
+                if item.prompt_version_id == prompt_version_id
+            ]
+            if len(history_matches) != 1:
+                raise SourceManifestMismatchError(
+                    "PromptVersion is not persisted for this search"
+                )
+            version = history_matches[0]
+        if version.prompt_version_id != prompt_version_id:
+            raise SourceManifestMismatchError(
+                "PromptVersion ID does not match its persisted result"
+            )
+        if request.prompt_version_hash is not None and (
+            version.prompt_version_hash != request.prompt_version_hash
+        ):
+            raise SourceManifestMismatchError(
+                "PromptVersion hash does not match its persisted result"
+            )
+        if request.prompt_version is not None and (
+            request.prompt_version.model_dump(mode="json")
+            != version.model_dump(mode="json")
+        ):
+            raise SourceManifestMismatchError(
+                "PromptVersion lineage does not match its persisted result"
+            )
+        if (
+            version.search_id != search_id
+            or version.source_manifest_hash != expected_source_manifest_hash
+            or version.round_index != request.round_index
+        ):
+            raise SourceManifestMismatchError(
+                "PromptVersion does not belong to this search's target generation round"
+            )
+        if version.generation_prompt_hash != request.prompt_hash:
+            raise SourceManifestMismatchError(
+                "Generation prompt hash does not match the authorized PromptVersion"
+            )
+        if version.generation_prompt != request.prompt:
+            raise SourceManifestMismatchError(
+                "Generation prompt text does not match the authorized PromptVersion"
+            )
+        if request.parent_prompt_version_id is not None and (
+            version.based_on_prompt_version_id != request.parent_prompt_version_id
+        ):
+            raise SourceManifestMismatchError(
+                "PromptVersion parent lineage does not match the GenerationRequest"
+            )
+        return version
+
+    def _assert_candidate_anchor_lineage(
+        self,
+        request: GenerationRequest,
+        *,
+        search_id: str,
+        source_manifest_hash: str,
+    ) -> PromptVersion:
+        """Authorize a human-selected raw candidate immediately before payment."""
+
+        from app.services.prompt_refiner_service import PromptRefinerResult
+
+        anchor = request.visual_anchor
+        if anchor is None:
+            raise SourceManifestMismatchError(
+                "Candidate-anchored generation requires a VisualAnchorRef"
+            )
+        if (
+            anchor.search_id != search_id
+            or anchor.source_manifest_hash != source_manifest_hash
+            or anchor.round_index != request.round_index - 1
+        ):
+            raise SourceManifestMismatchError(
+                "Visual anchor must belong to the same search and immediately previous round"
+            )
+        version = self._resolve_persisted_prompt_version(
+            request,
+            search_id=search_id,
+            expected_source_manifest_hash=source_manifest_hash,
+        )
+        if (
+            version.refinement_mode is not PromptRefinementMode.REVISION
+            or version.generation_mode is not PromptGenerationMode.CANDIDATE_ANCHORED_REBASE
+            or version.visual_anchor != anchor
+            or version.human_selected_candidate_id != anchor.candidate_id
+            or version.based_on_prompt_version_id is None
+        ):
+            raise SourceManifestMismatchError(
+                "Candidate anchor is only valid for a persisted human revision PromptVersion"
+            )
+
+        parent_payload = self.app_store.find_prompt_refiner_result_by_prompt_version(
+            search_id=search_id,
+            prompt_version_id=version.based_on_prompt_version_id,
+        )
+        if parent_payload is not None:
+            try:
+                parent = PromptRefinerResult.model_validate(parent_payload).prompt_version
+            except (TypeError, ValueError) as exc:
+                raise SourceManifestMismatchError(
+                    "Persisted parent PromptVersion is invalid"
+                ) from exc
+        else:
+            search_record = self.app_store.get_search(search_id)
+            parent_matches = [
+                item
+                for item in search_record.prompt_history
+                if item.prompt_version_id == version.based_on_prompt_version_id
+            ]
+            if len(parent_matches) != 1:
+                raise SourceManifestMismatchError(
+                    "PromptVersion parent is not persisted for this search"
+                )
+            parent = parent_matches[0]
+        if (
+            parent.search_id != search_id
+            or parent.source_manifest_hash != source_manifest_hash
+            or parent.round_index != request.round_index - 1
+            or version.based_on_prompt_version_id != parent.prompt_version_id
+        ):
+            raise SourceManifestMismatchError(
+                "PromptVersion parent does not belong to the previous source round"
+            )
+
+        search = self.app_store.get_search(search_id)
+        if (
+            search.status not in {SearchStatus.QUEUED, SearchStatus.RUNNING}
+            or search.round_index != request.round_index
+        ):
+            raise SourceManifestMismatchError(
+                "Candidate-anchored generation does not match an active search target round"
+            )
+        reviewed_round = request.round_index - 1
+        review_entries = [
+            item
+            for item in search.round_history
+            if isinstance(item, Mapping) and item.get("round_index") == reviewed_round
+        ]
+        if len(review_entries) != 1:
+            raise SourceManifestMismatchError(
+                "Candidate-anchored generation is missing its persisted human resume"
+            )
+        review_entry = review_entries[0]
+        persisted_feedback = review_entry.get("human_feedback")
+        normalized_persisted_feedback = (
+            persisted_feedback.strip()
+            if isinstance(persisted_feedback, str) and persisted_feedback.strip()
+            else ""
+        )
+        if (
+            review_entry.get("human_resume_applied") is not True
+            or review_entry.get("human_selected_candidate_id") != anchor.candidate_id
+            or normalized_persisted_feedback != (version.human_feedback or "").strip()
+        ):
+            raise SourceManifestMismatchError(
+                "Candidate anchor does not match the persisted human selection and feedback"
+            )
+        matching = [
+            candidate
+            for candidate in search.candidates
+            if candidate.candidate_id == anchor.candidate_id
+        ]
+        if len(matching) != 1:
+            raise SourceManifestMismatchError(
+                "Visual anchor candidate is not persisted in the requested search"
+            )
+        candidate = matching[0]
+        if (
+            candidate.round_index != anchor.round_index
+            or candidate.source_manifest_hash != source_manifest_hash
+            or candidate.generation_depth != 0
+            or candidate.raw_authoritative_asset != anchor.raw_asset
+            or candidate.raw_asset.sha256 != anchor.raw_asset_sha256
+            or candidate.prompt_hash != parent.generation_prompt_hash
+        ):
+            raise SourceManifestMismatchError(
+                "Visual anchor is not the intact raw authority generated from its parent prompt"
+            )
+        try:
+            registered = self.app_store.get_asset(candidate.raw_asset.asset_id)
+        except Exception as exc:
+            raise SourceManifestMismatchError(
+                "Visual anchor raw asset is not registered in app storage"
+            ) from exc
+        if registered != candidate.raw_asset:
+            raise SourceManifestMismatchError(
+                "Visual anchor raw asset differs from the canonical app asset"
+            )
+        self.asset_store.assert_png_lineage_asset(candidate.raw_asset)
+        return version
+
     def _assert_rebase_inputs(
         self, request: GenerationRequest, *, expected_manifest_hash: str
-    ) -> None:
+    ) -> PromptVersion | None:
         manifest = request.source_manifest
         manifest.assert_integrity()
         search = self.app_store.get_search(request.search_id)
@@ -496,6 +939,17 @@ class GeneratorService:
                 raise SourceManifestMismatchError(
                     "Automatic search cannot read a previous candidate as generator input"
                 )
+            try:
+                if self.app_store.get_asset(asset.asset_id) != asset:
+                    raise SourceManifestMismatchError(
+                        "Generator source asset differs from the canonical app asset"
+                    )
+            except SourceManifestMismatchError:
+                raise
+            except Exception as exc:
+                raise SourceManifestMismatchError(
+                    "Generator source asset is not registered in app storage"
+                ) from exc
             self.asset_store.assert_intact(asset)
         stored_guidance_mask = search.guidance_mask_asset
         if (request.guidance_mask is None) != (stored_guidance_mask is None):
@@ -519,6 +973,41 @@ class GeneratorService:
                     "Generator Guidance Mask does not match the source background"
                 )
             self.asset_store.assert_intact(guidance)
+            try:
+                if self.app_store.get_asset(guidance.asset_id) != guidance:
+                    raise SourceManifestMismatchError(
+                        "Generator Guidance Mask differs from the canonical app asset"
+                    )
+            except SourceManifestMismatchError:
+                raise
+            except Exception as exc:
+                raise SourceManifestMismatchError(
+                    "Generator Guidance Mask is not registered in app storage"
+                ) from exc
+
+        if request.generation_mode is PromptGenerationMode.SOURCE_REBASE:
+            if request.visual_anchor is not None:
+                raise SourceManifestMismatchError(
+                    "Source rebase generation cannot read a candidate visual anchor"
+                )
+            if request.prompt_version_id is not None:
+                version = self._resolve_persisted_prompt_version(
+                    request,
+                    search_id=request.search_id,
+                    expected_source_manifest_hash=search.source_manifest_hash,
+                )
+                if version.generation_mode is not PromptGenerationMode.SOURCE_REBASE:
+                    raise SourceManifestMismatchError(
+                        "Automatic source rebase cannot use an anchored PromptVersion"
+                    )
+                return version
+            return None
+
+        return self._assert_candidate_anchor_lineage(
+            request,
+            search_id=request.search_id,
+            source_manifest_hash=search.source_manifest_hash,
+        )
 
     def _emit_candidate_ready(self, search_id: str, candidate: CandidateRecord) -> None:
         self.app_store.emit_event(
@@ -543,6 +1032,152 @@ class GeneratorService:
             self._emit_candidate_ready(search_id, candidate)
         return completed
 
+    def _assert_completed_audit_lineage(
+        self,
+        *,
+        request: GenerationRequest,
+        request_key: str,
+        audit_payload: Mapping[str, object],
+    ) -> None:
+        """Re-authorize a completed replay before returning cached candidates.
+
+        A checkpoint resume must not trust the fact that a request key exists:
+        the stored redacted request is compared with the freshly reconstructed
+        lineage, and every cached candidate is checked against the same source,
+        prompt and raw-only generation contract.  The audit still contains no
+        prompt text, image bytes, or Base64.
+        """
+
+        record = self.app_store.get_provider_call_record(request_key)
+        if record is None or record.get("status") != "completed":
+            raise SourceManifestMismatchError(
+                "Completed generator replay is missing its provider audit"
+            )
+        if (
+            record.get("operation") != "generate_round"
+            or record.get("search_id") != request.search_id
+            or record.get("request") != dict(audit_payload)
+        ):
+            raise SourceManifestMismatchError(
+                "Completed generator replay audit does not match request lineage"
+            )
+        response = record.get("response")
+        if not isinstance(response, Mapping):
+            raise SourceManifestMismatchError(
+                "Completed generator replay has no structured provider response"
+            )
+        raw_candidates = response.get("candidates")
+        if not isinstance(raw_candidates, list):
+            raise SourceManifestMismatchError(
+                "Completed generator replay provider response is malformed"
+            )
+        try:
+            candidates = [CandidateRecord.model_validate(item) for item in raw_candidates]
+        except (TypeError, ValueError) as exc:
+            raise SourceManifestMismatchError(
+                "Completed generator replay contains an invalid candidate"
+            ) from exc
+        self._assert_replayed_candidates_lineage(
+            request=request,
+            request_key=request_key,
+            candidates=candidates,
+        )
+
+    def _assert_replayed_candidates_lineage(
+        self,
+        *,
+        request: GenerationRequest,
+        request_key: str,
+        candidates: list[CandidateRecord],
+    ) -> None:
+        """Validate every cached output before replaying or closing an audit."""
+
+        if len(candidates) != request.candidate_count:
+            raise SourceManifestMismatchError(
+                "Generator replay candidate count does not match request"
+            )
+        if sorted(item.variant_index for item in candidates) != list(
+            range(request.candidate_count)
+        ):
+            raise SourceManifestMismatchError(
+                "Generator replay candidate variants are incomplete or duplicated"
+            )
+        for candidate in candidates:
+            candidate_seed = (
+                f"{request.search_id}:{request.round_index}:{candidate.variant_index}:"
+                f"{request_key}"
+            )
+            expected_candidate_id = (
+                "cand_" + hashlib.sha256(candidate_seed.encode("utf-8")).hexdigest()[:32]
+            )
+            if (
+                candidate.candidate_id != expected_candidate_id
+                or candidate.request_key != request_key
+                or candidate.round_index != request.round_index
+                or candidate.source_manifest_hash != request.source_manifest.manifest_hash
+                or candidate.prompt_hash != request.prompt_hash
+                or candidate.generation_depth != 0
+                or candidate.protected_asset != candidate.raw_asset
+                or candidate.composite is not None
+                or candidate.model != request.model
+                or candidate.quality != request.quality
+                or candidate.size != request.size
+                or candidate.crop_mapping
+                != self._crop_mapping_for_output(
+                    source_manifest=request.source_manifest,
+                    output_asset=candidate.raw_asset,
+                )
+            ):
+                raise SourceManifestMismatchError(
+                    "Generator replay candidate lineage does not match request"
+                )
+            try:
+                if self.app_store.get_asset(candidate.raw_asset.asset_id) != candidate.raw_asset:
+                    raise SourceManifestMismatchError(
+                        "Generator replay raw asset differs from the canonical app asset"
+                    )
+            except SourceManifestMismatchError:
+                raise
+            except Exception as exc:
+                raise SourceManifestMismatchError(
+                    "Generator replay raw asset is not registered in app storage"
+                ) from exc
+            self.asset_store.assert_png_lineage_asset(candidate.raw_asset)
+
+    @staticmethod
+    def _anchor_proxy_audit_metadata(anchor: VisualAnchorRef | None) -> dict[str, object] | None:
+        """Describe the exact bounded anchor proxy without persisting image data."""
+
+        if anchor is None:
+            return None
+        try:
+            with Image.open(anchor.raw_asset.filesystem_path) as opened:
+                oriented = ImageOps.exif_transpose(opened)
+                declares_alpha = "A" in oriented.getbands() or "transparency" in oriented.info
+                normalized = oriented.convert("RGBA" if declares_alpha else "RGB")
+                has_transparency = declares_alpha and (
+                    normalized.getchannel("A").getextrema() != (255, 255)
+                )
+                width, height = normalized.size
+                if max(width, height) > GENERATOR_ANCHOR_MAX_SIDE:
+                    scale = GENERATOR_ANCHOR_MAX_SIDE / max(width, height)
+                    width = max(1, round(width * scale))
+                    height = max(1, round(height * scale))
+        except (OSError, ValueError) as exc:
+            raise SourceManifestMismatchError(
+                "Visual anchor raw asset cannot be inspected for its proxy contract"
+            ) from exc
+        return {
+            "schema_version": GENERATOR_ANCHOR_PROXY_VERSION,
+            "max_side": GENERATOR_ANCHOR_MAX_SIDE,
+            "width": width,
+            "height": height,
+            "format": "png" if has_transparency else GENERATOR_OPAQUE_PROXY_FORMAT,
+            "mime_type": "image/png" if has_transparency else "image/jpeg",
+            "opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
+            "exif_orientation": "transpose",
+        }
+
     async def _renew_provider_lease(
         self, *, request_key: str, owner_id: str
     ) -> None:
@@ -564,13 +1199,19 @@ class GeneratorService:
         *,
         expected_manifest_hash: str,
     ) -> list[CandidateRecord]:
-        await asyncio.to_thread(
+        authorized_prompt_version = await asyncio.to_thread(
             self._assert_rebase_inputs,
             request,
             expected_manifest_hash=expected_manifest_hash,
         )
         request_key = self.build_request_key(request)
-        audit_payload = {
+        prompt_version = authorized_prompt_version or request.prompt_version
+        anchor = request.visual_anchor
+        anchor_proxy_metadata = await asyncio.to_thread(
+            self._anchor_proxy_audit_metadata,
+            anchor,
+        )
+        audit_payload: dict[str, object] = {
             "schema_version": GENERATOR_SCHEMA_VERSION,
             "output_semantics_version": GENERATOR_OUTPUT_SEMANTICS_VERSION,
             "source_manifest_hash": request.source_manifest.manifest_hash,
@@ -609,6 +1250,60 @@ class GeneratorService:
                 "multi_candidate_strategy": GENERATOR_MULTI_CANDIDATE_STRATEGY,
             },
         }
+        if self._has_explicit_lineage(request):
+            audit_payload.update(
+                {
+                    "generation_mode": request.generation_mode.value,
+                    "placement": request.placement.model_dump(mode="json"),
+                    "prompt_version": (
+                        {
+                            "prompt_version_id": prompt_version.prompt_version_id,
+                            "prompt_version_hash": prompt_version.prompt_version_hash,
+                            "round_index": prompt_version.round_index,
+                            "based_on_prompt_version_id": (
+                                prompt_version.based_on_prompt_version_id
+                            ),
+                        }
+                        if prompt_version is not None
+                        else {
+                            "prompt_version_id": request.prompt_version_id,
+                            "prompt_version_hash": request.prompt_version_hash,
+                            "round_index": None,
+                            "based_on_prompt_version_id": request.parent_prompt_version_id,
+                        }
+                    ),
+                    "visual_anchor": (
+                        {
+                            "schema_version": anchor.schema_version,
+                            "kind": anchor.kind,
+                            "search_id": anchor.search_id,
+                            "candidate_id": anchor.candidate_id,
+                            "round_index": anchor.round_index,
+                            "source_manifest_hash": anchor.source_manifest_hash,
+                            "raw_asset_id": anchor.raw_asset.asset_id,
+                            "raw_asset_sha256": anchor.raw_asset_sha256,
+                            "raw_asset_mime_type": anchor.raw_asset.mime_type,
+                            "raw_asset_width": anchor.raw_asset.width,
+                            "raw_asset_height": anchor.raw_asset.height,
+                        }
+                        if anchor is not None
+                        else None
+                    ),
+                    "anchor_proxy": anchor_proxy_metadata,
+                }
+            )
+        if anchor is not None:
+            input_proxy = audit_payload["input_proxy"]
+            assert isinstance(input_proxy, dict)
+            input_proxy.update(
+                {
+                    "anchor_proxy_version": GENERATOR_ANCHOR_PROXY_VERSION,
+                    "anchor_max_side": GENERATOR_ANCHOR_MAX_SIDE,
+                    "anchor_format": "png_if_transparent_else_jpeg",
+                    "anchor_opaque_format": GENERATOR_OPAQUE_PROXY_FORMAT,
+                    "anchor_opaque_quality": GENERATOR_OPAQUE_PROXY_QUALITY,
+                }
+            )
         owner_id = f"provider_{uuid4().hex}"
         claimed, status, completed_response = await asyncio.to_thread(
             self.app_store.claim_provider_call,
@@ -618,8 +1313,14 @@ class GeneratorService:
             request_payload=audit_payload,
             owner_id=owner_id,
             lease_seconds=PROVIDER_CALL_LEASE_SECONDS,
+            max_attempts=GENERATOR_PROVIDER_MAX_ATTEMPTS,
         )
         if status == "completed" and completed_response is not None:
+            self._assert_completed_audit_lineage(
+                request=request,
+                request_key=request_key,
+                audit_payload=audit_payload,
+            )
             return await asyncio.to_thread(
                 self._completed_candidates,
                 search_id=request.search_id, completed_response=completed_response
@@ -629,6 +1330,11 @@ class GeneratorService:
             self.app_store.find_candidates_for_request, request.search_id, request_key
         )
         if len(existing) == request.candidate_count:
+            self._assert_replayed_candidates_lineage(
+                request=request,
+                request_key=request_key,
+                candidates=existing,
+            )
             for candidate in existing:
                 await asyncio.to_thread(self._emit_candidate_ready, request.search_id, candidate)
             existing_response: dict[str, object] = {
@@ -642,6 +1348,11 @@ class GeneratorService:
             return existing
 
         if not claimed:
+            attempts = await asyncio.to_thread(
+                self.app_store.provider_attempt_count, request_key
+            )
+            if attempts >= GENERATOR_PROVIDER_MAX_ATTEMPTS:
+                raise RuntimeError("Image generator provider attempts exhausted")
             deadline = asyncio.get_running_loop().time() + PROVIDER_RESULT_WAIT_SECONDS
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(PROVIDER_RESULT_POLL_SECONDS)
@@ -653,8 +1364,14 @@ class GeneratorService:
                     request_payload=audit_payload,
                     owner_id=owner_id,
                     lease_seconds=PROVIDER_CALL_LEASE_SECONDS,
+                    max_attempts=GENERATOR_PROVIDER_MAX_ATTEMPTS,
                 )
                 if status == "completed" and completed_response is not None:
+                    self._assert_completed_audit_lineage(
+                        request=request,
+                        request_key=request_key,
+                        audit_payload=audit_payload,
+                    )
                     return await asyncio.to_thread(
                         self._completed_candidates,
                         search_id=request.search_id,
@@ -666,6 +1383,11 @@ class GeneratorService:
                     request_key,
                 )
                 if len(existing) == request.candidate_count:
+                    self._assert_replayed_candidates_lineage(
+                        request=request,
+                        request_key=request_key,
+                        candidates=existing,
+                    )
                     existing_response = {
                         "candidates": [item.model_dump(mode="json") for item in existing]
                     }
@@ -677,6 +1399,11 @@ class GeneratorService:
                     return existing
                 if claimed:
                     break
+                attempts = await asyncio.to_thread(
+                    self.app_store.provider_attempt_count, request_key
+                )
+                if attempts >= GENERATOR_PROVIDER_MAX_ATTEMPTS:
+                    raise RuntimeError("Image generator provider attempts exhausted")
             else:
                 raise RuntimeError("Timed out waiting for the in-flight provider call")
 
@@ -684,7 +1411,30 @@ class GeneratorService:
             self._renew_provider_lease(request_key=request_key, owner_id=owner_id)
         )
         try:
-            generated = await self.provider.generate_round(request)
+            # The first lineage check happens before claiming the idempotency
+            # key.  Re-check the active round after any wait and immediately
+            # before the paid side effect so a cancel/accept race cannot start
+            # a fresh provider request.
+            active_search = await asyncio.to_thread(
+                self.app_store.get_search, request.search_id
+            )
+            if (
+                active_search.status
+                not in {SearchStatus.QUEUED, SearchStatus.RUNNING}
+                or active_search.round_index != request.round_index
+            ):
+                raise SourceManifestMismatchError(
+                    "Image generation no longer matches an active search target round"
+                )
+            await asyncio.to_thread(
+                self._assert_rebase_inputs,
+                request,
+                expected_manifest_hash=expected_manifest_hash,
+            )
+            generated = await self.provider.generate_round(
+                request,
+                request_key=request_key,
+            )
             if len(generated) != request.candidate_count:
                 raise RuntimeError(
                     "Image generator returned a different number of candidates than requested"
@@ -751,15 +1501,25 @@ class GeneratorService:
                     "model": request.model,
                 },
             }
-            await asyncio.to_thread(
+            completed = await asyncio.to_thread(
                 self.app_store.complete_provider_call,
                 request_key, response, owner_id=owner_id
             )
+            if not completed:
+                raise RuntimeError(
+                    "Image generator paid result could not close its provider audit"
+                )
             return candidates
         except Exception as exc:
             await asyncio.to_thread(
                 self.app_store.fail_provider_call,
-                request_key, type(exc).__name__, owner_id=owner_id
+                request_key,
+                type(exc).__name__,
+                owner_id=owner_id,
+                retryable=not isinstance(
+                    exc,
+                    (SourceManifestMismatchError, TypeError, ValueError),
+                ),
             )
             raise
         finally:

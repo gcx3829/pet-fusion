@@ -20,9 +20,14 @@ def compile_canonical_prompt(
         f"TEMPLATE VERSION: {CANONICAL_TEMPLATE_VERSION}",
         "ROLE OF INPUTS",
         "- Image 1 is the immutable original travel photograph and base scene.",
-        f"- Images 2..{reference_count + 1} show the same cat.",
+        (
+            f"- Images 2..{reference_count + 1} are identity references for the target pet "
+            "or pets. They may depict one animal from multiple views or multiple distinct "
+            "animals; infer identity grouping from visible evidence and the photographer's "
+            "direction without merging identities."
+        ),
         "TASK",
-        "Add that exact cat in the intended placement area indicated by the "
+        "Add the requested referenced pet or pets in the intended placement area indicated by the "
         "provided guidance mask.",
         "Follow the photographer's written direction for pose, facing, contact, "
         "and composition; do not infer a fixed pose from the placement metadata.",

@@ -24,7 +24,14 @@ from app.services.local_fix_service import (
 )
 from app.services.openai_critic_client import OfficialOpenAICriticProvider
 from app.services.openai_image_client import OfficialOpenAIImageEditsTransport
+from app.services.openai_prompt_refiner_client import OfficialOpenAIPromptRefinerProvider
 from app.services.planner_service import FeedbackPlannerService, PlannerProvider
+from app.services.prompt_refiner_service import (
+    DeterministicFakePromptRefiner,
+    PromptRefinerProvider,
+    PromptRefinerProxyBuilder,
+    PromptRefinerService,
+)
 from app.services.proxy_builder import CriticProxyBuilder
 from app.services.search_runner import SearchRunner
 from app.services.stop_policy import DeterministicStopPolicy
@@ -41,6 +48,7 @@ class AppContainer:
     export_service: ExportService
     fusion_service: FusionService
     local_fix_service: LocalFixService
+    prompt_refiner_service: PromptRefinerService
 
     @classmethod
     def build(
@@ -55,6 +63,8 @@ class AppContainer:
         planner_provider: PlannerProvider | None = None,
         planner_service: FeedbackPlannerService | None = None,
         local_fix_provider: LocalFixProvider | None = None,
+        prompt_refiner_provider: PromptRefinerProvider | None = None,
+        prompt_refiner_service: PromptRefinerService | None = None,
     ) -> AppContainer:
         if image_generator is None:
             if settings.fake_generator:
@@ -92,6 +102,38 @@ class AppContainer:
             quality=settings.openai_image_quality,
             size=(None if settings.fake_generator else settings.openai_image_size),
         )
+        resolved_prompt_refiner_service = prompt_refiner_service
+        if resolved_prompt_refiner_service is None:
+            resolved_prompt_refiner_provider = prompt_refiner_provider
+            if resolved_prompt_refiner_provider is None:
+                if settings.fake_prompt_refiner:
+                    resolved_prompt_refiner_provider = DeterministicFakePromptRefiner()
+                elif (
+                    settings.openai_api_key is None
+                    or not settings.openai_api_key.get_secret_value()
+                ):
+                    raise ConfigurationError(
+                        "OPENAI_API_KEY is required when FAKE_PROMPT_REFINER is disabled"
+                    )
+                else:
+                    live_prompt_refiner_provider: PromptRefinerProvider = (
+                        OfficialOpenAIPromptRefinerProvider(
+                            api_key=settings.openai_api_key.get_secret_value(),
+                            base_url=settings.openai_base_url,
+                            model=settings.openai_prompt_model,
+                            asset_store=asset_store,
+                            proxy_builder=PromptRefinerProxyBuilder(
+                                asset_store=asset_store,
+                            ),
+                        )
+                    )
+                    resolved_prompt_refiner_provider = live_prompt_refiner_provider
+            assert resolved_prompt_refiner_provider is not None
+            resolved_prompt_refiner_service = PromptRefinerService(
+                provider=resolved_prompt_refiner_provider,
+                app_store=app_store,
+                asset_store=asset_store,
+            )
         return cls(
             settings=settings,
             app_store=app_store,
@@ -109,6 +151,7 @@ class AppContainer:
                 app_store=app_store,
                 asset_store=asset_store,
             ),
+            prompt_refiner_service=resolved_prompt_refiner_service,
             search_runner=SearchRunner(
                 app_store=app_store,
                 generator_service=generator_service,
@@ -122,6 +165,7 @@ class AppContainer:
                     if planner_service is not None
                     else FeedbackPlannerService(provider=planner_provider)
                 ),
+                prompt_refiner_service=resolved_prompt_refiner_service,
             ),
         )
 

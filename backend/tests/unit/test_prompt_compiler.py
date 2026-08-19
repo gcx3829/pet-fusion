@@ -22,6 +22,9 @@ def test_round_directives_do_not_mutate_canonical_prompt_lineage() -> None:
         reference_count=2,
     )
     assert "provided guidance mask" in canonical_prompt
+    assert "one animal from multiple views or multiple distinct animals" in canonical_prompt
+    assert "without merging identities" in canonical_prompt
+    assert "show the same cat" not in canonical_prompt
     assert "normalized region" not in canonical_prompt
     assert "x=0.5000" not in canonical_prompt
     assert "y=0.5000" not in canonical_prompt

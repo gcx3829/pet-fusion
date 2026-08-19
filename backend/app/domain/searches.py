@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain.assets import AssetRef, PublicAssetRef
 from app.domain.candidates import CandidateRecord, CandidateResponse
 from app.domain.evaluations import CandidateEvaluation
+from app.domain.prompts import PromptHistoryEntry, PublicPromptHistoryEntry
 
 
 class SearchStatus(StrEnum):
@@ -63,24 +64,6 @@ class CreateSearchRequest(BaseModel):
         pattern=r"^ast_[0-9a-f]{32}$",
         description="Previously registered project-scoped Guidance Mask asset",
     )
-
-
-class PromptHistoryEntry(BaseModel):
-    """The exact bounded prompts used by one generation round."""
-
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    round_index: int = Field(ge=0)
-    canonical_prompt: str = Field(min_length=1, max_length=12_000)
-    canonical_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    generation_prompt: str = Field(min_length=1, max_length=16_000)
-    generation_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    canonical_template_version: str = Field(min_length=1, max_length=120)
-    active_directives: list[dict[str, object]] = Field(default_factory=list)
-    active_directives_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    human_feedback: str | None = Field(default=None, max_length=2000)
-    human_selected_candidate_id: str | None = Field(default=None, max_length=120)
-    tuned: bool = False
 
 
 class SearchRunRecord(BaseModel):
@@ -151,7 +134,7 @@ class SearchResponse(BaseModel):
     global_winner_id: str | None
     global_winner_score: float | None
     round_history: list[dict[str, object]]
-    prompt_history: list[PromptHistoryEntry]
+    prompt_history: list[PublicPromptHistoryEntry]
     active_directives: list[dict[str, object]]
     interrupt_payload: dict[str, object] | None
     stop_reason: str | None
@@ -224,7 +207,10 @@ class SearchResponse(BaseModel):
             global_winner_id=search.global_winner_id,
             global_winner_score=search.global_winner_score,
             round_history=search.round_history,
-            prompt_history=search.prompt_history,
+            prompt_history=[
+                PublicPromptHistoryEntry.from_internal(item)
+                for item in search.prompt_history
+            ],
             active_directives=search.active_directives,
             interrupt_payload=interrupt_payload,
             stop_reason=search.stop_reason,

@@ -22,9 +22,18 @@ from app.domain.evaluations import (
     StopAction,
     StopDecision,
 )
+from app.domain.prompts import (
+    PromptGenerationMode,
+    PromptVersion,
+    VisualAnchorRef,
+)
 from app.domain.searches import PlacementIntent, PromptHistoryEntry, SearchStatus
 from app.graphs.critic_subgraph import build_critic_subgraph
 from app.graphs.feedback_planner_subgraph import build_feedback_planner_subgraph
+from app.graphs.multimodal_prompt_subgraph import (
+    MultimodalPromptGraphServices,
+    build_multimodal_prompt_subgraph,
+)
 from app.graphs.reducers import empty_evaluation_bucket
 from app.graphs.state import SearchState, assert_checkpoint_safe
 from app.persistence.app_store import AppStore
@@ -43,10 +52,14 @@ from app.services.prompt_compiler import (
     compile_canonical_prompt,
     compile_generation_prompt,
 )
+from app.services.prompt_refiner_service import (
+    DeterministicFakePromptRefiner,
+    PromptRefinerService,
+)
 from app.services.proxy_builder import CriticProxyBuilder
 from app.services.stop_policy import DeterministicStopPolicy
 
-SEARCH_STATE_SCHEMA_VERSION = "search-state/v5"
+SEARCH_STATE_SCHEMA_VERSION = "search-state/v6"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +72,7 @@ class SearchGraphServices:
     candidate_ranker: DeterministicCandidateRanker | None = None
     stop_policy: DeterministicStopPolicy | None = None
     planner_service: FeedbackPlannerService | None = None
+    prompt_refiner_service: PromptRefinerService | None = None
 
 
 def _public_evaluation(evaluation: CandidateEvaluation, score: float) -> dict[str, object]:
@@ -70,6 +84,31 @@ def _public_evaluation(evaluation: CandidateEvaluation, score: float) -> dict[st
         "recommended_action": evaluation.recommended_action,
         "blocking_issue_ids": [issue.issue_id for issue in evaluation.blocking_issues],
         "summary": evaluation.summary,
+    }
+
+
+def _prompt_lineage_summary(state: SearchState) -> dict[str, object]:
+    """Redacted prompt lineage fields safe for round history/SSE payloads."""
+
+    version_payload = state.get("current_prompt_version")
+    if not isinstance(version_payload, dict):
+        return {}
+    version = PromptVersion.model_validate(version_payload)
+    return {
+        "prompt_version_id": version.prompt_version_id,
+        "prompt_version_hash": version.prompt_version_hash,
+        "based_on_prompt_version_id": version.based_on_prompt_version_id,
+        "generation_mode": version.generation_mode.value,
+        "refinement_mode": version.refinement_mode.value,
+        "visual_anchor_candidate_id": version.visual_anchor_candidate_id,
+        "prompt_model": version.prompt_model,
+        "generation_model": version.generation_model,
+        "prompt_schema_version": version.prompt_schema_version,
+        "prompt_template_version": version.prompt_template_version,
+        "generation_prompt_hash": version.generation_prompt_hash,
+        "canonical_prompt_hash": version.canonical_prompt_hash,
+        "provider_proposal_hash": version.provider_proposal_hash,
+        "active_directives_hash": version.active_directives_hash,
     }
 
 
@@ -100,6 +139,22 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
         proxy_builder=critic_proxy_builder,
         critic_provider=critic_service,
         candidate_ranker=candidate_ranker,
+    ).compile()
+    prompt_refiner_service = services.prompt_refiner_service or PromptRefinerService(
+        provider=DeterministicFakePromptRefiner(),
+        app_store=services.app_store,
+        asset_store=services.generator_service.asset_store,
+    )
+    # Compile the child without a checkpointer.  When this graph is compiled
+    # by SearchRunner the nested node inherits the parent SQLite checkpointer;
+    # the root graph therefore remains the single durable control plane.
+    prompt_refiner_graph = build_multimodal_prompt_subgraph(
+        MultimodalPromptGraphServices(
+            app_store=services.app_store,
+            prompt_refiner_service=prompt_refiner_service,
+            generation_model=services.generator_service.model,
+            lease_owner=services.lease_owner,
+        )
     ).compile()
 
     def fenced_update(
@@ -146,7 +201,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             return {"status": current.status.value}
         return {"status": SearchStatus.RUNNING.value}
 
-    async def compile_prompt(state: SearchState) -> dict[str, object]:
+    async def compile_legacy_prompt(state: SearchState) -> dict[str, object]:
         stopped = is_stopped(state["search_id"])
         if stopped is not None:
             return {"status": stopped.value}
@@ -218,6 +273,36 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             "prompt_history": prompt_history,
         }
 
+    async def compile_prompt(state: SearchState) -> dict[str, object]:
+        """Select the explicit multimodal child or legacy compatibility path.
+
+        A registered Guidance Mask opts a search into the Prompt Refiner
+        contract.  Placement-only historical/API requests retain the old
+        deterministic compiler so old rows and checkpoints remain readable;
+        they never silently invent a mask or candidate anchor.
+        """
+
+        stopped = is_stopped(state["search_id"])
+        if stopped is not None:
+            return {"status": stopped.value}
+        if state.get("guidance_mask_asset") is None:
+            legacy = await compile_legacy_prompt(state)
+            return {**legacy, "prompt_refiner_execution_mode": None}
+        if state["round_index"] == 0:
+            mode = "initial"
+        elif isinstance(state.get("human_selected_candidate_id"), str):
+            mode = "revision"
+        else:
+            mode = "local"
+        return {
+            "prompt_refiner_execution_mode": mode,
+            # The child constructs the request from these source references;
+            # clearing stale results prevents a resumed round from applying a
+            # prior provider proposal to a different target round.
+            "prompt_refiner_request": None,
+            "prompt_refiner_result": None,
+        }
+
     async def prepare_round(state: SearchState) -> dict[str, object]:
         current = services.app_store.get_search(state["search_id"])
         if current.status in {SearchStatus.CANCELLED, SearchStatus.ACCEPTED}:
@@ -255,6 +340,18 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             raise SourceManifestMismatchError(
                 "Checkpoint Guidance Mask differs from the immutable Search record"
             )
+        prompt_version: PromptVersion | None = None
+        visual_anchor: VisualAnchorRef | None = None
+        generation_mode = PromptGenerationMode.SOURCE_REBASE
+        if state.get("prompt_refiner_execution_mode") is not None:
+            current_prompt_payload = state.get("current_prompt_version")
+            if not isinstance(current_prompt_payload, dict):
+                raise SourceManifestMismatchError(
+                    "Search round is missing its applied PromptVersion"
+                )
+            prompt_version = PromptVersion.model_validate(current_prompt_payload)
+            generation_mode = prompt_version.generation_mode
+            visual_anchor = prompt_version.visual_anchor
         request = GenerationRequest(
             search_id=state["search_id"],
             source_manifest=manifest,
@@ -270,6 +367,20 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
                 services.generator_service.size
                 or f"{manifest.background.width}x{manifest.background.height}"
             ),
+            generation_mode=generation_mode,
+            prompt_version_id=(
+                prompt_version.prompt_version_id if prompt_version is not None else None
+            ),
+            prompt_version_hash=(
+                prompt_version.prompt_version_hash if prompt_version is not None else None
+            ),
+            parent_prompt_version_id=(
+                prompt_version.based_on_prompt_version_id
+                if prompt_version is not None
+                else None
+            ),
+            prompt_version=prompt_version,
+            visual_anchor=visual_anchor,
         )
         records = await services.generator_service.generate_round(
             request,
@@ -368,6 +479,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
             "stop_action": decision.action.value,
             "stop_reason": decision.reason,
         }
+        history_entry.update(_prompt_lineage_summary(state))
         round_history = [
             *(
                 item
@@ -807,6 +919,7 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     graph.add_node("prepare_round", prepare_round)
     graph.add_node("generate_candidates", generate_candidates)
     graph.add_node("critic_subgraph", critic_graph)
+    graph.add_node("multimodal_prompt_subgraph", prompt_refiner_graph)
     graph.add_node("rank_round", rank_round)
     graph.add_node("prepare_feedback_planner", prepare_feedback_planner)
     graph.add_node("feedback_planner", planner_graph)
@@ -815,7 +928,19 @@ def build_search_graph(services: SearchGraphServices) -> StateGraph[SearchState]
     graph.add_node("finalize_mock_round", finalize_mock_round)
     graph.add_edge(START, "initialize_search")
     graph.add_edge("initialize_search", "compile_canonical_prompt")
-    graph.add_edge("compile_canonical_prompt", "prepare_round")
+    graph.add_conditional_edges(
+        "compile_canonical_prompt",
+        lambda state: (
+            "multimodal_prompt_subgraph"
+            if state.get("prompt_refiner_execution_mode") is not None
+            else "prepare_round"
+        ),
+        {
+            "multimodal_prompt_subgraph": "multimodal_prompt_subgraph",
+            "prepare_round": "prepare_round",
+        },
+    )
+    graph.add_edge("multimodal_prompt_subgraph", "prepare_round")
     graph.add_edge("prepare_round", "generate_candidates")
     graph.add_edge("generate_candidates", "critic_subgraph")
     graph.add_edge("critic_subgraph", "rank_round")

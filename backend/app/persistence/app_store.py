@@ -100,9 +100,9 @@ class AppStore:
             # two audit columns. Version 11 adds project-scoped Guidance Mask
             # bindings and the two search lineage columns above. Version 12
             # removes the old global uniqueness constraint from content-addressed
-            # masks so identical bytes can be independently authorized by two
-            # projects. ``CREATE TABLE IF NOT EXISTS`` handles old databases with
-            # no Fusion or Guidance tables; these additive columns handle
+            # masks. Version 13 adds the Prompt Refiner result store. ``CREATE
+            # TABLE IF NOT EXISTS`` handles old databases with no Fusion,
+            # Guidance, or Prompt Refiner tables; these additive columns handle
             # databases created by earlier schema versions.
             fusion_columns = {
                 str(row["name"])
@@ -1319,8 +1319,8 @@ class AppStore:
             )
             row = connection.execute(
                 """
-                SELECT operation, search_id, status, response_json, lease_until,
-                       attempt_count
+                SELECT operation, search_id, status, request_json, response_json,
+                       lease_until, attempt_count
                 FROM provider_calls WHERE request_key = ?
                 """,
                 (request_key,),
@@ -1333,6 +1333,11 @@ class AppStore:
                 connection.rollback()
                 raise ConflictError(
                     "Provider request key belongs to a different operation or search"
+                )
+            if operation == "prompt_refine" and str(row["request_json"]) != request_json:
+                connection.rollback()
+                raise ConflictError(
+                    "Provider request key belongs to different request lineage"
                 )
             status = str(row["status"])
             claimed = False
@@ -1405,6 +1410,187 @@ class AppStore:
             return None
         response = json.loads(row["response_json"]) if row["response_json"] else None
         return str(row["status"]), response
+
+    def get_provider_call_record(self, request_key: str) -> dict[str, object] | None:
+        """Read one provider audit with its request lineage for safe replay.
+
+        The existing ``get_provider_call`` intentionally exposes only the
+        terminal status and response to legacy callers.  Prompt Refiner replay
+        also needs to compare the stored request fingerprint/lineage with the
+        current checkpoint input, so this narrow read model returns the
+        structured request payload as well.  It never returns secrets outside
+        whatever the caller already chose to persist in ``request_json``.
+        """
+
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT operation, search_id, status, request_json, response_json,
+                       attempt_count, error_json
+                FROM provider_calls WHERE request_key = ?
+                """,
+                (request_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        request = json.loads(row["request_json"])
+        response = json.loads(row["response_json"]) if row["response_json"] else None
+        error = json.loads(row["error_json"]) if row["error_json"] else None
+        return {
+            "operation": str(row["operation"]),
+            "search_id": str(row["search_id"]),
+            "status": str(row["status"]),
+            "request": request,
+            "response": response,
+            "attempt_count": int(row["attempt_count"]),
+            "error": error,
+        }
+
+    def complete_prompt_refiner_call(
+        self,
+        request_key: str,
+        result: Mapping[str, object],
+        response: Mapping[str, object],
+        *,
+        owner_id: str,
+    ) -> bool:
+        """Atomically persist a Prompt Refiner result and close its paid call.
+
+        ``provider_calls`` is intentionally a redacted idempotency/audit table.
+        Prompt text and the provider's structured plan are user-visible product
+        data kept in a separate table.  The result row and terminal provider
+        status must commit together: otherwise a process crash can leave a paid
+        result behind a stale ``running`` lease and cause a second provider call.
+        """
+
+        encoded = json.dumps(result, separators=(",", ":"), sort_keys=True)
+        response_json = json.dumps(response, separators=(",", ":"), sort_keys=True)
+        now = utcnow().isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            provider_row = connection.execute(
+                """
+                SELECT status, lease_owner FROM provider_calls
+                WHERE request_key = ?
+                """,
+                (request_key,),
+            ).fetchone()
+            if (
+                provider_row is None
+                or provider_row["status"] != "running"
+                or provider_row["lease_owner"] != owner_id
+            ):
+                connection.rollback()
+                return False
+            connection.execute(
+                """
+                INSERT INTO prompt_refiner_results(
+                    request_key, result_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(request_key) DO UPDATE SET
+                    result_json = excluded.result_json,
+                    updated_at = excluded.updated_at
+                """,
+                (request_key, encoded, now, now),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE provider_calls SET status = 'completed', response_json = ?,
+                    error_json = NULL, lease_owner = NULL, lease_until = NULL,
+                    updated_at = ?
+                WHERE request_key = ? AND lease_owner = ? AND status = 'running'
+                """,
+                (response_json, now, request_key, owner_id),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            connection.commit()
+        return True
+
+    def get_prompt_refiner_result(
+        self,
+        request_key: str,
+    ) -> dict[str, object] | None:
+        """Read one durable structured Prompt Refiner result, if present."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM prompt_refiner_results WHERE request_key = ?",
+                (request_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["result_json"])
+        if not isinstance(value, dict):
+            raise ConflictError("Prompt Refiner result payload is not an object")
+        return value
+
+    def find_prompt_refiner_result_by_prompt_version(
+        self,
+        *,
+        search_id: str,
+        prompt_version_id: str,
+    ) -> dict[str, object] | None:
+        """Resolve a completed PromptVersion from durable app data.
+
+        Prompt Refiner results remain intentionally small (one per authored
+        round), so parsing the bounded search result set avoids duplicating
+        mutable lineage columns beside the canonical structured payload.
+        """
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.result_json
+                FROM prompt_refiner_results AS r
+                JOIN provider_calls AS p ON p.request_key = r.request_key
+                WHERE p.search_id = ? AND p.operation = 'prompt_refine'
+                  AND p.status = 'completed'
+                ORDER BY p.updated_at DESC
+                """,
+                (search_id,),
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row["result_json"])
+            if not isinstance(payload, dict):
+                raise ConflictError("Prompt Refiner result payload is not an object")
+            prompt_version = payload.get("prompt_version")
+            if (
+                isinstance(prompt_version, Mapping)
+                and prompt_version.get("prompt_version_id") == prompt_version_id
+            ):
+                return payload
+        return None
+
+    def list_prompt_refiner_results(self, search_id: str) -> list[dict[str, object]]:
+        """Return completed structured Prompt Refiner results for one search.
+
+        This is used only to reconcile a checkpoint with durable prompt
+        lineage.  Local directive-only PromptVersions live in
+        ``search_runs.prompt_history`` and are intentionally not fabricated as
+        provider results.
+        """
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.result_json
+                FROM prompt_refiner_results AS r
+                JOIN provider_calls AS p ON p.request_key = r.request_key
+                WHERE p.search_id = ? AND p.operation = 'prompt_refine'
+                  AND p.status = 'completed'
+                ORDER BY p.updated_at
+                """,
+                (search_id,),
+            ).fetchall()
+        results: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(row["result_json"])
+            if not isinstance(payload, dict):
+                raise ConflictError("Prompt Refiner result payload is not an object")
+            results.append(payload)
+        return results
 
     def get_local_fix_result(self, *, search_id: str, fix_id: str) -> LocalFixResult:
         """Load one completed Local Fix result from the existing provider audit.
@@ -1564,16 +1750,23 @@ class AppStore:
         return cursor.rowcount == 1
 
     def fail_provider_call(
-        self, request_key: str, message: str, *, owner_id: str
+        self,
+        request_key: str,
+        message: str,
+        *,
+        owner_id: str,
+        retryable: bool = True,
     ) -> None:
+        status = "failed_retryable" if retryable else "failed_terminal"
         with self._connection() as connection:
             connection.execute(
                 """
-                UPDATE provider_calls SET status = 'failed_retryable', error_json = ?,
+                UPDATE provider_calls SET status = ?, error_json = ?,
                     lease_owner = NULL, lease_until = NULL, updated_at = ?
                 WHERE request_key = ? AND lease_owner = ? AND status = 'running'
                 """,
                 (
+                    status,
                     json.dumps({"message": message}, separators=(",", ":")),
                     utcnow().isoformat(),
                     request_key,

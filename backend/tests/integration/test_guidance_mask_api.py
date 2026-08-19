@@ -17,6 +17,10 @@ from app.domain.errors import SourceManifestMismatchError
 from app.graphs.state import assert_checkpoint_safe
 from app.persistence.app_store import AppStore
 from app.persistence.migrations import MIGRATION_VERSION
+from app.services.prompt_refiner_service import (
+    DeterministicFakePromptRefiner,
+    PromptRefinerError,
+)
 
 
 def _create_project(client: TestClient, project_payload) -> dict[str, object]:
@@ -56,6 +60,16 @@ def _oversized_png_header(*, width: int, height: int) -> bytes:
         + payload
         + struct.pack(">I", checksum)
     )
+
+
+class _TerminalPromptRefiner(DeterministicFakePromptRefiner):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def refine(self, request, proxies=None, *, request_key=None):
+        del request, proxies, request_key
+        self.calls += 1
+        raise ValueError("invalid prompt schema")
 
 
 def test_guidance_mask_is_project_bound_and_search_reference_is_immutable(
@@ -163,6 +177,15 @@ def test_guidance_mask_binding_rebases_unchanged_across_rounds_and_stays_referen
 
     assert second["round_index"] == 1
     assert len(fake_generator.requests) == 2
+    automatic_request = fake_generator.requests[1]
+    assert automatic_request.generation_mode.value == "source_rebase"
+    assert automatic_request.visual_anchor is None
+    assert automatic_request.prompt_version is not None
+    with sqlite3.connect(client.app.state.container.app_store.path) as connection:
+        prompt_calls = connection.execute(
+            "SELECT COUNT(*) FROM provider_calls WHERE operation = 'prompt_refine'"
+        ).fetchone()[0]
+    assert prompt_calls == 1
     assert all(
         request.guidance_mask is not None
         and request.guidance_mask.asset_id == mask["asset"]["asset_id"]
@@ -180,12 +203,159 @@ def test_guidance_mask_binding_rebases_unchanged_across_rounds_and_stays_referen
         for candidate in second["candidates"]
     )
 
+    stale_anchor = client.post(
+        f"/api/v1/searches/{search_id}/resume",
+        json={
+            "action": "continue_one_round",
+            "reviewed_round_index": 1,
+            "selected_candidate_id": first["candidates"][0]["candidate_id"],
+        },
+    )
+    assert stale_anchor.status_code == 409, stale_anchor.text
+    assert "currently reviewed round" in stale_anchor.json()["error"]["message"]
+
     checkpoint_seed = client.app.state.container.search_runner.initial_state(search_id)
     assert_checkpoint_safe(checkpoint_seed)
     serialized = json.dumps(checkpoint_seed, sort_keys=True)
     assert mask["asset"]["asset_id"] in serialized
     assert "data:image" not in serialized.lower()
     assert "iVBOR" not in serialized
+
+
+@pytest.mark.parametrize(
+    "feedback",
+    [None, "Keep this candidate's identity and improve the contact shadow."],
+)
+def test_guidance_selected_candidate_refines_from_that_raw_candidate(
+    client: TestClient,
+    project_payload,
+    search_payload,
+    fake_generator,
+    feedback: str | None,
+) -> None:
+    project = _create_project(client, project_payload)
+    project_id = str(project["project_id"])
+    mask = _upload_mask(client, project_id, _rgba_png(alpha=143)).json()
+    created = client.post(
+        f"/api/v1/projects/{project_id}/searches",
+        json={
+            **search_payload,
+            "candidate_count": 2,
+            "max_rounds": 2,
+            "guidance_mask_asset_id": mask["asset"]["asset_id"],
+        },
+        headers={"Idempotency-Key": "guidance-mask-selected-revision"},
+    )
+    assert created.status_code == 201, created.text
+    search_id = created.json()["search_id"]
+    first = client.get(f"/api/v1/searches/{search_id}").json()
+    selected = first["candidates"][1]
+    selected_id = selected["candidate_id"]
+    initial_prompt = first["prompt_history"][0]["generation_prompt"]
+    assert fake_generator.requests[0].prompt == initial_prompt
+
+    resume_payload: dict[str, object] = {
+        "action": "continue_one_round",
+        "reviewed_round_index": 0,
+        "selected_candidate_id": selected_id,
+    }
+    if feedback is not None:
+        resume_payload["human_feedback"] = feedback
+    resumed = client.post(
+        f"/api/v1/searches/{search_id}/resume",
+        json=resume_payload,
+    )
+    assert resumed.status_code == 200, resumed.text
+    second = client.get(f"/api/v1/searches/{search_id}").json()
+    assert second["status"] == "waiting_for_human"
+    assert len(fake_generator.requests) == 2
+
+    revision_request = fake_generator.requests[1]
+    assert revision_request.generation_mode.value == "candidate_anchored_rebase"
+    assert revision_request.visual_anchor is not None
+    assert revision_request.visual_anchor.candidate_id == selected_id
+    assert revision_request.prompt_version is not None
+    assert revision_request.prompt_version.visual_anchor_candidate_id == selected_id
+    assert revision_request.prompt_version.based_on_prompt_version_id == (
+        first["prompt_history"][0]["prompt_version_id"]
+    )
+    assert revision_request.prompt != initial_prompt
+
+    history = second["prompt_history"]
+    assert [item["round_index"] for item in history] == [0, 1]
+    assert history[0]["prompt_model"] == "deterministic-prompt-refiner/v1"
+    assert history[0]["generation_model"] == fake_generator.requests[0].model
+    assert history[0]["generation_model"] != history[0]["prompt_model"]
+    assert history[1]["prompt_model"] == "deterministic-prompt-refiner/v1"
+    assert history[1]["generation_model"] == fake_generator.requests[1].model
+    assert history[1]["generation_model"] != history[1]["prompt_model"]
+    assert history[1]["human_selected_candidate_id"] == selected_id
+    assert history[1]["based_on_prompt_version_id"] == history[0]["prompt_version_id"]
+    public_anchor = history[1]["visual_anchor"]
+    assert public_anchor["candidate_id"] == selected_id
+    assert public_anchor["raw_asset"]["asset_id"] == selected["asset_id"]
+    assert public_anchor["raw_asset"]["asset_url"] == selected["asset_url"]
+    assert "path" not in public_anchor["raw_asset"]
+    assert str(client.app.state.container.settings.data_dir) not in json.dumps(
+        history,
+        ensure_ascii=False,
+    )
+    round_history = second["round_history"]
+    assert round_history[1]["visual_anchor_candidate_id"] == selected_id
+
+    refiner_events = [
+        event
+        for event in client.app.state.container.app_store.list_events(search_id)
+        if event.type in {"prompt.refiner.started", "prompt.refiner.ready"}
+    ]
+    assert [event.type for event in refiner_events] == [
+        "prompt.refiner.started",
+        "prompt.refiner.ready",
+        "prompt.refiner.started",
+        "prompt.refiner.ready",
+    ]
+    assert all("generation_prompt" not in event.payload for event in refiner_events)
+    assert all("human_feedback" not in event.payload for event in refiner_events)
+
+
+def test_prompt_refiner_failure_stops_generation_without_image_provider_call(
+    client: TestClient,
+    project_payload,
+    search_payload,
+    fake_generator,
+) -> None:
+    terminal_provider = _TerminalPromptRefiner()
+    client.app.state.container.prompt_refiner_service.provider = terminal_provider
+    project = _create_project(client, project_payload)
+    project_id = str(project["project_id"])
+    mask = _upload_mask(client, project_id, _rgba_png(alpha=143)).json()
+    with pytest.raises(PromptRefinerError, match="terminally"):
+        client.post(
+            f"/api/v1/projects/{project_id}/searches",
+            json={
+                **search_payload,
+                "guidance_mask_asset_id": mask["asset"]["asset_id"],
+            },
+            headers={"Idempotency-Key": "guidance-mask-prompt-failure"},
+        )
+
+    # The failed background task still fences the search before re-raising to
+    # TestClient, so resolve its ID from the durable event table.
+    with sqlite3.connect(client.app.state.container.app_store.path) as connection:
+        row = connection.execute(
+            "SELECT search_id FROM search_runs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    failed = client.get(f"/api/v1/searches/{row[0]}").json()
+    assert failed["status"] == "failed"
+    assert terminal_provider.calls == 1
+    assert fake_generator.requests == []
+    events = client.app.state.container.app_store.list_events(row[0])
+    assert [event.type for event in events[-2:]] == [
+        "prompt.refiner.failed",
+        "search.failed",
+    ]
+    assert "message" not in events[-2].payload
 
 
 def test_guidance_mask_checkpoint_replay_rejects_a_changed_search_binding(

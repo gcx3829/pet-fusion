@@ -206,11 +206,18 @@ async def resume_search(
                 f"Reviewed round {reviewed_round_index} is stale; current round is "
                 f"{search.round_index}"
             )
-        if request.selected_candidate_id is not None and not any(
-            candidate.candidate_id == request.selected_candidate_id
-            for candidate in search.candidates
-        ):
-            raise ConflictError("Selected candidate is not a candidate in this search")
+        if request.selected_candidate_id is not None:
+            selected_matches = [
+                candidate
+                for candidate in search.candidates
+                if candidate.candidate_id == request.selected_candidate_id
+            ]
+            if len(selected_matches) != 1:
+                raise ConflictError("Selected candidate is not a candidate in this search")
+            if selected_matches[0].round_index != reviewed_round_index:
+                raise ConflictError(
+                    "Selected candidate must belong to the currently reviewed round"
+                )
         if not container.app_store.queue_next_round(
             search_id,
             reviewed_round_index=reviewed_round_index,
