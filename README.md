@@ -22,7 +22,8 @@
 ```text
 原始旅游照 + 1～5 张宠物参考图 + Guidance Mask 画笔 + 摄影师文字意图
                     ↓
-             Canonical Prompt
+       多模态 Prompt Refiner（Round 0）
+       自然语言 → professional prompt
                     ↓
           GPT Image 2 生成候选组
                     ↓
@@ -30,16 +31,22 @@
                     ↓
         确定性排名 + 历史 Global Winner
                     ↓
-       达标则接受；未达标则生成少量 Directive
+   达标则接受；自动无选中轮只应用 bounded directives
+                    ↘
+      用户选 raw candidate + 自然语言反馈
                     ↓
-             从原始素材重新生成
+       Prompt Refiner（revision）生成 professional prompt
+                    ↓
+       immutable source + selected raw visual reference rebase
                     ↓
         用户可选 Fusion Mask + 羽化回贴
                     ↓
       回贴到原始分辨率并恢复 ICC / EXIF
 ```
 
-自动搜索不会把上一轮候选继续作为下一轮底图。上一轮图片只用于评审；每一轮都重新基于不可变的原始照片和原始参考图生成，从而避免连续 image-to-image 带来的纹理、身份和背景劣化。
+自动 Critic/Planner 搜索永远从 immutable source 重新生成，绝不自动把上一轮候选作为图像输入；无人工选中时只在本地应用最多 3 条 bounded directives。人工明确选择当前轮 raw candidate 并继续时，下一轮仍以 immutable original 作为 image[0] 和 Guidance Mask base，把 selected raw 仅作为 image[1] visual reference，称为 `candidate_anchored_rebase`，不是 candidate edit。Fusion 和 Local Fix 都不进入 Search。
+
+Round 0 与人工 revision 都经过多模态 Prompt Refiner：它读取底图、宠物参考、Guidance Mask、用户自然语言（revision 还读取 selected raw、对应 Critic 结果和反馈），输出经过本地校验的专业 Prompt。Critic、Ranker、人工审片仍只看 raw candidate。
 
 ## MVP 范围
 
@@ -68,7 +75,7 @@
 ## 技术方向
 
 ```text
-frontend/   React + TypeScript + Vite，负责项目、Placement Canvas、候选和时间线
+frontend/   React + TypeScript + Vite，负责素材、Guidance 画布、Raw 审片、时间线和 Fusion
 backend/    FastAPI + Python，负责 API、资产、OpenAI 调用、图像处理和导出
 LangGraph   显式 StateGraph，负责搜索状态、Critic、Planner、排名和恢复
 SQLite      MVP 的业务数据与 LangGraph checkpoint
@@ -93,6 +100,7 @@ OpenAI      GPT Image 2 + GPT-5.6 系列多模态模型
 → worker 执行显式 SearchGraph
    ├─ CriticSubgraph：候选独立盲评
    └─ FeedbackPlannerSubgraph：只把 selected blocking issue 转成有界 directive
+   └─ MultimodalPromptSubgraph：初始/人工 revision 专业 Prompt
 → 确定性 Ranker、历史 Global Winner、停止策略与 immutable-source rebase
 → SQLite checkpoint 与业务事件持久化
 → REST / SSE 返回候选
@@ -108,12 +116,12 @@ Local Fix 已实现为独立、一次一调用的 LangGraph 后端图、服务�
 
 ```text
 backend/   FastAPI、Search/Critic/Planner/Local Fix 显式 LangGraph、SQLite、内容寻址资产、可选 Fusion 与导出
-frontend/  React、TypeScript、Vite、TanStack Query、Placement Canvas、候选审片和搜索时间线
+frontend/  React、TypeScript、Vite、TanStack Query、PS 风格 Guidance/Fusion 画布、Raw 审片和照片时间线
 data/      本地业务数据库、checkpoint 和项目资产；除 .gitkeep 外不进入 Git
 scripts/   联合开发启动与确定性完整测试脚本
 ```
 
-后端请求只在数据库中保存结构化状态和资产引用；图片字节保存在资产目录，不写入 LangGraph checkpoint。搜索生成入口接收固化后的 source manifest，不提供上一轮 candidate 作为下一轮输入的参数。
+后端请求只在数据库中保存结构化状态和资产引用；图片字节保存在资产目录，不写入 LangGraph checkpoint。自动搜索生成入口接收固化后的 source manifest；人工 revision 才会显式携带已校验的 selected raw visual anchor，且 image[0] 仍是不可变原片。
 
 ## 本地启动
 
@@ -177,7 +185,7 @@ pnpm dev
 ./scripts/test.sh
 ```
 
-该脚本强制使用 fake generator、fake Critic，并关闭 live smoke 开关；不会执行付费 API 调用。它依次运行：
+该脚本强制使用 fake generator、fake Critic、fake Prompt Refiner，并关闭 live smoke 开关；不会执行付费 API 调用或读取真实凭据。它依次运行：
 
 ```text
 ruff → mypy → pytest → TypeScript typecheck → Vitest → Vite production build
@@ -200,17 +208,18 @@ ruff → mypy → pytest → TypeScript typecheck → Vitest → Vite production
 ```dotenv
 FAKE_GENERATOR=1
 FAKE_CRITIC=1
+FAKE_PROMPT_REFINER=1
 RUN_OPENAI_LIVE_TESTS=0
 RUN_INLINE=0
 OPENAI_API_KEY=
 OPENAI_BASE_URL=
 ```
 
-默认 `FAKE_GENERATOR=1` 且 `FAKE_CRITIC=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把 `FAKE_GENERATOR` 设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图、Guidance Mask 和 1～5 张参考图；把 `FAKE_CRITIC` 设为 `0` 后，会通过官方 Responses API 的 Pydantic Structured Outputs 独立评价每张 raw candidate。两个开关可分别启用。
+默认 `FAKE_GENERATOR=1`、`FAKE_CRITIC=1` 且 `FAKE_PROMPT_REFINER=1`，测试和日常开发不会读取或调用真实 OpenAI 凭据。把 `FAKE_GENERATOR` 设为 `0` 后，后端会通过官方 Image API 的 `images.edit` 使用不可变背景图、Guidance Mask 和 1～5 张参考图；把 `FAKE_CRITIC` 设为 `0` 后，会通过官方 Responses API 的 Pydantic Structured Outputs 独立评价每张 raw candidate；把 `FAKE_PROMPT_REFINER` 设为 `0` 后，会通过同一 Responses Structured Outputs 边界，将多模态输入转为结构化 professional prompt plan。三个开关彼此独立。
 
-`RUN_OPENAI_LIVE_TESTS` 不参与应用 provider 选择，只为未来独立的 opt-in 自动 live test 预留；手工工作台验证仍由两个 `FAKE_*` 开关明确控制。默认测试脚本和 pytest harness 会把它保持为 `0`。
+`RUN_OPENAI_LIVE_TESTS` 不参与应用 provider 选择，只为未来独立的 opt-in 自动 live test 预留；手工工作台验证仍由三个 `FAKE_*` 开关明确控制。默认测试脚本和 pytest harness 会把它保持为 `0`。
 
-`OPENAI_BASE_URL` 是可选的、仅后端使用的 SDK base URL：留空即走官方 OpenAI 端点；使用中转站时，必须由你确认它同时兼容 Image edits 与 Responses Structured Outputs。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64、endpoint 原文或完整 prompt。当前 Planner 仍是确定性离线实现，`OPENAI_PLANNER_MODEL` 和 `OPENAI_CRITIC_ESCALATION_MODEL` 仅保留为实施指导中的预留配置，尚不会触发调用。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
+`OPENAI_BASE_URL` 是可选的、仅后端使用的 SDK base URL：留空即走官方 OpenAI 端点；中转站兼容性必须分别验证 Image edits、Critic Responses Structured Outputs 和 Prompt Refiner Responses Structured Outputs，任何一项成功都不能推断其他能力已验证。本轮只记录代码路径与离线契约，不声称已完成真实 provider/live 验证。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64、endpoint 原文或完整用户 prompt。当前 Planner 仍是确定性离线实现，`OPENAI_PLANNER_MODEL` 和 `OPENAI_CRITIC_ESCALATION_MODEL` 仅保留为实施指导中的预留配置，尚不会触发调用。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
 
 不执行真实调用的配置检查、以及明天可手工执行的一次低成本 live smoke 步骤见 [`docs/QA_AND_LIVE_SMOKE.md`](docs/QA_AND_LIVE_SMOKE.md)。
 
@@ -221,14 +230,14 @@ OPENAI_BASE_URL=
 1. `POST /projects`：multipart 上传背景图和 `cat_references`；
 2. `POST /projects/{project_id}/searches`：提交搜索选项；旧 `placement` 字段仍为 API 兼容字段，提供 Guidance Mask 时位置由画笔决定、姿态与朝向由 photographer prompt 决定；必须携带稳定的 `Idempotency-Key` 请求头，同一项目、同一 key、同一请求会返回原搜索；
 3. `GET /searches/{search_id}`：读取搜索状态和候选；
-4. `GET /searches/{search_id}/events`：通过 SSE 接收持久化时间线；
+4. `GET /searches/{search_id}/events`：通过 SSE 接收持久化时间线；Prompt Inspector 相关事件为 `prompt.refiner.started`、`prompt.refiner.ready` 和 `prompt.refiner.failed`，事件只含轮次、模式、版本/哈希等安全摘要，不携带完整 prompt、用户反馈或图片字节；
 5. `GET /assets/{asset_id}`：读取后端校验过的图片资产。
-6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、接受指定候选（`action=accept_candidate` + `selected_candidate_id`）、继续一轮或取消；继续时提交 `reviewed_round_index`，并可附带 `selected_candidate_id` 与 `human_feedback`，相同轮次和相同内容的网络重试会幂等返回当前状态；`GET /searches/{search_id}` 会返回每张候选的 Critic 维度、问题和 ranker 分数，以及 `prompt_history`（首轮初始 prompt、每轮调优 prompt、指令与哈希）；
+6. `POST /searches/{search_id}/resume`：对待人工确认的搜索执行接受历史 Global Winner、接受指定候选（`action=accept_candidate` + `selected_candidate_id`）、继续一轮或取消；继续时提交 `reviewed_round_index`，并可附带 `selected_candidate_id` 与 `human_feedback`，相同轮次和相同内容的网络重试会幂等返回当前状态。带 `selected_candidate_id` 的 `continue_one_round` 才会启动 candidate-anchored rebase；没有选中候选时只应用本地 bounded directives。`GET /searches/{search_id}` 返回每张候选的 Critic 维度、问题和 ranker 分数，以及 Prompt Inspector 使用的 `prompt_history`：`prompt_version_id/hash`、round/refinement/generation mode、parent version、prompt/generation model、canonical/generation prompt 与 hash、professional prompt plan、active directives 与 hash、`visual_anchor`、用户反馈/选中候选和 `tuned`。公开 projection 不含服务器路径；
 7. `POST /searches/{search_id}/export`：只导出已接受搜索的历史 Global Winner，可选 PNG/JPEG、JPEG 质量与 ICC/EXIF 复制策略；
 8. `GET /searches/{search_id}/exports/{export_key}`：读取幂等、内容寻址的导出记录。
 9. `POST /searches/{search_id}/local-fixes`：对已接受搜索的历史候选（省略 `candidate_id` 时为 Global Winner）执行一次 isolated Local Fix；mask 可为内部 PNG asset ID 或结构化 full-resolution box，结果包含可重放 `request_key`；
 10. `GET /searches/{search_id}/local-fixes/{fix_id}`：读取 SQLite provider-call audit 中的 Local Fix 结果。
-11. `POST /projects/{project_id}/guidance-masks`：注册同尺寸 RGBA PNG Guidance Mask；Search 启动请求可携带 `guidance_mask_asset_id`。前端画笔编辑、预览和撤销/重做均为本地操作，同一 project + document hash 的重试只上传一次；未自定义时继续使用 placement fallback。Guidance Mask 是软引导而非像素锁，Search 启动后锁定。
+11. `POST /projects/{project_id}/guidance-masks`：注册同尺寸 RGBA PNG Guidance Mask；Search 启动请求可携带 `guidance_mask_asset_id`。前端画笔编辑、预览和撤销/重做均为本地操作，同一 project + document hash 的重试只上传一次；当前工作台要求至少绘制一笔后才能启动 Search。后端仍能读取旧 placement-only 请求作为 API/历史数据兼容，但新工作台不再提供位置框、姿态或朝向控件。Guidance Mask 是软引导而非像素锁，Search 启动后锁定。
 12. `POST /searches/{search_id}/fusion-masks`：将同尺寸 RGBA PNG alpha mask 上传并绑定到已接受搜索；`POST /searches/{search_id}/fusions`：以矩形或已绑定 alpha mask + 羽化生成独立 Fusion 预览；`GET /searches/{search_id}/fusions/{fusion_key}`：幂等读取 Fusion 结果。Fusion 不改写 raw，也不回流 Critic/Search。
 
 浏览器在开发模式下通过 Vite 的 `/api` 代理访问后端，因此不会接触服务端密钥。
@@ -236,10 +245,9 @@ OPENAI_BASE_URL=
 
 ## 当前限制
 
-- 默认仍使用确定性的 mock generator；`FAKE_GENERATOR=0` 时真实 GPT Image 2 provider 路径已接通，但尚未用真实凭据或中转站完成联调；
-- Critic 默认仍为离线确定性实现；`FAKE_CRITIC=0` 的 GPT-5.6 Terra Responses Structured Outputs 路径已接通但尚未用真实凭据或中转站完成联调。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
+- 默认仍使用确定性的 mock generator、Critic 和 Prompt Refiner；`FAKE_GENERATOR=0`、`FAKE_CRITIC=0`、`FAKE_PROMPT_REFINER=0` 的官方 SDK 代码路径已接通，但本轮不声称已完成真实 provider/live 验证。中转站必须分别验证 Image edits、Critic Responses Structured Outputs 与 Prompt Refiner Responses Structured Outputs；Image edits 成功不能推断 Responses 能力。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
 - raw-first Search/Critic/人工接受、Guidance Mask、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Fusion Mask 是用户显式触发的独立融合层，后端提供 search-scoped alpha mask 上传与矩形/PNG alpha + 羽化 API，前端提供 Fusion 预览编辑器；旧 Composite Floor 资产仅为兼容 Local Fix、导出和历史 SQLite 数据保留，不作为 Search/Critic 默认图像；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
-- 前端已覆盖首个 Search 工作流、Critic 分数/问题展示和人工候选选择；仍不是通用节点编辑器，也暂不包含 Local Fix 与导出操作体验。
+- 前端已覆盖素材分配、Guidance 画笔、Search、Critic 分数/问题、Timeline 唯一选片控制、人工接受、Fusion 画笔与融合结果的全尺寸 PNG 直接下载。Local Fix 尚无前端入口；生产 Export API 的 JPEG/PNG、质量、ICC/EXIF 策略也尚未做成完整导出面板。
 
 这些限制是实施指导中分阶段交付的结果，不是对非协商架构约束的替代；后续真实 provider、自动多轮和局部修复仍必须遵守 immutable-source rebase、幂等调用、PNG lineage、历史最佳和最大修复深度 2 等规则。

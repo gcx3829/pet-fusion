@@ -15,6 +15,7 @@ UV_CACHE_DIR=/tmp/pet-fusion-uv-cache ./scripts/test.sh
 ```dotenv
 FAKE_GENERATOR=1
 FAKE_CRITIC=1
+FAKE_PROMPT_REFINER=1
 RUN_OPENAI_LIVE_TESTS=0
 ```
 
@@ -24,8 +25,11 @@ RUN_OPENAI_LIVE_TESTS=0
 
 - SearchGraph 的 CriticSubgraph 与 FeedbackPlannerSubgraph 均以显式嵌套图存在；
 - Local Fix 只能经过一次性的 `resolve → apply → finalize` 路径，不能回到自动 Search；
+- 自动 Critic/Planner 无 selection 轮保持 source-only：本地 apply bounded directives，不把 candidate 作为图像输入；人工明确选中当前 raw candidate 后，selected raw 只作为 image[1] visual reference，image[0]/Guidance Mask 仍是 immutable source；
+- MultimodalPromptSubgraph 存在：Round 0/人工 revision 产出 professional PromptVersion，人工 anchor 与 Critic evaluation、parent version、feedback 绑定；Fusion/Local Fix 不进入 Search；
 - checkpoint guard 接受资产引用、拒绝图像 bytes 和 `data:image` 数据；
-- fake/live generator 与 Critic 开关在构造期不请求网络，且公共 health/OpenAPI 不泄露 API key；
+- fake/live generator、Critic 和 Prompt Refiner 开关在构造期不请求网络，且公共 health/OpenAPI 不泄露 API key；
+- PromptHistory public projection 不泄露服务器内部路径；Prompt Refiner SSE started/ready/failed 不携带完整 prompt、用户反馈或图片 Base64；
 - Export 的创建和读取路由保持显式、版本化的 API 合约。
 
 已有更细的集成测试继续覆盖 immutable-source rebase、provider idempotency、Critic reducer、Local Fix 深度上限、可选 Fusion Mask 的 search-scoped alpha/矩形与像素精确性、JPEG/PNG 导出和 metadata 回贴。
@@ -43,6 +47,7 @@ cp .env.example .env
 ```dotenv
 FAKE_GENERATOR=0
 FAKE_CRITIC=0
+FAKE_PROMPT_REFINER=0
 RUN_INLINE=0
 OPENAI_API_KEY=<仅保存在后端本机环境的密钥>
 
@@ -50,16 +55,18 @@ OPENAI_API_KEY=<仅保存在后端本机环境的密钥>
 OPENAI_BASE_URL=
 
 # 若使用你管理的 OpenAI-compatible 中转站，改为其 SDK base URL，例如：
-# OPENAI_BASE_URL=https://<relay-host>/v1
+# OPENAI_BASE_URL=https://<relay-sdk-base-url>
 ```
 
-`RUN_OPENAI_LIVE_TESTS` 目前不参与应用 provider 选择，保持 `0` 即可；它只为未来独立的 opt-in 自动 live test 预留。手工 smoke 是否调用 provider 完全由上面的 `FAKE_GENERATOR` / `FAKE_CRITIC` 决定。
+按中转站提供的 SDK base URL 原样填写；应用只去除末尾斜杠，不会自动追加 `/v1`。
+
+`RUN_OPENAI_LIVE_TESTS` 目前不参与应用 provider 选择，保持 `0` 即可；它只为未来独立的 opt-in 自动 live test 预留。手工 smoke 是否调用 provider 完全由上面的三个 `FAKE_*` 开关决定。默认测试永远把三个开关强制为 `1`，不会读取真实 key/base URL。
 
 配置检查不会调用 provider，也不会打印密钥：
 
 ```bash
 cd backend
-uv run --locked --env-file ../.env python -c 'from app.config import Settings; s = Settings(); print({"fake_generator": s.fake_generator, "fake_critic": s.fake_critic, "has_api_key": bool(s.openai_api_key and s.openai_api_key.get_secret_value()), "base_url_configured": bool(s.openai_base_url)})'
+uv run --locked --env-file ../.env python -c 'from app.config import Settings; s = Settings(); print({"fake_generator": s.fake_generator, "fake_critic": s.fake_critic, "fake_prompt_refiner": s.fake_prompt_refiner, "has_api_key": bool(s.openai_api_key and s.openai_api_key.get_secret_value()), "base_url_configured": bool(s.openai_base_url)})'
 ```
 
 启动 API、独立 worker 和前端：
@@ -69,23 +76,29 @@ cd ..
 ./scripts/dev.sh
 ```
 
-只有在工作台提交搜索后才会调用 provider。首次实际 smoke 建议只提交一个小尺寸背景、1 张参考图、`candidate_count=1`、`max_rounds=1`，并在结果出现后停止；不要把默认测试脚本改成 live 调用。
+只有在工作台提交搜索后才会调用 provider。首次实际 smoke 建议只提交一个小尺寸背景、1 张参考图、`candidate_count=1`、`max_rounds=1`，并在结果出现后停止；不要把默认测试脚本改成 live 调用。本仓库本轮只验证离线契约，不声称已完成真实 provider/live 验证。
 
-`OPENAI_BASE_URL` 同时传给 Image edits 和 Critic Responses 客户端。因此中转站至少要兼容：
+`OPENAI_BASE_URL` 同时传给 Image edits、Critic Responses 和 Prompt Refiner Responses 客户端。中转站兼容性必须逐项独立验证，至少要分别确认：
 
 - `images.edit` 的多 PNG 输入与 PNG 输出；
-- Responses API 的 Pydantic Structured Outputs；
+- Critic Responses API 的 Pydantic Structured Outputs；
+- Prompt Refiner Responses API 的 Pydantic Structured Outputs 与视觉输入；
 - 返回可审计 request ID/usage 时的稳定响应形状。
 
-若只想先隔离验证一个 provider，可保留另一个 fake 开关为 `1`。Planner 目前没有 live transport，仍使用确定性本地规划，不会因为设置 `OPENAI_PLANNER_MODEL` 而产生请求。
+Image edits 和 Prompt Refiner 的官方 SDK 请求会携带由本地 lineage 计算的
+`Idempotency-Key`。中转站是否真正尊重该 header 仍属于独立兼容性验证项，
+不能仅因为请求成功就认定崩溃重放不会重复计费。
 
-完成验证后，将 `FAKE_GENERATOR` 和 `FAKE_CRITIC` 恢复为 `1`，再运行完整离线套件。
+若只想先隔离验证一个 provider，可保留其他 fake 开关为 `1`。Planner 目前没有 live transport，仍使用确定性本地规划，不会因为设置 `OPENAI_PLANNER_MODEL` 而产生请求。`OPENAI_PROMPT_MODEL` 只控制 Prompt Refiner 的 live model，不是 generator 或 Critic model。
+
+完成验证后，将 `FAKE_GENERATOR`、`FAKE_CRITIC` 和 `FAKE_PROMPT_REFINER` 恢复为 `1`，再运行完整离线套件。
 
 ## 当前实现边界与后续基准
 
 | 领域 | 当前状态 | 仍需人工/后续实现 |
 | --- | --- | --- |
 | 自动 Search | 显式 LangGraph、Critic/Planner 子图、Ranker、Global Winner、rebase、checkpoint | 真实凭据联调、生产队列与跨主机协调 |
+| Prompt Refiner | 默认 deterministic fake；Responses Structured Outputs adapter 与 `OPENAI_PROMPT_MODEL` 配置 | 真实模型/中转站兼容性需独立、显式 smoke |
 | Critic / Planner | fake Critic 与可选 live Critic transport；确定性 Planner policy | GPT-5.6 Luna Planner transport、Sol escalation |
 | 背景保护 / 导出 | 用户 Fusion Mask、原始分辨率回贴、PNG/JPEG、ICC/EXIF 尽力保留、Export API | 前端 Fusion/导出体验与真实摄影文件集验证 |
 | Local Fix | 独立后端图、tight mask、0→2 深度保护、SQLite 幂等回退与 FastAPI route | 真实 edit transport、前端入口 |

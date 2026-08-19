@@ -86,7 +86,7 @@ Original + References → Candidate Round 1
 Original + References → Candidate Round 2
 ```
 
-上一轮候选只用于 Critic 和人工审片；下一轮始终从原始素材重新生成。Critic、Ranker、Global Winner 和人工接受都以 raw candidate 为准，不以本地融合后的派生图为准。
+这条规则针对自动搜索：上一轮候选只用于 Critic 和人工审片；自动下一轮始终从原始素材重新生成。人工明确选择 raw candidate 并继续时，selected raw 可以额外作为 image[1] visual reference，但 image[0] 仍是原始素材。Critic、Ranker、Global Winner 和人工接受都以 raw candidate 为准，不以本地融合后的派生图为准。
 
 ### 4.4 Critic 不是最终裁判
 
@@ -116,6 +116,12 @@ GPT Image 2 的 Guidance Mask 只负责告诉模型应关注的编辑区域。Se
 融合范围，可以在接受候选后单独创建 Fusion Mask（矩形或 alpha mask + 羽化），Fusion 只
 影响预览和导出，不修改 raw candidate，也不回流到 Critic 或下一轮 Search。
 
+自动搜索与人工 revision 的输入边界不同，但都保留 immutable source：
+
+- 自动 Critic/Planner 轮没有人工选中时，下一轮只把原始底图、原始宠物参考、Guidance Mask 和本地 bounded directives 交给生成器；任何历史 candidate 都不作为图像输入；
+- 用户明确选择当前轮的 raw candidate 并继续时，下一轮仍以 immutable original 作为 image[0] 与 Guidance Mask base，将 selected raw 作为 image[1] 的 visual reference，称为 `candidate_anchored_rebase`，不是对 candidate 的连续 edit；
+- Round 0 和人工 revision 均先由多模态 Prompt Refiner 读取图片与自然语言，产出结构化、可审计的 professional prompt；Fusion 和 Local Fix 都不进入 Search。
+
 ## 5. 新的产品与架构命题
 
 当前项目的核心命题是：
@@ -128,11 +134,13 @@ GPT Image 2 的 Guidance Mask 只负责告诉模型应关注的编辑区域。Se
 |---|---|
 | 宠物身份和目标姿态的视觉重建 | GPT Image 2 |
 | 光线、透视、毛发和环境融合 | GPT Image 2 |
+| 自然语言与多图理解、专业 Prompt 结构化 | 多模态 Prompt Refiner（Responses Structured Outputs） |
 | Critic、Prompt Planner、轮次控制 | LangGraph |
 | 候选排名和 Global Winner | 确定性业务逻辑，由 LangGraph 编排 |
 | Guidance/Fusion Mask、裁切、可选像素回贴 | 本地 Python 图像服务 |
 | 原始分辨率、ICC、EXIF | 本地导出服务 |
-| 位置、尺寸、姿态意图 | 前端 Placement Canvas |
+| 编辑关注区域与大致位置/尺寸 | 前端 PS 风格 Guidance Mask 画布 |
+| 姿态、朝向、接触关系和摄影意图 | 用户 Prompt |
 | 最终接受与审美判断 | 用户 |
 
 ## 6. 目标用户
@@ -149,7 +157,7 @@ GPT Image 2 的 Guidance Mask 只负责告诉模型应关注的编辑区域。Se
 聊天式产品已经能给出很好的单次结果，但专业工作流仍需要：
 
 - 固定管理一只宠物的参考集；
-- 精确表达位置和尺寸；
+- 用 Guidance Mask 表达编辑关注区域和大致位置/尺寸；
 - 一次比较多个候选；
 - 自动审查同一套摄影质量指标；
 - 保存每轮 Prompt、模型和成本；
@@ -165,9 +173,8 @@ GPT Image 2 的 Guidance Mask 只负责告诉模型应关注的编辑区域。Se
 
 1. 旅行照；
 2. 宠物参考图；
-3. 位置框；
-4. 姿态与朝向；
-5. 一句补充意图。
+3. 在原片上绘制 Guidance Mask；
+4. 用一句 Prompt 描述姿态、朝向、接触关系和其他摄影意图。
 
 高级参数应隐藏在可展开区域，不要求普通用户理解模型节点。
 

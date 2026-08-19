@@ -38,6 +38,14 @@ General ideas may be retained, especially crop mapping, composite-floor protecti
 - Search/Critic/user review are raw-first. Background protection is an optional,
   user-triggered Fusion Mask operation; it must not be applied automatically to
   Search candidates or used as the Critic's image.
+- The automatic Critic/Planner loop remains source-only: it may apply bounded
+  local directives, but it never feeds a previous candidate into the next
+  generation. If a user explicitly selects a current-round raw candidate and
+  continues, that raw asset may be passed as image[1] as a visual reference
+  only; image[0] and the Guidance Mask remain the immutable source/base. This
+  is a `candidate_anchored_rebase`, not candidate editing. Initial and human
+  revision prompts are produced by the multimodal Prompt Refiner; Fusion and
+  Local Fix stay outside Search.
 - Local Fix is separate from Search and has maximum generation depth 2.
 - The OpenAI API key stays on the backend.
 - Use the official OpenAI API directly.

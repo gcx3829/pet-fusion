@@ -24,8 +24,8 @@
 1. **GPT Image 2 是唯一主图像生成器。** 不使用 ComfyUI、本地扩散模型、Depth Anything、规则调色或规则阴影作为活跃生成链路。
 2. **LangGraph 是搜索控制平面。** Critic、反馈归一化、Prompt Planner、Ranker、Global Winner、停止策略、失败恢复和人工中断都由显式 `StateGraph` 编排。
 3. **不要使用通用 ReAct Agent 或黑盒 prebuilt agent 代替工作流。** 这是固定状态、固定边和确定性策略的搜索图。
-4. **原始旅游照、宠物参考图和用户 placement intent 是 immutable source。** 自动搜索每一轮必须重新基于这些素材生成。
-5. **自动搜索阶段禁止 `candidate -> edit -> candidate -> edit`。** 上一轮候选只用于 Critic，不得成为下一轮生成输入。
+4. **原始旅游照、宠物参考图、Guidance Mask 和用户摄影意图是 immutable source。** 自动搜索每一轮必须重新基于这些素材生成；Round 0 与人工 revision 的专业 Prompt 由多模态 Prompt Refiner 生成。
+5. **自动搜索阶段禁止 `candidate -> edit -> candidate -> edit`。** 无人工选中时上一轮候选只用于 Critic，不得成为下一轮生成输入；只有用户明确选择当前轮 raw candidate 并继续时，才允许把它作为 image[1] 的 visual reference。image[0] 与 Guidance Mask 仍来自 immutable source，这条路径叫 `candidate_anchored_rebase`，不是 candidate edit。
 6. **候选到候选编辑只允许出现在单独的 Local Fix Graph 中，且深度最多为 2。** 第三次修复必须从原始素材重生成或由用户接受现状。
 7. **所有生成链路中间资产使用 PNG。** JPEG/WebP 只能作为 UI 缩略图或最终交付格式，不能回流为生成输入。
 8. **GPT Image 2 的模型 Mask 只是引导条件。** Search/Critic/人工审片使用 raw candidate；最终融合保护由用户显式提交的可选 `Fusion Mask` 决定，不得自动套在每轮 Search 上。
@@ -36,7 +36,7 @@
 13. **所有有副作用节点必须幂等。** OpenAI 请求、文件写入和数据库写入使用稳定 request key 或 read-before-write。
 14. **LangGraph checkpoint 中不得保存图片二进制或 Base64。** 只保存 asset ID、路径、SHA-256、尺寸、模型参数和结构化结果。
 15. **OpenAI API key 仅存在于后端环境变量。** 不进入浏览器、项目 JSON、checkpoint、日志或下载包。
-16. **直接调用 OpenAI 官方 API。** 不接第三方聚合路由作为默认路径。
+16. **直接调用 OpenAI 官方 API。** 不接第三方聚合路由作为默认路径；`OPENAI_BASE_URL` 中转站只作为显式、独立验证的兼容性选项。
 17. **借鉴 Nodaro 的工程模式，但不得复制其受限许可证源码或 Prompt。** 仅独立实现通用思想。
 18. **先建立 mock provider 的可测试纵向切片，再启用真实 OpenAI 调用。** 测试不依赖付费 API。
 19. **前后端从零搭建。** 默认采用 FastAPI/Python 后端与 React/TypeScript/Vite 前端。
@@ -50,6 +50,9 @@ candidate 仅表示旧数据兼容或用户主动融合后的派生资产：
 - GPT Image 2 仍接收 `Model Guidance Mask`，用于聚焦编辑区域；
 - Generator 保存的 `raw candidate` 是 Search、Critic、Ranker、Global Winner、用户审片和人工接受的唯一权威图像；
 - 自动 Search 每轮只从 immutable source、参考图、Guidance Mask 和当前 prompt 重新生成，不自动调用 Composite Floor；
+- 自动 Critic/Planner 无人工 selection 轮只由本地策略把 bounded directives 应用到 PromptVersion；它不读取上一轮 candidate 作为图像输入；
+- 用户明确选择当前轮 raw candidate 并继续时，下一轮仍以 immutable original 作为 image[0] 和 Guidance Mask base，把 selected raw 作为 image[1] 的 visual reference。该 `candidate_anchored_rebase` 是人工 revision 的显式例外，不是 candidate edit；
+- Round 0 与人工 revision 由多模态 Prompt Refiner 根据底图、宠物参考、Guidance Mask、用户自然语言（revision 另含 selected raw、对应 Critic 和反馈）生成 professional prompt；
 - 用户接受候选后，可以提交独立的 `Fusion Mask`（矩形/alpha mask + feather）生成融合预览或导出资产；
 - Fusion 不修改 raw candidate，不触发 Critic/Ranker/Planner，也不能作为下一轮 Search 输入；
 - 旧 `protected_asset` / `composite` 字段和旧 SQLite 数据必须可读，但不再作为默认 Search/Critic source of truth。
@@ -100,7 +103,7 @@ LangGraph 自动审片与 Prompt 搜索
 最终系统不是通用节点画布，而是一个面向摄影师的垂直工作台：
 
 - 管理同一只猫的参考素材；
-- 在旅游照中指定大致位置、尺寸、姿态和朝向；
+- 在旅游照上用 Guidance Mask 指定大致编辑区域和尺度，并用 Prompt 描述姿态和朝向；
 - 一次生成多个候选；
 - 自动按猫身份、透视、光线、光学一致性和物理融合审片；
 - 只针对最重要的缺陷生成少量 Prompt 修正；
@@ -209,7 +212,7 @@ Local Fix/兼容导出，但不是 Search 的默认路径。
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ Frontend                                                     │
-│ 旅行照 / 猫参考图 / placement / pose / facing / 用户意图     │
+│ 旅行照 / 猫参考图 / Guidance Mask / 摄影师 Prompt            │
 │ Candidate Gallery / Search Timeline / 人工 Accept / Resume   │
 └──────────────────────────────┬───────────────────────────────┘
                                │ REST + SSE
@@ -223,14 +226,16 @@ Local Fix/兼容导出，但不是 Search 的默认路径。
 ┌──────────────────────────────────────────────────────────────┐
 │ LangGraph Search Control Plane                               │
 │                                                              │
-│ canonical prompt                                             │
+│ multimodal Prompt Refiner (initial / human revision)         │
+│ → professional PromptVersion                                 │
 │ → round preparation                                          │
 │ → generator invocation                                       │
 │ → persist raw candidates                                     │
 │ → candidate critic fan-out                                   │
 │ → deterministic ranker                                       │
 │ → global winner update                                       │
-│ → stop / feedback planner / rebase                           │
+│ → stop / feedback planner / source rebase                    │
+│   (human selected raw → image[1] visual anchor only)          │
 │ → interrupt / finalize                                       │
 └───────────┬───────────────────────┬──────────────────────────┘
             │                       │
@@ -278,7 +283,7 @@ START
   ↓
 initialize_search
   ↓
-compile_canonical_prompt
+multimodal_prompt_subgraph (Round 0)
   ↓
 prepare_round
   ↓
@@ -302,10 +307,14 @@ decide_next_action
   │                              ↓
   │                         increment_round
   │                              ↓
-  │                         prepare_round
+  │                         PromptVersion local apply
+  │                              ↓
+  │                         prepare_round (source-only)
   ├── human_review ─────────→ interrupt_for_review
   │                              ↓ resume
   │                         apply_human_command
+  │                              ↓ selected raw + feedback
+  │                         multimodal_prompt_subgraph (revision)
   └── fail ─────────────────→ mark_failed → END
 ```
 
@@ -316,6 +325,7 @@ decide_next_action
 ```text
 CriticSubgraph
 FeedbackPlannerSubgraph
+MultimodalPromptSubgraph
 ```
 
 ### CriticSubgraph
@@ -337,6 +347,21 @@ select_actionable_blocking_issues
 → replace_or_retain_directives
 → emit_next_round_plan
 ```
+
+### MultimodalPromptSubgraph
+
+```text
+prepare_source_and_optional_visual_anchor
+→ invoke Prompt Refiner（Responses Structured Outputs）
+→ validate provider proposal
+→ compile/persist PromptVersion
+```
+
+Round 0 只接收 immutable source。人工 revision 必须同时绑定 persisted selected raw
+candidate、该 candidate 的 Critic evaluation、上一个 PromptVersion 和 human feedback；
+Prompt Refiner 的输出是专业 Prompt plan，不直接决定 rank/stop，也不把图片字节放入
+checkpoint。自动无 selection 轮不调用 Prompt Refiner，使用本地 bounded directive apply
+创建 source-only PromptVersion。
 
 子图默认使用父图继承的 checkpointer。每次候选评审是独立 invocation，不需要跨调用保留私有对话历史。
 
@@ -407,7 +432,8 @@ interrupt payload 必须是可 JSON 序列化的摘要：
 
 Checkpoint 在节点边界保存；节点恢复时可能从函数开头重执行。因此：
 
-- OpenAI 请求前先按 idempotency key 查询 `provider_calls`；
+- OpenAI 请求前先按 idempotency key 查询 `provider_calls`，并把同一 key 作为
+  `Idempotency-Key` 传给支持该语义的官方 SDK 请求；
 - 已完成请求直接复用 output asset；
 - 文件写入使用临时文件 + 原子 rename；
 - 数据库写入使用 upsert；
@@ -495,6 +521,17 @@ class SearchState(TypedDict, total=False):
 
     canonical_prompt: str
     canonical_prompt_hash: str
+    current_prompt_version: dict
+    prompt_history: list[dict]
+    refinement_mode: Literal["initial", "revision"] | None
+    generation_mode: Literal["source_rebase", "candidate_anchored_rebase"]
+    based_on_prompt_version_id: str | None
+    prompt_model: str | None
+    generation_model: str | None
+    professional_prompt_plan: dict | None
+    visual_anchor: AssetRef | None
+    human_selected_candidate_id: str | None
+    human_feedback: str | None
     active_directives: list[dict]
     directive_version: int
 
@@ -560,7 +597,7 @@ class SearchState(TypedDict, total=False):
 
 ## 6.2 Generator 合法输入
 
-每轮唯一合法的图像输入：
+自动 Search 每轮的默认合法图像输入：
 
 ```text
 image[0] = immutable original background crop
@@ -569,7 +606,7 @@ mask = source crop 对应的 model guidance mask
 prompt = canonical prompt + 当前 active directives
 ```
 
-禁止：
+自动轮禁止：
 
 ```text
 image[0] = previous candidate
@@ -577,9 +614,24 @@ image[1] = previous winner
 image[N] = local fix output
 ```
 
+人工 revision 的唯一例外是用户明确选择当前轮 raw candidate 并提交 `continue_one_round`：
+
+```text
+image[0] = immutable original background crop
+image[1] = selected raw candidate（visual reference only）
+image[2..N] = immutable original cat references
+mask = immutable source Guidance Mask
+prompt = Prompt Refiner 生成的 revision PromptVersion
+```
+
+selected raw 必须经过 search/candidate/evaluation/source-manifest/parent PromptVersion
+校验；它不能成为可编辑底图，也不能是 Fusion 或 Local Fix 派生图。该路径的名字是
+`candidate_anchored_rebase`，不改变自动 Search 的 source-only invariant。
+
 ## 6.3 运行时硬保护
 
-`GeneratorService.generate_round()` 必须接收 `SourceManifest`，而不是通用 image list。
+`GeneratorService.generate_round()` 必须接收 `SourceManifest`，并通过明确的
+`generation_mode`/`VisualAnchorRef` 表达人工 visual reference，而不是接收任意 image list。
 
 建议签名：
 
@@ -597,7 +649,8 @@ async def generate_round(
     ...
 ```
 
-不提供 `base_candidate_id` 参数。
+不提供 `base_candidate_id` 参数；如果存在 anchor，参数名和校验语义必须明确表示它是
+human-selected raw visual reference，而不是 edit base。
 
 调用前验证：
 
@@ -705,7 +758,25 @@ Planner 不看图片，只接收：
 
 Planner 输出最多 3 条短指令和 next action。
 
-## 7.5 Vision detail 与成本
+## 7.5 Prompt Refiner：多模态 professional prompt
+
+Round 0 和人工 revision 使用独立的 `MultimodalPromptSubgraph`。Prompt Refiner 读取有限
+尺寸的底图、宠物参考、Guidance Mask 和摄影师自然语言，输出 `ProfessionalPromptPlan`
+并由本地编译器生成 `PromptVersion`。人工 revision 额外读取 selected raw candidate、
+它对应的 Critic evaluation、parent PromptVersion 和 human feedback；selected raw 只被
+作为视觉锚点，不能覆盖 source/base 身份。
+
+Prompt Refiner 通过 Responses API 的 Pydantic Structured Outputs 接收结构化 proposal；
+provider proposal 不得自行决定 prompt version ID、hash、generation mode、anchor 所有权、
+rank 或 stop。`FAKE_PROMPT_REFINER=1` 是默认且强制的离线 provider，`OPENAI_PROMPT_MODEL`
+只在显式关闭 fake 开关时选择后端模型。该路径与 Critic 的 live 能力分别审计，中转站不能
+因 Image edits 成功而被视为已兼容 Structured Outputs。
+
+官方能力参考：[GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
+与 [GPT Image 2](https://developers.openai.com/api/docs/models/gpt-image-2)。本仓库本轮不
+声称真实 provider/live 已验证。
+
+## 7.6 Vision detail 与成本
 
 不要依赖 GPT-5.6 默认 `auto/original` 反复分析超大原图。
 
@@ -723,7 +794,7 @@ MVP 规则：
 
 ## 8.1 输入顺序
 
-必须固定：
+自动 source-only round 必须固定：
 
 ```text
 image[0] = original background crop
@@ -734,10 +805,20 @@ image[3] = optional full-body / pattern reference
 
 Mask 作用于第一张图，因此背景 crop 必须是第一张输入。
 
+人工 `candidate_anchored_rebase` round 在 image[0] 与 mask 位置不变的前提下插入：
+
+```text
+image[0] = original background crop
+image[1] = selected raw candidate visual reference
+image[2..N] = immutable cat references
+```
+
+selected raw 不可成为 edit base；自动轮和 Local Fix 均不得沿用该输入顺序。
+
 对 GPT Image 2：
 
 - 不发送 `input_fidelity`；
-- 使用 PNG 输入和输出；
+- image[0] 背景与 Guidance Mask 使用 PNG；raw output 必须是 PNG。为控制 payload，官方 adapter 可把不透明的宠物参考和 selected raw visual anchor 变成有界 JPEG proxy，但它们不改变 PNG generation lineage；
 - 保存原始 API 输出为 `raw_candidate.png`；
 - raw candidate 直接进入 Critic、Ranker 和人工审片；
 - 用户显式提交 Fusion Mask 后，才生成可选 `fused_candidate.png`；
@@ -1073,6 +1154,11 @@ Planner 不读取：
 - 候选生成 API 原始响应；
 - 历史所有 Prompt 全量内容。
 
+Planner 输出只供 deterministic policy 校验。自动无人工 selection 的下一轮由本地
+`apply_local_directives` 生成 source-only PromptVersion，不重新请求多模态 Prompt Refiner，
+也不把任何 candidate 加入 Generator 输入；只有 human `selected_candidate_id` 进入
+revision path 时，才重新调用 Prompt Refiner 并建立 candidate-anchored rebase。
+
 ## 11.2 Planner 输出
 
 ```python
@@ -1170,7 +1256,19 @@ source manifest（仍是原始素材）
 → fresh generate
 ```
 
-绝不把 Round N winner 作为 Round N+1 图像输入。
+这是自动无 selection round 的输入；不重新请求 Prompt Refiner，且绝不把 Round N winner
+作为 Round N+1 图像输入。人工 `continue_one_round` 若带 `selected_candidate_id`，则改走：
+
+```text
+immutable source（image[0] + Guidance Mask）
++ selected raw candidate（image[1] visual reference）
++ immutable cat references
++ human feedback + selected candidate Critic
+→ Prompt Refiner revision PromptVersion
+→ candidate-anchored rebase
+```
+
+该人工路径仍不是连续 candidate edit；Fusion/Local Fix 派生图永远不能成为该 anchor。
 
 ## 12.3 自动停止
 
@@ -1332,7 +1430,7 @@ python -m app.worker
 - 调用 LangGraph `ainvoke/astream`；
 - checkpoint 每步落盘；
 - worker 崩溃后 lease 过期可重新领取；
-- provider calls 通过 idempotency key 避免重复；
+- provider calls 通过本地 lease/audit 和传给 provider 的 idempotency key 避免重复；
 - SSE 从 `search_events` 推送给前端。
 
 本地开发可以提供 `RUN_INLINE=1`，但默认文档应推荐独立 worker。
@@ -1350,6 +1448,9 @@ round.evaluation.ready
 round.winner.updated
 search.global_winner.updated
 search.planner.ready
+prompt.refiner.started
+prompt.refiner.ready
+prompt.refiner.failed
 search.interrupted
 search.accepted
 search.failed
@@ -1528,7 +1629,7 @@ Vitest
 Testing Library
 ```
 
-Placement Canvas 第一版可以使用原生 Canvas/SVG 或成熟二维画布库，但不要为了拖拽一个目标矩形引入完整通用设计器。
+Guidance/Fusion Canvas 优先采用成熟二维画布或手势基础设施；本地 alpha 栅格化与导出保持可测试的纯函数边界，不为画笔重复引入完整通用设计器。
 
 ---
 
@@ -1603,6 +1704,7 @@ GET /api/searches/{search_id}
 - global winner；
 - evaluations；
 - active directives；
+- `prompt_history`：供 Prompt Inspector 展示每一轮实际 professional/generation prompt 及其 `prompt_version_id/hash`、round/refinement/generation mode、parent version、prompt/generation model、canonical/generation prompt/hash、professional prompt plan、active directives/hash、`visual_anchor`、human feedback/selected candidate 和 `tuned`；
 - stop reason；
 - usage/cost；
 - interrupt payload。
@@ -1614,6 +1716,9 @@ GET /api/searches/{search_id}/events
 ```
 
 前端用来更新 timeline，不直接轮询大图片 Base64。
+Prompt Refiner 的持久化事件为 `prompt.refiner.started`、`prompt.refiner.ready` 和
+`prompt.refiner.failed`；事件只传安全摘要，完整 prompt 通过状态查询的 Prompt Inspector
+按版本读取。
 
 ## 16.5 Resume interrupt
 
@@ -1638,6 +1743,11 @@ cancel
 ```
 
 `update_user_intent` 应创建新的 canonical prompt version；如果改变了主体或 placement 语义，推荐创建新 search，而不是污染旧历史。
+
+`continue_one_round` 只有在携带 `selected_candidate_id` 时才建立人工
+`candidate_anchored_rebase`；该 candidate 必须是当前 reviewed round 的 raw authority，
+并与可选 `human_feedback` 绑定。省略 selection 时沿用自动 source-only rebase 和本地
+bounded directives，不会把 winner 自动当作下一轮 image input。
 
 ## 16.6 Local Fix
 
@@ -1677,23 +1787,20 @@ copy_icc=true
 
 MVP 不做通用节点画布。
 
-## 17.1 Source Panel
+## 17.1 Asset Panel
 
-- 旅游原图；
-- 猫参考图 1～5；
-- 主参考图标记；
-- 猫名字和特征；
+- 统一多图素材库；
+- 素材可分配为一张旅游原图或猫参考图 1～5；
+- 支持列表/平铺、文件夹分组和大图 hover 预览；
 - source manifest 状态。
 
-## 17.2 Placement Canvas
+## 17.2 Guidance Canvas
 
-- 画目标框；
-- 拖拽、缩放；
-- 姿态下拉；
-- 朝向；
-- 接触面文字；
-- 显示 Guidance Mask，并在用户显式创建后显示 Fusion Mask 预览；
-- placement 改变时明确提示需要新 search。
+- 显示原始底片并支持统一的平移/缩放手势；
+- 使用可调大小、流量、羽化的 PS 风格画笔增加/擦除 Guidance alpha；
+- 新工作台不显示位置框、姿态或朝向控件；姿态、朝向和接触关系写入摄影师 Prompt；
+- Search 启动后锁定本次 Guidance Mask；改变 Mask 时创建新的 Search；
+- Fusion 是接受 Raw 后的独立画布模式，不与 Guidance 共用文档。
 
 ## 17.3 Search Controls
 
@@ -1748,9 +1855,26 @@ Interrupt 时显示：
 
 # 18. Prompt 设计
 
-## 18.1 Canonical Prompt
+## 18.1 Multimodal Prompt Refiner contract
 
-Canonical prompt 由用户意图和稳定摄影约束生成，搜索期间不不断重写。
+用户自然语言不是直接拼接成一段未经校验的模型指令。Prompt Refiner 以多模态方式读取
+immutable background、1～5 张宠物参考和 Guidance Mask，并将摄影师的自然语言转成
+`ProfessionalPromptPlan`；本地 compiler 再固定 input roles、scene preservation、
+prompt version/hash 和 generation mode。Round 0 是 `initial/source_rebase`。
+
+人工 revision 的输入为 immutable source、selected raw candidate visual anchor、该候选
+的 persisted Critic evaluation、parent PromptVersion 和 human feedback，输出
+`revision/candidate_anchored_rebase` PromptVersion。Provider proposal 不能修改 source
+manifest、anchor 所有权、rank/stop 或版本 ID。
+
+自动无 selection 轮不重新调用 Prompt Refiner：Feedback Planner 只产生最多 3 条
+bounded directives，由本地策略应用到 parent professional prompt，且 generation mode
+保持 `source_rebase`。
+
+## 18.2 Canonical Prompt
+
+Canonical prompt 由 Prompt Refiner 的专业计划和稳定摄影约束编译，搜索期间不被 Critic
+自由文本不断重写；每个 round 保存实际 `canonical_prompt` 和 `generation_prompt`。
 
 结构：
 
@@ -1783,7 +1907,7 @@ Authentic photograph from the same moment and camera system.
 
 不要把 EXIF 数值全部塞进 Prompt。只有视觉上有意义且可靠的参数才作为辅助摘要。
 
-## 18.2 Active Directives
+## 18.3 Active Directives
 
 每轮附加：
 
@@ -1795,7 +1919,7 @@ ROUND-SPECIFIC CORRECTIONS
 
 只保留当前需要解决的问题，不携带历轮长日志。
 
-## 18.3 Prompt version
+## 18.4 Prompt version
 
 记录：
 
@@ -1880,7 +2004,8 @@ active_directives_hash
 - Round 1+ Generator 输入只包含 source manifest；
 - 前一轮 candidate ID/路径不出现于请求；
 - source hash 全轮一致；
-- generation depth 为 0。
+- generation depth 为 0（人工 anchor 仍是原始 Search candidate，不是 Local Fix 深度）。
+- 人工 anchor 只允许当前 reviewed round 的 raw authoritative asset，且 image[0] 与 mask 仍来自 source manifest。
 
 ## 21.2 `test_langgraph_routes.py`
 
@@ -1993,7 +2118,19 @@ create project
 → export
 ```
 
-## 21.14 Live smoke test
+## 21.14 `test_prompt_refiner_contract.py`
+
+至少覆盖：
+
+- Round 0 Prompt Refiner 读取 source references + Guidance Mask，产生 professional PromptVersion；
+- automatic no-selection round 只 local-apply bounded directives，`generation_mode=source_rebase`，没有 visual anchor；
+- human selected raw + feedback 与 Critic evaluation/parent version 绑定，`generation_mode=candidate_anchored_rebase`；
+- selected raw 只能是 raw authority，不能是 Fusion/Local Fix 派生图；Generator image[0]/mask 仍是 source，selected raw 只在 image[1]；
+- `MultimodalPromptSubgraph` 存在且 provider proposal 不得写入图片 bytes、内部路径、rank/stop；
+- API PromptHistory/Prompt Inspector projection 不含服务器 filesystem path；SSE `started/ready/failed` 不含完整 prompt、用户反馈或 Base64；
+- 默认测试 harness 强制 `FAKE_GENERATOR=1`、`FAKE_CRITIC=1`、`FAKE_PROMPT_REFINER=1`，并清空 credential/base URL。
+
+## 21.15 Live smoke test
 
 仅在显式环境变量开启：
 
@@ -2127,7 +2264,9 @@ C. 旧连续 I2I revise 方案
 - GPT-5.6 Luna planner；
 - directive replacement；
 - deterministic fallback；
-- Prompt 版本；
+- source-only PromptVersion 与自动 local directive apply；
+- MultimodalPromptSubgraph、fake Prompt Refiner、Responses Structured Outputs adapter；
+- 人工 selected raw + feedback 的 candidate-anchored PromptVersion；
 - 测试。
 
 ## Commit 10 — Search loop, stop policy and interrupts
@@ -2138,12 +2277,13 @@ C. 旧连续 I2I revise 方案
 - minimum improvement；
 - max rounds/budget；
 - human interrupt/resume；
+- 无 selection 自动轮与 selected raw 人工 revision 的分流；
 - failure recovery。
 
 ## Commit 11 — Frontend search UX
 
-- Source Panel；
-- Placement Canvas；
+- Asset Panel；
+- Guidance Canvas；
 - Search Controls；
 - Candidate Gallery；
 - Search Timeline；
@@ -2179,6 +2319,7 @@ C. 旧连续 I2I revise 方案
 ## 架构
 
 - [ ] Critic 与反馈规划由 LangGraph 子图执行；
+- [ ] MultimodalPromptSubgraph 负责 Round 0/人工 revision professional Prompt；自动无 selection 轮使用本地 bounded directives；
 - [ ] SearchGraph 有显式节点和条件边；
 - [ ] 使用 durable checkpointer；
 - [ ] 支持 interrupt / resume；
@@ -2188,6 +2329,7 @@ C. 旧连续 I2I revise 方案
 ## Rebase 与质量
 
 - [ ] 自动 Round N+1 不读取 Round N candidate；
+- [ ] 人工明确 selected raw 时，selected raw 只作为 image[1] visual reference；image[0] 与 Guidance Mask 仍来自 immutable source，并标记为 `candidate_anchored_rebase`；
 - [ ] 原始素材 hash 全轮一致；
 - [ ] PNG-only generation lineage；
 - [ ] Global Winner 不被较差后续结果覆盖；
@@ -2195,6 +2337,7 @@ C. 旧连续 I2I revise 方案
 - [ ] warning/info 不触发自动生成；
 - [ ] Local Fix 深度最多 2；
 - [ ] High finalization 从原始素材生成。
+- [ ] Fusion/Local Fix 不进入 Search 输入。
 
 ## Critic
 
@@ -2227,12 +2370,13 @@ C. 旧连续 I2I revise 方案
 ## 产品
 
 - [ ] 支持 1～5 张猫参考；
-- [ ] 支持 placement、pose、facing；
+- [ ] 支持 Guidance Mask 画笔，并通过 Prompt 表达 pose、facing 和接触关系；
 - [ ] 支持 Candidate Gallery；
 - [ ] 支持 Search Timeline；
 - [ ] 支持人工 Accept/Continue/Cancel；
 - [ ] 显示 usage 与估算成本；
 - [ ] 记录 stop reason。
+- [ ] Prompt Inspector 展示每轮 professional/generation prompt 与 safe lineage；SSE 覆盖 Prompt Refiner started/ready/failed。
 
 ## 安全
 
@@ -2249,6 +2393,8 @@ C. 旧连续 I2I revise 方案
 - [ ] `test_checkpoint_resume.py` 存在并通过；
 - [ ] `test_provider_idempotency.py` 存在并通过；
 - [ ] `test_background_protection.py` 存在并通过；
+- [ ] Prompt Refiner contract 覆盖 fake provider、automatic source-only 与 human visual-anchor 分支；
+- [ ] 默认门禁强制 fake generator/Critic/Prompt Refiner 且清空真实 credential/base URL；
 - [ ] README 提供本地 API + worker 启动方式。
 
 ---
@@ -2259,7 +2405,8 @@ C. 旧连续 I2I revise 方案
 Generate broadly.
 Critique independently.
 Plan narrowly.
-Rebase every automatic round.
+Rebase every automatic round from immutable source.
+Use a user-selected raw candidate only as an explicit visual anchor for human revision.
 Rank deterministically.
 Keep the historical best.
 Stop before over-optimization.

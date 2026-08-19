@@ -55,6 +55,12 @@ Use provider interfaces and test doubles before making the live OpenAI path mand
 - Do not use a generic ReAct/prebuilt agent in place of the explicit StateGraph.
 - Do not use ComfyUI or local diffusion models in the active path.
 - Do not feed a previous candidate into the next automatic generation round.
+- Human revision is an explicit exception to the automatic rebase invariant:
+  when the user selects a current raw candidate and continues, the next round
+  still uses the immutable source as image[0]/Guidance Mask base and passes the
+  selected raw candidate only as image[1] visual reference. Call this a
+  candidate-anchored rebase, never a candidate edit. Fusion and Local Fix are
+  not Search inputs.
 - Do not let LLM output directly decide candidate ranking or stop conditions without deterministic validation.
 - Do not use JPEG/WebP as an internal generation lineage format.
 - The model Guidance Mask is not a pixel lock. Search/Critic/user review must use
