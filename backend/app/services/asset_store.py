@@ -30,7 +30,11 @@ class AssetStore:
     settings without weakening the PNG-only generation invariant.
     """
 
-    _ALLOWED_FORMATS: ClassVar[set[str]] = {"JPEG", "PNG", "WEBP"}
+    # Pillow exposes some phone-camera JPEG files as ``MPO`` when they contain
+    # an auxiliary depth/HDR image.  MPO is still a JPEG-family container; the
+    # first frame is the primary photograph users selected.  Treat it as JPEG
+    # input while continuing to reject genuinely animated PNG/WebP uploads.
+    _ALLOWED_FORMATS: ClassVar[set[str]] = {"JPEG", "MPO", "PNG", "WEBP"}
 
     def __init__(self, root: Path, *, max_image_pixels: int) -> None:
         self.root = root.resolve()
@@ -44,8 +48,11 @@ class AssetStore:
             with Image.open(io.BytesIO(data)) as opened:
                 if opened.format not in self._ALLOWED_FORMATS:
                     raise UploadValidationError("Only JPEG, PNG, and WebP uploads are supported")
-                if getattr(opened, "is_animated", False):
+                is_jpeg_container = opened.format in {"JPEG", "MPO"}
+                if getattr(opened, "is_animated", False) and not is_jpeg_container:
                     raise UploadValidationError("Animated images are not supported")
+                if opened.format == "MPO":
+                    opened.seek(0)
                 width, height = opened.size
                 if width <= 0 or height <= 0:
                     raise UploadValidationError("Image dimensions must be positive")

@@ -38,6 +38,33 @@ def test_asset_store_rejects_non_images_and_detects_tampering(tmp_path: Path) ->
         store.assert_intact(asset)
 
 
+def test_asset_store_accepts_phone_mpo_as_a_jpeg_primary_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phone JPEGs with HDR/depth auxiliaries are reported as MPO by Pillow."""
+
+    store = AssetStore(tmp_path / "assets", max_image_pixels=1_000_000)
+    store.initialize()
+    jpeg = make_image_bytes((12, 34, 56), size=(30, 20), image_format="JPEG")
+    original_open = Image.open
+
+    def open_as_mpo(*args: object, **kwargs: object) -> Image.Image:
+        image = original_open(*args, **kwargs)
+        image.format = "MPO"
+        image.is_animated = True
+        return image
+
+    monkeypatch.setattr("app.services.asset_store.Image.open", open_as_mpo)
+
+    normalized = store.normalize_image(jpeg)
+
+    assert normalized.width == 30
+    assert normalized.height == 20
+    with original_open(io.BytesIO(normalized.png_bytes)) as image:
+        assert image.format == "PNG"
+        assert image.getpixel((0, 0)) == (12, 34, 57)
+
+
 def test_asset_store_only_preserves_meaningful_exif_after_orientation_normalization(
     tmp_path: Path,
 ) -> None:
