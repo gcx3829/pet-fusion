@@ -120,6 +120,24 @@ describe("mask rasterizer", () => {
     expect(maskAlphaAt(mask, 70, 50)).toBe(0);
   });
 
+  it("同一连续笔划不会把重叠笔尖的羽化边缘反复叠成硬边", () => {
+    const softStroke: MaskStroke = {
+      tool: "paint",
+      points: [{ x: 0.2, y: 0.5 }, { x: 0.8, y: 0.5 }],
+      settings: { size: 20, flow: 0.25, feather: 1 },
+    };
+    const once = rasterizeMask(createMaskDocument(100, 100, [softStroke]));
+    const twice = rasterizeMask(createMaskDocument(100, 100, [softStroke, softStroke]));
+
+    const center = maskAlphaAt(once, 50, 50);
+    const softEdge = maskAlphaAt(once, 50, 57);
+    expect(center).toBeGreaterThan(50);
+    expect(center).toBeLessThan(80);
+    expect(softEdge).toBeGreaterThan(0);
+    expect(softEdge).toBeLessThan(center / 2);
+    expect(maskAlphaAt(twice, 50, 57)).toBeGreaterThan(softEdge);
+  });
+
   it("插值后的笔划在稀疏 pointer event 之间没有断点", () => {
     const points = appendInterpolatedPoints(
       [{ x: 0.05, y: 0.5 }],

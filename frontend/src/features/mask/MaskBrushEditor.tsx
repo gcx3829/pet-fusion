@@ -12,13 +12,12 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
-  appendStrokePoint,
+  appendInterpolatedPoints,
   cloneMaskDocument,
   createMaskDocument,
   DEFAULT_MASK_BRUSH,
   normalizeBrushSettings,
   normalizePoint,
-  replaceStroke,
   resizeMaskDocument,
   type MaskBrushSettings,
   type MaskDocument,
@@ -88,8 +87,9 @@ interface HistoryState {
 
 interface ActiveStroke {
   pointerId: number;
-  strokeIndex: number;
   before: MaskDocument;
+  stroke: MaskStroke;
+  pendingPreviewPoints: NormalizedPoint[];
 }
 
 const MAX_HISTORY_STEPS = 100;
@@ -155,26 +155,84 @@ function renderAlphaCanvas(
   return canvas;
 }
 
-function renderGuidanceOverlay(
-  mask: ReturnType<typeof rasterizeMask>,
+function renderGuidanceOverlayFromAlpha(
+  alphaCanvas: HTMLCanvasElement,
   existing: HTMLCanvasElement | null,
 ): HTMLCanvasElement | null {
   const canvas = existing ?? document.createElement("canvas");
-  canvas.width = mask.width;
-  canvas.height = mask.height;
+  canvas.width = alphaCanvas.width;
+  canvas.height = alphaCanvas.height;
   const context = canvas.getContext("2d", { alpha: true });
   if (!context) return null;
-  const pixels = context.createImageData(mask.width, mask.height);
-  for (let index = 0; index < mask.alpha.length; index += 1) {
-    const offset = index * 4;
-    pixels.data[offset] = 75;
-    pixels.data[offset + 1] = 211;
-    pixels.data[offset + 2] = 214;
-    // Keep the overlay legible without obscuring the source photograph.
-    pixels.data[offset + 3] = Math.round(mask.alpha[index] * 0.42);
-  }
-  context.putImageData(pixels, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(alphaCanvas, 0, 0);
+  const previousOperation = context.globalCompositeOperation;
+  context.globalCompositeOperation = "source-in";
+  context.fillStyle = "rgba(75, 211, 214, 0.42)";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.globalCompositeOperation = previousOperation;
   return canvas;
+}
+
+function stampPreviewPoint(
+  context: CanvasRenderingContext2D,
+  point: NormalizedPoint,
+  stroke: MaskStroke,
+  sourceWidth: number,
+  sourceHeight: number,
+  previewWidth: number,
+  previewHeight: number,
+): void {
+  const settings = normalizeBrushSettings(stroke.settings);
+  const centerX = point.x * previewWidth;
+  const centerY = point.y * previewHeight;
+  const radius = Math.max(
+    0.5,
+    settings.size * Math.min(previewWidth / sourceWidth, previewHeight / sourceHeight) / 2,
+  );
+  const gradient = context.createRadialGradient(
+    centerX,
+    centerY,
+    0,
+    centerX,
+    centerY,
+    radius,
+  );
+  gradient.addColorStop(0, "rgba(255, 255, 255, 1)");
+  const hardStop = Math.max(0, 1 - settings.feather);
+  if (hardStop > 0) gradient.addColorStop(hardStop, "rgba(255, 255, 255, 1)");
+  gradient.addColorStop(1, settings.feather > 0
+    ? "rgba(255, 255, 255, 0)"
+    : "rgba(255, 255, 255, 1)");
+  const previousOperation = context.globalCompositeOperation;
+  const previousAlpha = context.globalAlpha;
+  context.globalCompositeOperation = stroke.tool === "paint" ? "source-over" : "destination-out";
+  context.globalAlpha = settings.flow;
+  context.fillStyle = gradient;
+  context.beginPath();
+  context.arc(centerX, centerY, radius, 0, Math.PI * 2);
+  context.fill();
+  context.globalAlpha = previousAlpha;
+  context.globalCompositeOperation = previousOperation;
+}
+
+function appendLivePoint(
+  stroke: MaskStroke,
+  point: NormalizedPoint,
+  sourceWidth: number,
+  sourceHeight: number,
+): NormalizedPoint[] {
+  const previous = stroke.points.at(-1);
+  const segment = appendInterpolatedPoints(
+    previous ? [previous] : [],
+    point,
+    sourceWidth,
+    sourceHeight,
+    stroke.settings,
+  );
+  const additions = previous ? segment.slice(1) : segment;
+  stroke.points.push(...additions);
+  return additions;
 }
 
 function loadImage(source: string | null | undefined): Promise<HTMLImageElement | null> {
@@ -312,8 +370,21 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       present: cloneMaskDocument(initialRef.current),
       future: [],
     }));
+    const historyRef = useRef(history);
+    historyRef.current = history;
     const presentRef = useRef(history.present);
     presentRef.current = history.present;
+    const updateHistory = useCallback((update: (current: HistoryState) => HistoryState) => {
+      // Pointer events can arrive back-to-back before React commits a render
+      // (for example when pointerup is swallowed by the gesture layer). Keep
+      // one synchronous authority so a stale stroke can be finalized before
+      // the next stroke derives its index and undo baseline.
+      const next = update(historyRef.current);
+      historyRef.current = next;
+      presentRef.current = next.present;
+      setHistory(next);
+      return next;
+    }, []);
     const [tool, setTool] = useState<MaskStrokeTool>("paint");
     const [brush, setBrush] = useState<MaskBrushSettings>(() => normalizeBrushSettings({
       ...DEFAULT_MASK_BRUSH,
@@ -327,14 +398,9 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       () => normalizeBrushSettings({ ...brush, ...controlledBrush }),
       [brush, controlledBrush?.feather, controlledBrush?.flow, controlledBrush?.size],
     );
-    const [cursor, setCursor] = useState<NormalizedPoint | null>(null);
     const [imageRevision, setImageRevision] = useState(0);
     const [exporting, setExporting] = useState(false);
     const [exportError, setExportError] = useState<string | null>(null);
-
-    useEffect(() => {
-      if (disabled) setCursor(null);
-    }, [disabled]);
 
     const stageRef = useRef<HTMLDivElement>(null);
     const generatedCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -345,6 +411,8 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
     const originalImageRef = useRef<HTMLImageElement | null>(null);
     const alphaCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const activeStrokeRef = useRef<ActiveStroke | null>(null);
+    const cursorRef = useRef<NormalizedPoint | null>(null);
+    const previewFrameRef = useRef<number | null>(null);
 
     useEffect(() => {
       const previous = sourceDimensionsRef.current;
@@ -359,8 +427,8 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         safeRelease(pointerCanvasRef.current, activeStrokeRef.current.pointerId);
       }
       activeStrokeRef.current = null;
-      setHistory({ past: [], present: cloneMaskDocument(nextInitial), future: [] });
-    }, [initialDocument, initialDocumentKey, sourceHeight, sourceWidth]);
+      updateHistory(() => ({ past: [], present: cloneMaskDocument(nextInitial), future: [] }));
+    }, [initialDocument, initialDocumentKey, sourceHeight, sourceWidth, updateHistory]);
 
     useEffect(() => {
       let cancelled = false;
@@ -380,6 +448,42 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       onDocumentChange?.(cloneMaskDocument(history.present));
     }, [history.present, onDocumentChange]);
 
+    const redrawOriginalFromAlpha = useCallback(() => {
+      const originalCanvas = originalCanvasRef.current;
+      const alphaCanvas = alphaCanvasRef.current;
+      if (!originalCanvas || !alphaCanvas) return;
+      const originalContext = originalCanvas.getContext("2d");
+      if (!originalContext) return;
+      originalContext.clearRect(0, 0, previewSize.width, previewSize.height);
+      if (!originalImageRef.current) {
+        originalContext.fillStyle = "rgba(233, 223, 199, 0.08)";
+        originalContext.fillRect(0, 0, previewSize.width, previewSize.height);
+        return;
+      }
+      originalContext.drawImage(
+        originalImageRef.current,
+        0,
+        0,
+        previewSize.width,
+        previewSize.height,
+      );
+      if (mode === "guidance") {
+        const overlay = renderGuidanceOverlayFromAlpha(
+          alphaCanvas,
+          guidanceOverlayCanvasRef.current,
+        );
+        if (overlay) {
+          guidanceOverlayCanvasRef.current = overlay;
+          originalContext.drawImage(overlay, 0, 0);
+        }
+        return;
+      }
+      const previousOperation = originalContext.globalCompositeOperation;
+      originalContext.globalCompositeOperation = "destination-out";
+      originalContext.drawImage(alphaCanvas, 0, 0);
+      originalContext.globalCompositeOperation = previousOperation;
+    }, [mode, previewSize.height, previewSize.width]);
+
     useEffect(() => {
       const generatedCanvas = generatedCanvasRef.current;
       const originalCanvas = originalCanvasRef.current;
@@ -394,6 +498,8 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       const originalContext = originalCanvas.getContext("2d");
       if (!generatedContext || !originalContext) return;
       const mask = rasterizeMask(history.present, previewSize.width, previewSize.height);
+      const alphaCanvas = renderAlphaCanvas(mask, alphaCanvasRef.current);
+      if (alphaCanvas) alphaCanvasRef.current = alphaCanvas;
 
       generatedContext.clearRect(0, 0, previewSize.width, previewSize.height);
       let generatedRendered = false;
@@ -424,40 +530,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         drawCheckerboard(generatedContext, previewSize.width, previewSize.height);
       }
 
-      originalContext.clearRect(0, 0, previewSize.width, previewSize.height);
-      if (originalImageRef.current) {
-        originalContext.drawImage(
-          originalImageRef.current,
-          0,
-          0,
-          previewSize.width,
-          previewSize.height,
-        );
-        if (mode === "guidance") {
-          // Guidance is a soft model hint, not a pixel lock: keep the source
-          // photo visible and tint only the painted editable region.
-          const overlay = renderGuidanceOverlay(mask, guidanceOverlayCanvasRef.current);
-          if (overlay) {
-            guidanceOverlayCanvasRef.current = overlay;
-            originalContext.drawImage(overlay, 0, 0);
-          }
-        } else {
-          // Remove the painted alpha from the upper source layer. Using Canvas
-          // compositing avoids sampling source pixels, so API-hosted images do
-          // not make the live preview fail when the canvas is origin-tainted.
-          const alphaCanvas = renderAlphaCanvas(mask, alphaCanvasRef.current);
-          if (alphaCanvas) {
-            alphaCanvasRef.current = alphaCanvas;
-            const previousOperation = originalContext.globalCompositeOperation;
-            originalContext.globalCompositeOperation = "destination-out";
-            originalContext.drawImage(alphaCanvas, 0, 0);
-            originalContext.globalCompositeOperation = previousOperation;
-          }
-        }
-      } else {
-        originalContext.fillStyle = "rgba(233, 223, 199, 0.08)";
-        originalContext.fillRect(0, 0, previewSize.width, previewSize.height);
-      }
+      redrawOriginalFromAlpha();
     }, [
       generatedCropMapping,
       history.present,
@@ -467,19 +540,45 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       previewSize.width,
       sourceHeight,
       sourceWidth,
+      redrawOriginalFromAlpha,
     ]);
 
-    useEffect(() => {
-      const canvas = pointerCanvasRef.current;
-      if (!canvas) return;
-      const context = canvas.getContext("2d");
-      if (!context) return;
-      context.clearRect(0, 0, previewSize.width, previewSize.height);
+    const flushPreviewFrame = useCallback(() => {
+      previewFrameRef.current = null;
+      const alphaCanvas = alphaCanvasRef.current;
+      const active = activeStrokeRef.current;
+      if (alphaCanvas && active?.pendingPreviewPoints.length) {
+        const context = alphaCanvas.getContext("2d", { alpha: true });
+        if (context) {
+          const pending = active.pendingPreviewPoints.splice(0);
+          for (const point of pending) {
+            stampPreviewPoint(
+              context,
+              point,
+              active.stroke,
+              sourceWidth,
+              sourceHeight,
+              previewSize.width,
+              previewSize.height,
+            );
+          }
+          redrawOriginalFromAlpha();
+        }
+      }
+
+      const pointerCanvas = pointerCanvasRef.current;
+      if (!pointerCanvas) return;
+      const pointerContext = pointerCanvas.getContext("2d");
+      if (!pointerContext) return;
+      pointerContext.clearRect(0, 0, previewSize.width, previewSize.height);
+      const cursor = cursorRef.current;
       if (disabled || !cursor) return;
-      const radiusX = effectiveBrush.size * previewSize.width / sourceWidth / 2;
-      const radiusY = effectiveBrush.size * previewSize.height / sourceHeight / 2;
-      context.beginPath();
-      context.ellipse(
+      const cursorBrush = active?.stroke.settings ?? effectiveBrush;
+      const cursorTool = active?.stroke.tool ?? effectiveTool;
+      const radiusX = cursorBrush.size * previewSize.width / sourceWidth / 2;
+      const radiusY = cursorBrush.size * previewSize.height / sourceHeight / 2;
+      pointerContext.beginPath();
+      pointerContext.ellipse(
         cursor.x * previewSize.width,
         cursor.y * previewSize.height,
         Math.max(2, radiusX),
@@ -488,25 +587,50 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         0,
         Math.PI * 2,
       );
-      context.strokeStyle = effectiveTool === "paint" ? "rgba(221, 169, 95, 0.95)" : "rgba(141, 174, 176, 0.95)";
-      context.lineWidth = 1.5;
-      context.stroke();
-    }, [cursor, disabled, effectiveBrush.size, effectiveTool, previewSize.height, previewSize.width, sourceHeight, sourceWidth]);
+      pointerContext.strokeStyle = cursorTool === "paint"
+        ? "rgba(221, 169, 95, 0.95)"
+        : "rgba(141, 174, 176, 0.95)";
+      pointerContext.lineWidth = 1.5;
+      pointerContext.stroke();
+    }, [
+      disabled,
+      effectiveBrush,
+      effectiveTool,
+      previewSize.height,
+      previewSize.width,
+      redrawOriginalFromAlpha,
+      sourceHeight,
+      sourceWidth,
+    ]);
+
+    const schedulePreviewFrame = useCallback(() => {
+      if (previewFrameRef.current !== null) return;
+      previewFrameRef.current = window.requestAnimationFrame(flushPreviewFrame);
+    }, [flushPreviewFrame]);
+
+    useEffect(() => {
+      if (disabled) cursorRef.current = null;
+      schedulePreviewFrame();
+    }, [disabled, effectiveBrush, effectiveTool, schedulePreviewFrame]);
+
+    useEffect(() => () => {
+      if (previewFrameRef.current !== null) {
+        window.cancelAnimationFrame(previewFrameRef.current);
+        previewFrameRef.current = null;
+      }
+    }, []);
 
     const commitActiveStroke = useCallback((pointerId: number, finalPoint?: NormalizedPoint) => {
       const active = activeStrokeRef.current;
       if (!active || active.pointerId !== pointerId) return;
+      if (finalPoint) appendLivePoint(active.stroke, finalPoint, sourceWidth, sourceHeight);
       activeStrokeRef.current = null;
       if (pointerCanvasRef.current) safeRelease(pointerCanvasRef.current, pointerId);
-      setHistory((current) => {
-        const currentStroke = current.present.strokes[active.strokeIndex];
-        const present = currentStroke && finalPoint
-          ? replaceStroke(
-              current.present,
-              active.strokeIndex,
-              appendStrokePoint(currentStroke, finalPoint, sourceWidth, sourceHeight),
-            )
-          : current.present;
+      updateHistory((current) => {
+        const present = {
+          ...active.before,
+          strokes: [...active.before.strokes, active.stroke],
+        };
         return {
           past: appendHistoryStep(current.past, active.before),
           present,
@@ -514,14 +638,16 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         };
       });
       onUserEdit?.("stroke");
-    }, [onUserEdit, sourceHeight, sourceWidth]);
+    }, [onUserEdit, sourceHeight, sourceWidth, updateHistory]);
 
     const rollbackActiveStroke = useCallback((pointerId?: number) => {
       const active = activeStrokeRef.current;
       if (!active || (pointerId !== undefined && active.pointerId !== pointerId)) return;
       activeStrokeRef.current = null;
       if (pointerCanvasRef.current) safeRelease(pointerCanvasRef.current, active.pointerId);
-      setHistory((current) => ({ ...current, present: active.before }));
+      // The live preview mutated only the cached alpha canvas. Rebuild the
+      // committed preview once; React history never contained this stroke.
+      setImageRevision((revision) => revision + 1);
     }, []);
 
     const finishStroke = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -597,20 +723,14 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
       // Mask documents are updated immutably. Keeping the previous reference
       // makes undo O(1) here and avoids deep-copying all old strokes per dab.
       const before = presentRef.current;
-      const strokeIndex = before.strokes.length;
       activeStrokeRef.current = {
         pointerId: event.pointerId,
-        strokeIndex,
         before,
+        stroke,
+        pendingPreviewPoints: [point],
       };
-      setHistory((current) => ({
-        ...current,
-        present: {
-          ...current.present,
-          strokes: [...current.present.strokes, stroke],
-        },
-      }));
-      setCursor(point);
+      cursorRef.current = point;
+      schedulePreviewFrame();
       safeCapture(canvas, event.pointerId);
     };
 
@@ -621,38 +741,36 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         : [];
       const points = [...coalesced, nativeEvent].map((sample) => pointerToPoint(sample, event.currentTarget));
       const point = points[points.length - 1] ?? pointerToPoint(event, event.currentTarget);
-      setCursor(point);
+      cursorRef.current = point;
       const active = activeStrokeRef.current;
-      if (!active || active.pointerId !== event.pointerId) return;
+      if (!active || active.pointerId !== event.pointerId) {
+        schedulePreviewFrame();
+        return;
+      }
       event.preventDefault();
-      setHistory((current) => {
-        const currentStroke = current.present.strokes[active.strokeIndex];
-        if (!currentStroke) return current;
-        const nextStroke = points.reduce(
-          (stroke, sample) => appendStrokePoint(stroke, sample, sourceWidth, sourceHeight),
-          currentStroke,
+      for (const sample of points) {
+        active.pendingPreviewPoints.push(
+          ...appendLivePoint(active.stroke, sample, sourceWidth, sourceHeight),
         );
-        return {
-          ...current,
-          present: replaceStroke(current.present, active.strokeIndex, nextStroke),
-        };
-      });
+      }
+      schedulePreviewFrame();
     };
 
     const handleCanvasKeyDown = (event: ReactKeyboardEvent<HTMLCanvasElement>) => {
       if (disabled) return;
-      const currentCursor = cursor ?? { x: 0.5, y: 0.5 };
+      const currentCursor = cursorRef.current ?? { x: 0.5, y: 0.5 };
       const stepPixels = event.shiftKey ? 10 : 1;
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
         event.preventDefault();
-        setCursor(normalizePoint({
+        cursorRef.current = normalizePoint({
           x: currentCursor.x
             + (event.key === "ArrowLeft" ? -stepPixels / sourceWidth : 0)
             + (event.key === "ArrowRight" ? stepPixels / sourceWidth : 0),
           y: currentCursor.y
             + (event.key === "ArrowUp" ? -stepPixels / sourceHeight : 0)
             + (event.key === "ArrowDown" ? stepPixels / sourceHeight : 0),
-        }));
+        });
+        schedulePreviewFrame();
         return;
       }
       if (event.key !== " " && event.key !== "Enter") return;
@@ -662,7 +780,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
         points: [currentCursor],
         settings: effectiveBrush,
       };
-      setHistory((current) => ({
+      updateHistory((current) => ({
         past: appendHistoryStep(current.past, current.present),
         present: {
           ...current.present,
@@ -675,7 +793,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
 
     const undo = () => {
       rollbackActiveStroke();
-      setHistory((current) => {
+      updateHistory((current) => {
         const previous = current.past[current.past.length - 1];
         if (!previous) return current;
         return {
@@ -689,7 +807,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
 
     const redo = () => {
       rollbackActiveStroke();
-      setHistory((current) => {
+      updateHistory((current) => {
         const next = current.future[0];
         if (!next) return current;
         return {
@@ -703,7 +821,7 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
 
     const clear = () => {
       rollbackActiveStroke();
-      setHistory((current) => {
+      updateHistory((current) => {
         if (!current.present.strokes.length) return current;
         return {
           past: appendHistoryStep(current.past, current.present),
@@ -716,11 +834,11 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
 
     const reset = () => {
       rollbackActiveStroke();
-      setHistory({
+      updateHistory(() => ({
         past: [],
         present: cloneMaskDocument(initialRef.current),
         future: [],
-      });
+      }));
       onUserEdit?.("reset");
     };
 
@@ -879,8 +997,14 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
             onPointerUp={finishStroke}
             onPointerCancel={cancelPointerStroke}
             onLostPointerCapture={(event) => commitActiveStroke(event.pointerId)}
-            onPointerLeave={() => setCursor(null)}
-            onPointerEnter={disabled ? undefined : (event) => setCursor(pointerToPoint(event, event.currentTarget))}
+            onPointerLeave={() => {
+              cursorRef.current = null;
+              schedulePreviewFrame();
+            }}
+            onPointerEnter={disabled ? undefined : (event) => {
+              cursorRef.current = pointerToPoint(event, event.currentTarget);
+              schedulePreviewFrame();
+            }}
             onKeyDown={handleCanvasKeyDown}
             role="application"
             aria-describedby={instructionsId}

@@ -16,8 +16,11 @@ const context = {
   })),
   putImageData: vi.fn(),
   beginPath: vi.fn(),
+  arc: vi.fn(),
   ellipse: vi.fn(),
+  fill: vi.fn(),
   stroke: vi.fn(),
+  createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
   createImageData: vi.fn((width: number, height: number) => ({
     data: new Uint8ClampedArray(width * height * 4),
   })),
@@ -142,6 +145,38 @@ describe("MaskBrushEditor", () => {
     await waitFor(() => expect(documents.at(-1)?.strokes).toHaveLength(1));
   });
 
+  it("移动期间只更新活动笔划预览，抬笔时才提交一次 React 文档", async () => {
+    const documents: MaskDocument[] = [];
+    render(
+      <MaskBrushEditor
+        originalSrc={null}
+        generatedSrc={null}
+        width={100}
+        height={100}
+        onDocumentChange={(document) => documents.push(document)}
+      />,
+    );
+    const canvas = screen.getByLabelText("Mask 画布，按住鼠标绘制");
+    await waitFor(() => expect(documents).toHaveLength(1));
+    const initialUpdates = documents.length;
+
+    fireEvent.pointerDown(canvas, { pointerId: 61, button: 0, clientX: 10, clientY: 10 });
+    for (let index = 1; index <= 20; index += 1) {
+      fireEvent.pointerMove(canvas, {
+        pointerId: 61,
+        buttons: 1,
+        clientX: 10 + index * 3,
+        clientY: 10 + index * 2,
+      });
+    }
+    expect(documents).toHaveLength(initialUpdates);
+
+    fireEvent.pointerUp(canvas, { pointerId: 61, clientX: 75, clientY: 55 });
+    await waitFor(() => expect(documents).toHaveLength(initialUpdates + 1));
+    expect(documents.at(-1)?.strokes).toHaveLength(1);
+    expect(documents.at(-1)?.strokes[0]?.points.length).toBeGreaterThan(20);
+  });
+
   it("抬笔坐标会补入轨迹，pointer cancel 则回滚未完成笔划", async () => {
     const documents: MaskDocument[] = [];
     render(
@@ -208,6 +243,35 @@ describe("MaskBrushEditor", () => {
 
     await waitFor(() => expect(historyStates.at(-1)).toMatchObject({ canUndo: true, undoDepth: 1 }));
     expect(documents.at(-1)?.strokes).toHaveLength(1);
+  });
+
+  it("上一笔缺少 pointerup 时先原子提交旧笔划，再以正确索引开始新笔划", async () => {
+    const documents: MaskDocument[] = [];
+    const historyStates: Array<{ undoDepth: number }> = [];
+    render(
+      <MaskBrushEditor
+        originalSrc={null}
+        generatedSrc={null}
+        width={100}
+        height={100}
+        onDocumentChange={(document) => documents.push(document)}
+        onHistoryChange={(state) => historyStates.push(state)}
+      />,
+    );
+    const canvas = screen.getByLabelText("Mask 画布，按住鼠标绘制");
+
+    fireEvent.pointerDown(canvas, { pointerId: 51, button: 0, clientX: 10, clientY: 15 });
+    fireEvent.pointerMove(canvas, { pointerId: 51, buttons: 1, clientX: 35, clientY: 40 });
+    // Simulate a gesture layer swallowing the first pointerup. The next
+    // pointerdown must not overwrite or append points to the stale stroke.
+    fireEvent.pointerDown(canvas, { pointerId: 52, button: 0, clientX: 65, clientY: 60 });
+    fireEvent.pointerMove(canvas, { pointerId: 52, buttons: 1, clientX: 85, clientY: 80 });
+    fireEvent.pointerUp(canvas, { pointerId: 52, clientX: 90, clientY: 90 });
+
+    await waitFor(() => expect(historyStates.at(-1)?.undoDepth).toBe(2));
+    expect(documents.at(-1)?.strokes).toHaveLength(2);
+    expect(documents.at(-1)?.strokes[0]?.points[0]).toMatchObject({ x: 0.1, y: 0.15 });
+    expect(documents.at(-1)?.strokes[1]?.points[0]).toMatchObject({ x: 0.65, y: 0.6 });
   });
 
   it("只收到原生 mouseup 且鼠标复用同一 pointerId 时仍逐笔提交", async () => {

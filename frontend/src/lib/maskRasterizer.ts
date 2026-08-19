@@ -34,7 +34,7 @@ function smoothstep(value: number): number {
 }
 
 function stamp(
-  alpha: Float32Array,
+  strokeCoverage: Map<number, number>,
   width: number,
   height: number,
   point: NormalizedPoint,
@@ -70,15 +70,13 @@ function stamp(
       const coverage = edgeCoverage * settings.flow;
       if (coverage <= 0) continue;
       const index = y * width + x;
-      const previous = alpha[index]!;
-      const next = stroke.tool === "paint"
-        ? previous + (1 - previous) * coverage
-        : previous * (1 - coverage);
-      // Keep the accumulator in float space until the complete document has
-      // been replayed. Quantizing every stamp to 8-bit makes a 1% flow brush
-      // appear stuck on an already bright mask: the sub-gray-step increment
-      // is rounded away on every pass.
-      alpha[index] = Math.min(1, Math.max(0, next));
+      // Adjacent interpolated dabs belong to one continuous brush stroke.
+      // Taking their maximum keeps that stroke's feather profile intact;
+      // source-over blending each dab here would repeatedly saturate the soft
+      // edge and make a 100% feather brush look almost hard. Separate strokes
+      // are composited below, so low-flow painting still builds up layer by
+      // layer exactly as the user expects.
+      strokeCoverage.set(index, Math.max(strokeCoverage.get(index) ?? 0, coverage));
     }
   }
 }
@@ -93,7 +91,8 @@ function rasterizeStroke(
 ): void {
   if (!stroke.points.length) return;
   const settings = normalizeBrushSettings(stroke.settings);
-  stamp(alpha, width, height, stroke.points[0], stroke, sourceWidth, sourceHeight);
+  const strokeCoverage = new Map<number, number>();
+  stamp(strokeCoverage, width, height, stroke.points[0], stroke, sourceWidth, sourceHeight);
   for (let index = 1; index < stroke.points.length; index += 1) {
     const previous = stroke.points[index - 1];
     const next = stroke.points[index];
@@ -105,8 +104,17 @@ function rasterizeStroke(
       settings,
     );
     for (let sampleIndex = 1; sampleIndex < samples.length; sampleIndex += 1) {
-      stamp(alpha, width, height, samples[sampleIndex], stroke, sourceWidth, sourceHeight);
+      stamp(strokeCoverage, width, height, samples[sampleIndex], stroke, sourceWidth, sourceHeight);
     }
+  }
+  for (const [index, coverage] of strokeCoverage) {
+    const previous = alpha[index]!;
+    const next = stroke.tool === "paint"
+      ? previous + (1 - previous) * coverage
+      : previous * (1 - coverage);
+    // Keep the document accumulator in float space. Quantizing every stroke
+    // to 8-bit makes a 1% flow brush appear stuck on a bright existing mask.
+    alpha[index] = Math.min(1, Math.max(0, next));
   }
 }
 
