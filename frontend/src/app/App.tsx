@@ -17,6 +17,7 @@ import {
 } from "../features/fusion/fusionDemo";
 import { PromptInspector } from "../features/search/PromptInspector";
 import { CriticInspector } from "../features/review/CriticInspector";
+import { shouldClearCandidateAfterResume } from "../features/review/selectionPolicy";
 import { TimelineCanvas } from "../features/timeline/TimelineCanvas";
 import {
   type GuidanceMaskEditorHandle,
@@ -31,7 +32,7 @@ import {
   resumeSearch,
   startSearch,
 } from "../lib/api";
-import { useSearchEvents } from "../lib/events";
+import { derivePromptRefinementState, useSearchEvents } from "../lib/events";
 import { useObjectUrl } from "../lib/files";
 import { createGuidanceMaskUploadCache } from "../lib/guidanceSearch";
 import { maskDocumentFingerprint, resizeMaskDocument } from "../lib/maskDocument";
@@ -218,7 +219,12 @@ export function App() {
           ? variables.candidateId ?? null
           : nextSnapshot.global_winner_id ?? null);
       }
-      setSelectedCandidateId(null);
+      // Keep the reviewed candidate visible while the queued revision prompt
+      // is being prepared. Clearing it here makes the worker briefly fall back
+      // to Global Winner even though the backend correctly anchors the paid
+      // request to the user's selection. The round-index effect clears it when
+      // the next round actually materializes.
+      if (shouldClearCandidateAfterResume(variables.action)) setSelectedCandidateId(null);
       queryClient.setQueryData(["search", nextSnapshot.search_id], nextSnapshot);
       setEventRevision((revision) => revision + 1);
       setSearch((current) => current
@@ -234,6 +240,7 @@ export function App() {
 
   const snapshot = fusionDemoMode ? FUSION_DEMO_SNAPSHOT : searchQuery.data;
   const status: SearchStatusValue = snapshot?.status ?? search?.status ?? "idle";
+  const promptRefinement = derivePromptRefinementState(events, snapshot?.round_index);
   const candidates = snapshot?.candidates ?? [];
   const sourceLocked = fusionDemoMode || Boolean(project) || submitMutation.isPending;
   const canStart = Boolean(
@@ -356,6 +363,7 @@ export function App() {
       error={errorMessage(submitMutation.error)}
       onStart={() => submitMutation.mutate()}
       history={snapshot?.prompt_history ?? []}
+      refinementState={promptRefinement}
     />
   ) : ui.sidebarTab === "review" ? (
     <CriticInspector
@@ -454,6 +462,7 @@ export function App() {
           selectedNodeId={ui.selectedNodeId}
           onSelectCandidate={selectTimelineCandidate}
           onSelectSource={() => {
+            setSelectedCandidateId(null);
             uiActions.setSelectedNodeId("source");
             uiActions.setWorkerMode("create");
           }}

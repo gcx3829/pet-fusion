@@ -195,8 +195,11 @@ export function buildTimelineGraph(
       }));
     }
     if (nodes.some((node) => node.id === "final")) {
-      const lastGroupNodes = orderedGroups.at(-1)![1];
-      const terminal = lastGroupNodes.find((node) => node.id === acceptedSourceId)
+      // Acceptance lineage must point at the image the user actually chose,
+      // even when the historical Global Winner belongs to an earlier round.
+      // timelineLayout intentionally falls back to its unrestricted layout in
+      // that case because ChoiceFlow terminals must belong to the final Group.
+      const terminal = choiceNodes.find((node) => node.id === acceptedSourceId)
         ?? chooseContinuation(orderedGroups.length - 1);
       edges.push({
         id: `${terminal.id}__final`,

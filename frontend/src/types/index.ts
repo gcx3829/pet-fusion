@@ -193,18 +193,84 @@ export interface ActiveDirective {
   instruction: string;
 }
 
+/** User-visible sections returned by the multimodal prompt refiner.
+ *
+ * This is intentionally a narrow projection of the backend contract. It does
+ * not include provider reasoning, raw request payloads, or audit metadata.
+ */
+export interface ProfessionalPromptPlan {
+  role_of_inputs?: string[];
+  task?: string;
+  identity_invariants?: string[];
+  placement?: string[];
+  photographic_integration?: string[];
+  scene_preservation?: string[];
+  output?: string;
+  preserve_from_anchor?: string[];
+  change_from_anchor?: string[];
+  summary?: string;
+}
+
+export interface PromptVisualAnchor {
+  schema_version?: string;
+  kind?: string;
+  search_id?: string;
+  candidate_id?: string;
+  round_index?: number;
+  source_manifest_hash?: string;
+  raw_asset?: AssetRef;
+  raw_asset_id?: string;
+  raw_asset_sha256?: string;
+  raw_asset_url?: string;
+}
+
+export type PromptRefinementMode = "initial" | "revision" | "unknown";
+export type PromptGenerationMode =
+  | "source_rebase"
+  | "candidate_anchored_rebase"
+  | "unknown";
+
 export interface PromptHistoryEntry {
   round_index: number;
   canonical_prompt: string;
   canonical_prompt_hash?: string;
   generation_prompt: string;
   generation_prompt_hash?: string;
+  prompt_version_id?: string;
+  prompt_version_hash?: string;
+  /** Compatibility alias accepted from older API adapters. */
+  version_hash?: string;
+  based_on_prompt_version_id?: string;
+  /** Compatibility alias accepted from a parent/lineage-shaped response. */
+  parent_prompt_version_id?: string;
+  refinement_mode?: PromptRefinementMode;
+  generation_mode?: PromptGenerationMode;
+  prompt_model?: string;
+  generation_model?: string;
+  prompt_schema_version?: string;
+  prompt_template_version?: string;
   canonical_template_version?: string;
   active_directives: ActiveDirective[];
   active_directives_hash?: string;
+  professional_prompt_plan?: ProfessionalPromptPlan;
+  prompt_summary?: string;
+  visual_anchor?: PromptVisualAnchor;
+  prompt_request_key?: string;
+  source_manifest_hash?: string;
   human_feedback?: string;
   human_selected_candidate_id?: string;
   tuned: boolean;
+}
+
+export type PromptRefinementStatus = "idle" | "started" | "ready" | "failed";
+
+export interface PromptRefinementEventState {
+  status: PromptRefinementStatus;
+  roundIndex?: number;
+  mode?: PromptRefinementMode;
+  generationMode?: PromptGenerationMode;
+  requestKey?: string;
+  message?: string;
 }
 
 export interface InterruptPayload {

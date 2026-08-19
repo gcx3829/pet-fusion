@@ -29,6 +29,9 @@ const eventLabels: Record<string, { title: string; tone: string }> = {
   "round.evaluation.ready": { title: "结构化审片完成", tone: "candidate" },
   "round.winner.updated": { title: "本轮最佳已更新", tone: "winner" },
   "search.global_winner.updated": { title: "历史最佳已更新", tone: "winner" },
+  "prompt.refiner.started": { title: "多模态 Prompt 开始整理", tone: "active" },
+  "prompt.refiner.ready": { title: "本轮 Prompt 已就绪", tone: "candidate" },
+  "prompt.refiner.failed": { title: "Prompt 整理失败", tone: "danger" },
   "search.planner.ready": { title: "下一轮修正已收敛", tone: "active" },
   "search.interrupted": { title: "搜索等待人工审片", tone: "warning" },
   "search.waiting_for_human": { title: "候选已交给摄影师", tone: "warning" },
@@ -48,8 +51,20 @@ function eventDetail(event: SearchEvent): string {
   }
   const score = event.data.score ?? event.data.global_winner_score;
   if (typeof score === "number") return `摄影总分 ${score.toFixed(1)}`;
+  if (event.type.startsWith("prompt.refiner.")) {
+    const round = typeof event.data.round_index === "number" ? `Round ${event.data.round_index}` : "Prompt";
+    const mode = typeof event.data.mode === "string" ? event.data.mode : "";
+    const anchor = typeof event.data.selected_candidate_id === "string"
+      ? ` · Raw ${event.data.selected_candidate_id.slice(0, 12)}`
+      : "";
+    return `${round}${mode ? ` · ${mode}` : ""}${anchor}`;
+  }
   const reason = event.data.reason ?? event.data.stop_reason;
   if (typeof reason === "string") return reason;
+  if (typeof event.data.error === "object" && event.data.error !== null && !Array.isArray(event.data.error)) {
+    const error = event.data.error as Record<string, unknown>;
+    if (typeof error.message === "string") return error.message.slice(0, 240);
+  }
   return event.type;
 }
 

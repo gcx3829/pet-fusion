@@ -1,7 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useSearchEvents } from "../src/lib/events";
-import type { SearchRecord } from "../src/types";
+import { derivePromptRefinementState, useSearchEvents } from "../src/lib/events";
+import type { SearchEvent, SearchRecord } from "../src/types";
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -50,6 +50,11 @@ function Probe({ search, reconnectKey }: { search: SearchRecord; reconnectKey: n
   return <output data-testid="event-count">{events.length}</output>;
 }
 
+function TypeProbe({ search }: { search: SearchRecord }) {
+  const { events } = useSearchEvents(search);
+  return <output data-testid="event-type">{events.at(-1)?.type ?? ""}</output>;
+}
+
 const search: SearchRecord = {
   search_id: "search-01",
   status: "waiting_for_human",
@@ -77,5 +82,49 @@ describe("useSearchEvents", () => {
 
     MockEventSource.instances[1].emit("search.waiting_for_human", 7);
     expect(screen.getByTestId("event-count")).toHaveTextContent("1");
+  });
+
+  it("接收 prompt refiner 状态事件，但由上层决定如何展示完整版本", () => {
+    vi.stubGlobal("EventSource", MockEventSource);
+    render(<TypeProbe search={search} />);
+    act(() => MockEventSource.instances[0].emit("prompt.refiner.started", 8));
+
+    expect(screen.getByTestId("event-type")).toHaveTextContent("prompt.refiner.started");
+  });
+
+  it("乱序重放 started 不会把同轮 ready 回退为永久处理中", () => {
+    const events: SearchEvent[] = [
+      { id: "12", type: "prompt.refiner.ready", data: { round_index: 1, mode: "revision" } },
+      { id: "11", type: "prompt.refiner.started", data: { round_index: 1, mode: "revision" } },
+    ];
+
+    expect(derivePromptRefinementState(events)).toMatchObject({
+      status: "ready",
+      roundIndex: 1,
+      mode: "revision",
+    });
+  });
+
+  it("新一轮 started 优先于上一轮 ready，普通搜索失败不篡改 Prompt 成功状态", () => {
+    const priorReady: SearchEvent = {
+      id: "12",
+      type: "prompt.refiner.ready",
+      data: { round_index: 1, refinement_mode: "revision" },
+    };
+    const nextStarted: SearchEvent = {
+      id: "13",
+      type: "prompt.refiner.started",
+      data: { round_index: 2 },
+    };
+
+    expect(derivePromptRefinementState([nextStarted, priorReady])).toMatchObject({
+      status: "started",
+      roundIndex: 2,
+    });
+    expect(derivePromptRefinementState([priorReady])).toMatchObject({
+      status: "ready",
+      mode: "revision",
+    });
+    expect(derivePromptRefinementState([priorReady], 2)).toEqual({ status: "idle" });
   });
 });

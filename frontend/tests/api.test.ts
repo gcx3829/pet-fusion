@@ -3,6 +3,7 @@ import {
   createFusion,
   createProject,
   getSearch,
+  normalizePromptHistory,
   resumeSearch,
   startSearch,
   uploadFusionMask,
@@ -199,6 +200,109 @@ describe("API client", () => {
     })]);
   });
 
+  it("归一化新 PromptVersion 字段并保留 visual anchor 与专业计划", () => {
+    const history = normalizePromptHistory([{
+      round_index: 1,
+      canonical_prompt: "原图场景",
+      generation_prompt: "基于所选 Raw 缩小主体",
+      prompt_version_id: "pv_revision",
+      prompt_version_hash: "a".repeat(64),
+      based_on_prompt_version_id: "pv_initial",
+      refinement_mode: "revision",
+      generation_mode: "candidate_anchored_rebase",
+      prompt_model: "gpt-5.6-luna",
+      generation_model: "gpt-image-2",
+      prompt_schema_version: "professional-prompt-plan/v1",
+      prompt_template_version: "multimodal-prompt-refiner/v1",
+      professional_prompt_plan: {
+        role_of_inputs: ["Image 1 是底片"],
+        task: "加入同一只猫",
+        identity_invariants: ["保留眼睛和毛色"],
+        change_from_anchor: ["主体缩小"],
+        ignored_reasoning: { secret: "不要显示" },
+      },
+      visual_anchor: {
+        candidate_id: "candidate-raw",
+        round_index: 0,
+        raw_asset: {
+          asset_id: "ast-raw",
+          asset_url: "/api/v1/assets/ast-raw",
+          mime_type: "image/png",
+        },
+      },
+      active_directives: [],
+      tuned: true,
+    }]);
+
+    expect(history[0]).toMatchObject({
+      prompt_version_id: "pv_revision",
+      prompt_version_hash: "a".repeat(64),
+      version_hash: "a".repeat(64),
+      based_on_prompt_version_id: "pv_initial",
+      parent_prompt_version_id: "pv_initial",
+      refinement_mode: "revision",
+      generation_mode: "candidate_anchored_rebase",
+      prompt_model: "gpt-5.6-luna",
+      professional_prompt_plan: {
+        task: "加入同一只猫",
+        identity_invariants: ["保留眼睛和毛色"],
+      },
+      visual_anchor: {
+        candidate_id: "candidate-raw",
+        raw_asset_id: "ast-raw",
+        raw_asset_url: "/api/v1/assets/ast-raw",
+      },
+    });
+    expect(history[0].professional_prompt_plan).not.toHaveProperty("ignored_reasoning");
+  });
+
+  it("旧 Prompt 记录缺少新字段时安全降级，错误对象不会被字符串化", () => {
+    const history = normalizePromptHistory([{
+      round_index: 0,
+      prompt: "兼容旧 prompt",
+      active_directives: [{ instruction: { malicious: true } }],
+    }]);
+
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      canonical_prompt: "兼容旧 prompt",
+      generation_prompt: "兼容旧 prompt",
+      refinement_mode: "initial",
+      generation_mode: "source_rebase",
+      active_directives: [],
+    });
+    expect(JSON.stringify(history)).not.toContain("[object Object]");
+  });
+
+  it("不把 PromptVersion envelope schema 误标为专业计划 schema", () => {
+    const [entry] = normalizePromptHistory([{
+      schema_version: "prompt-version/v1",
+      round_index: 0,
+      canonical_prompt: "基准 prompt",
+      generation_prompt: "生成 prompt",
+      active_directives: [],
+    }]);
+
+    expect(entry.prompt_schema_version).toBeUndefined();
+  });
+
+  it("限制异常 Prompt 历史和结构化数组的渲染规模", () => {
+    const history = normalizePromptHistory(Array.from({ length: 100 }, (_, roundIndex) => ({
+      round_index: roundIndex,
+      canonical_prompt: `canonical-${roundIndex}`,
+      generation_prompt: `generation-${roundIndex}`,
+      professional_prompt_plan: {
+        task: "加入同一只猫",
+        output: "真实照片",
+        identity_invariants: Array.from({ length: 80 }, (_, index) => `identity-${index}`),
+      },
+      active_directives: [],
+    })));
+
+    expect(history).toHaveLength(64);
+    expect(history[0].professional_prompt_plan?.identity_invariants).toHaveLength(24);
+  });
+
   it("候选同时包含 raw 与 protected 资产时始终选择 raw 审片图", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
       search_id: "search-raw",
@@ -292,6 +396,27 @@ describe("API client", () => {
       updated_user_intent: null,
       selected_candidate_id: "candidate-raw",
       human_feedback: "猫再小一点，保留当前眼睛和毛色。",
+      reviewed_round_index: 0,
+    });
+  });
+
+  it("没有 Timeline 候选时继续搜索显式省略 selected_candidate_id", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      search_id: "search-01",
+      status: "queued",
+      round_index: 1,
+      candidates: [],
+      prompt_history: [],
+      active_directives: [],
+    }));
+
+    await resumeSearch("search-01", "continue_one_round", undefined, "只调整光线", 0);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      action: "continue_one_round",
+      updated_user_intent: null,
+      human_feedback: "只调整光线",
       reviewed_round_index: 0,
     });
   });

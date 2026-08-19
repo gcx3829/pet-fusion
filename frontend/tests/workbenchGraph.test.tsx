@@ -11,6 +11,7 @@ import type { GuidanceMaskEditorHandle } from "../src/features/placement/Guidanc
 import { CriticInspector } from "../src/features/review/CriticInspector";
 import { RawCandidateViewer } from "../src/features/candidates/RawCandidateViewer";
 import { useWorkbenchUi } from "../src/features/workbench/useWorkbenchUi";
+import { shouldClearCandidateAfterResume } from "../src/features/review/selectionPolicy";
 import type { SearchCandidate, SearchSnapshot } from "../src/types";
 
 const candidate = (id: string, round = 0): SearchCandidate => ({
@@ -38,6 +39,11 @@ function snapshot(status: SearchSnapshot["status"] = "waiting_for_human"): Searc
 }
 
 describe("workbench raw-first graph", () => {
+  it("续跑期间保留人工选择，直到新一轮真正出现", () => {
+    expect(shouldClearCandidateAfterResume("continue_one_round")).toBe(false);
+    expect(shouldClearCandidateAfterResume("accept_candidate")).toBe(true);
+    expect(shouldClearCandidateAfterResume("cancel")).toBe(true);
+  });
   it("resolves raw fields before generic aliases and never protected fields", () => {
     expect(rawCandidateUrl(candidate("one"))).toBe("/raw/one");
     expect(rawCandidateUrl({ image_url: "/legacy/only" })).toBe("/legacy/only");
@@ -111,6 +117,9 @@ describe("workbench raw-first graph", () => {
   it("接受候选后才创建最终节点，并按当前真实深度重新布局", () => {
     const beforeAccept = buildTimelineGraph([], snapshot(), { sourceImageUrl: "/source.jpg" });
     expect(beforeAccept.nodes.some((node) => node.id === "final")).toBe(false);
+    const beforeLayout = layoutTimelineGraph(beforeAccept);
+    expect(beforeLayout.positions["candidate:a"].x - beforeLayout.positions.source.x).toBe(214);
+    expect(beforeLayout.positions["candidate:b"].x - beforeLayout.positions["candidate:a"].x).toBe(214);
 
     const afterAccept = buildTimelineGraph([], snapshot("accepted"), {
       sourceImageUrl: "/source.jpg",
@@ -128,6 +137,33 @@ describe("workbench raw-first graph", () => {
       relation: "accept",
     }));
     expect(layout.positions.final.x - layout.positions["candidate:b"].x).toBe(214);
+  });
+
+  it("接受历史 Global Winner 时由真实候选连接最终节点，不伪造末轮谱系", () => {
+    const graph = buildTimelineGraph([], snapshot("accepted"), {
+      sourceImageUrl: "/source.jpg",
+      acceptedCandidateId: "a",
+    });
+    const layout = layoutTimelineGraph(graph);
+
+    expect(graph.nodes.find((node) => node.id === "final")).toMatchObject({
+      candidateId: "a",
+      imageUrl: "/raw/a",
+    });
+    expect(graph.edges).toContainEqual(expect.objectContaining({
+      from: "candidate:a",
+      to: "final",
+      relation: "accept",
+    }));
+    expect(graph.edges.some((edge) => edge.from === "candidate:b" && edge.to === "final")).toBe(false);
+    expect(layout.positions.final.x).toBeGreaterThan(layout.positions["candidate:b"].x);
+    expect(layout.positions.final.y).toBeGreaterThan(layout.positions["candidate:b"].y);
+    expect(layout.edges).toContainEqual(expect.objectContaining({
+      id: "candidate:a__final",
+      source: "candidate:a",
+      target: "final",
+      type: "default",
+    }));
   });
 
   it("allows Fusion only after accepted and only through an explicit action", () => {

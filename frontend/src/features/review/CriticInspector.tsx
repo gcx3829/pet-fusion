@@ -20,9 +20,12 @@ export function CriticInspector({
   error,
   onAction,
 }: CriticInspectorProps) {
-  const selected = snapshot?.candidates.find((candidate) => candidate.candidate_id === selectedCandidateId)
-    ?? snapshot?.candidates.find((candidate) => candidate.is_global_winner)
-    ?? snapshot?.candidates[0];
+  // Timeline is the only review selector. A Global Winner is still available
+  // as an explicit accept action, but must not silently become the candidate
+  // used for human refinement when no Timeline node is selected.
+  const selected = selectedCandidateId
+    ? snapshot?.candidates.find((candidate) => candidate.candidate_id === selectedCandidateId)
+    : undefined;
   const metrics: { key: keyof DimensionScores; short: string; label: string }[] = [
     { key: "cat_identity", short: "ID", label: "身份" },
     { key: "perspective_scale", short: "PER", label: "透视" },

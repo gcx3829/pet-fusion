@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { SearchEvent, SearchRecord } from "../types";
+import type {
+  PromptGenerationMode,
+  PromptRefinementEventState,
+  PromptRefinementMode,
+  SearchEvent,
+  SearchRecord,
+} from "../types";
 import { searchEventsUrl } from "./api";
 
 export type EventConnectionState =
@@ -20,6 +26,9 @@ const EVENT_TYPES = [
   "round.evaluation.ready",
   "round.winner.updated",
   "search.global_winner.updated",
+  "prompt.refiner.started",
+  "prompt.refiner.ready",
+  "prompt.refiner.failed",
   "search.planner.ready",
   "search.interrupted",
   "search.accepted",
@@ -36,6 +45,87 @@ const STREAM_END_EVENTS = new Set([
 ]);
 
 type OnSearchEvent = (event: SearchEvent) => void;
+
+const PROMPT_EVENT_PRIORITY: Record<string, number> = {
+  "prompt.refiner.started": 0,
+  "prompt.refiner.ready": 1,
+  "prompt.refiner.failed": 1,
+};
+
+function promptRound(event: SearchEvent): number {
+  const value = event.data.round_index;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : -1;
+}
+
+function numericEventId(event: SearchEvent): number {
+  const value = Number(event.id);
+  return Number.isSafeInteger(value) && value >= 0 ? value : -1;
+}
+
+/** Derive the visible prompt-refiner state without trusting SSE arrival order.
+ *
+ * EventSource reconnects may replay an older `started` event after `ready`.
+ * Round and terminal-state precedence prevent that replay from leaving the UI
+ * permanently stuck. Search failures are intentionally not treated as prompt
+ * failures: generation or Critic can fail after a valid PromptVersion exists.
+ */
+export function derivePromptRefinementState(
+  events: SearchEvent[],
+  currentRound?: number,
+): PromptRefinementEventState {
+  const promptEvents = events.filter((event) => (
+    Object.prototype.hasOwnProperty.call(PROMPT_EVENT_PRIORITY, event.type)
+  ));
+  const latest = promptEvents.reduce<SearchEvent | undefined>((current, candidate) => {
+    if (!current) return candidate;
+    const roundDelta = promptRound(candidate) - promptRound(current);
+    if (roundDelta !== 0) return roundDelta > 0 ? candidate : current;
+    const priorityDelta = PROMPT_EVENT_PRIORITY[candidate.type] - PROMPT_EVENT_PRIORITY[current.type];
+    if (priorityDelta !== 0) return priorityDelta > 0 ? candidate : current;
+    return numericEventId(candidate) >= numericEventId(current) ? candidate : current;
+  }, undefined);
+  if (!latest) return { status: "idle" };
+  if (typeof currentRound === "number" && promptRound(latest) < currentRound) {
+    return { status: "idle" };
+  }
+
+  const data = latest.data;
+  const modeValue = typeof data.mode === "string"
+    ? data.mode
+    : typeof data.refinement_mode === "string"
+      ? data.refinement_mode
+      : "";
+  const mode: PromptRefinementMode | undefined = modeValue === "initial" || modeValue === "revision"
+    ? modeValue
+    : undefined;
+  const generationValue = typeof data.generation_mode === "string" ? data.generation_mode : "";
+  const generationMode: PromptGenerationMode | undefined = generationValue === "source_rebase"
+    || generationValue === "candidate_anchored_rebase"
+    ? generationValue
+    : undefined;
+  const errorValue = data.error;
+  const message = typeof data.message === "string"
+    ? data.message.slice(0, 600)
+    : typeof errorValue === "string"
+      ? errorValue.slice(0, 600)
+      : typeof errorValue === "object" && errorValue !== null && !Array.isArray(errorValue)
+        && typeof (errorValue as Record<string, unknown>).message === "string"
+        ? ((errorValue as Record<string, unknown>).message as string).slice(0, 600)
+        : undefined;
+  const common = {
+    roundIndex: promptRound(latest) >= 0 ? promptRound(latest) : undefined,
+    mode,
+    generationMode,
+    requestKey: typeof data.request_key === "string" ? data.request_key.slice(0, 256) : undefined,
+  };
+  if (latest.type === "prompt.refiner.started") {
+    return { ...common, status: "started", message: "事件只报告处理中；完整 Prompt 会在版本落库后显示。" };
+  }
+  if (latest.type === "prompt.refiner.failed") {
+    return { ...common, status: "failed", message: message ?? "Prompt 整理失败，未向图像模型发送不完整版本。" };
+  }
+  return { ...common, status: "ready", message: "Prompt 版本已落库，下面展示实际 generation prompt。" };
+}
 
 function eventFromMessage(message: MessageEvent<string>, forcedType?: string): SearchEvent | null {
   try {
