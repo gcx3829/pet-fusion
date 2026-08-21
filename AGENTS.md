@@ -88,3 +88,23 @@ When reporting work, include:
 - test results;
 - remaining limitations;
 - any deviation from the implementation guide and the reason.
+
+## Post-commit capability/documentation hook
+
+After every commit, run:
+
+```bash
+./scripts/check_docs_drift.sh
+```
+
+Treat a failed check as unfinished work: compare the changed implementation with
+`docs/CAPABILITIES.md`, both READMEs, and `docs/QA_AND_LIVE_SMOKE.md`; update the
+affected documentation before pushing. If a capability-path change is purely
+internal and has no documentation impact, record that decision in the commit
+message with the trailer `Docs-Impact: none`.
+
+The repository also contains the versioned `.githooks/post-commit` wrapper. Set
+`git config core.hooksPath .githooks` in each local clone so the same check runs
+automatically after `git commit`. A post-commit failure does not undo the commit;
+fix the documentation in an immediate follow-up commit or amend the unpushed
+commit when it is safe to do so.

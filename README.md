@@ -227,7 +227,7 @@ OPENAI_BASE_URL=
 
 `RUN_OPENAI_LIVE_TESTS` 不参与应用 provider 选择，只为未来独立的 opt-in 自动 live test 预留；手工工作台验证仍由三个 `FAKE_*` 开关明确控制。默认测试脚本和 pytest harness 会把它保持为 `0`。
 
-`OPENAI_BASE_URL` 是可选的、仅后端使用的 SDK base URL：留空即走官方 OpenAI 端点；中转站兼容性必须分别验证 Image edits、Critic Responses Structured Outputs 和 Prompt Refiner Responses Structured Outputs，任何一项成功都不能推断其他能力已验证。本轮只记录代码路径与离线契约，不声称已完成真实 provider/live 验证。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64、endpoint 原文或完整用户 prompt。当前 Planner 仍是确定性离线实现，`OPENAI_PLANNER_MODEL` 和 `OPENAI_CRITIC_ESCALATION_MODEL` 仅保留为实施指导中的预留配置，尚不会触发调用。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
+`OPENAI_BASE_URL` 是可选的、仅后端使用的 SDK base URL：留空即走官方 OpenAI 端点；中转站兼容性必须分别验证 Image edits、Critic Responses Structured Outputs 和 Prompt Refiner Responses Structured Outputs，任何一项成功都不能推断其他能力已验证。2026-08-21 已通过本机配置的 OpenAI-compatible 端点，用真实底图和宠物参考完成三段单候选、单轮 smoke；这不等同于官方 `api.openai.com` 直连或真实多轮质量验证。真实模式使用后端锁定依赖中的官方 `openai` Python SDK，并且只在后端进程中读取 `OPENAI_API_KEY`。候选输入和输出保持 PNG；provider request ID 与数值 usage 写入调用审计，但不会记录 API key、图片 Base64、endpoint 原文或完整用户 prompt。当前 Planner 仍是确定性离线实现，`OPENAI_PLANNER_MODEL` 和 `OPENAI_CRITIC_ESCALATION_MODEL` 仅保留为实施指导中的预留配置，尚不会触发调用。`.env`、`.env.local` 和所有 `.env.*` 本地变体都会被 Git 忽略，只有 `.env.example` 允许提交。
 
 不执行真实调用的配置检查、以及明天可手工执行的一次低成本 live smoke 步骤见 [`docs/QA_AND_LIVE_SMOKE.md`](docs/QA_AND_LIVE_SMOKE.md)。
 
@@ -253,9 +253,11 @@ OPENAI_BASE_URL=
 
 ## 当前限制
 
-- 默认仍使用确定性的 mock generator、Critic 和 Prompt Refiner；`FAKE_GENERATOR=0`、`FAKE_CRITIC=0`、`FAKE_PROMPT_REFINER=0` 的官方 SDK 代码路径已接通，但本轮不声称已完成真实 provider/live 验证。中转站必须分别验证 Image edits、Critic Responses Structured Outputs 与 Prompt Refiner Responses Structured Outputs；Image edits 成功不能推断 Responses 能力。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
+- 默认仍使用确定性的 mock generator、Critic 和 Prompt Refiner；`FAKE_GENERATOR=0`、`FAKE_CRITIC=0`、`FAKE_PROMPT_REFINER=0` 的官方 SDK 代码路径已接通。当前只完成了 OpenAI-compatible 端点上的单候选、单轮真实 smoke，尚未验证官方 OpenAI 直连、真实多轮搜索和摄影质量基准。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
 - raw-first Search/Critic/人工接受、Guidance Mask、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Fusion Mask 是用户显式触发的独立融合层，后端提供 search-scoped alpha mask 上传与矩形/PNG alpha + 羽化 API，前端提供 Fusion 预览编辑器；旧 Composite Floor 资产仅为兼容 Local Fix、导出和历史 SQLite 数据保留，不作为 Search/Critic 默认图像；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
 - 前端已覆盖素材分配、Guidance 画笔、Search、Critic 分数/问题、Timeline 唯一选片控制、人工接受、Fusion 画笔与融合结果的全尺寸 PNG 直接下载。Local Fix 尚无前端入口；生产 Export API 的 JPEG/PNG、质量、ICC/EXIF 策略也尚未做成完整导出面板。
 
 这些限制是实施指导中分阶段交付的结果，不是对非协商架构约束的替代；后续真实 provider、自动多轮和局部修复仍必须遵守 immutable-source rebase、幂等调用、PNG lineage、历史最佳和最大修复深度 2 等规则。
+
+当前实现、验证证据和未完成项的逐项清单见 [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md)。

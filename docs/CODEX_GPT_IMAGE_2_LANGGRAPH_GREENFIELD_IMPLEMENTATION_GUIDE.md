@@ -773,8 +773,9 @@ rank 或 stop。`FAKE_PROMPT_REFINER=1` 是默认且强制的离线 provider，`
 因 Image edits 成功而被视为已兼容 Structured Outputs。
 
 官方能力参考：[GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
-与 [GPT Image 2](https://developers.openai.com/api/docs/models/gpt-image-2)。本仓库本轮不
-声称真实 provider/live 已验证。
+与 [GPT Image 2](https://developers.openai.com/api/docs/models/gpt-image-2)。2026-08-21 已在
+本机配置的 OpenAI-compatible 端点完成 Prompt Refiner、Image edits 和 Critic 的单候选、
+单轮 smoke；该结果不等同于官方 OpenAI 直连、真实多轮或主观质量验证。
 
 ## 7.6 Vision detail 与成本
 

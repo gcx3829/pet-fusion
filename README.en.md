@@ -128,6 +128,8 @@ Set the relevant `FAKE_*` switch to `0` to enable its official SDK path. `OPENAI
 Never commit `.env`. Local environment files, databases, generated assets, coverage output, and build output are ignored by Git.
 
 See [QA and live smoke testing](docs/QA_AND_LIVE_SMOKE.md) before using a real credential.
+The current implementation and verification evidence are tracked in the
+[capability matrix](docs/CAPABILITIES.md).
 
 ## Main API surface
 
@@ -155,7 +157,7 @@ Read these documents in order when contributing:
 
 ## Current limitations
 
-- Fake Generator, Critic, and Prompt Refiner modes remain the safe defaults. The official SDK paths exist, but real-provider and relay compatibility must be validated separately.
+- Fake Generator, Critic, and Prompt Refiner modes remain the safe defaults. On 2026-08-21, a real single-candidate, single-round smoke passed through the locally configured OpenAI-compatible endpoint for Prompt Refiner, Image edits, and Critic. This does not validate direct `api.openai.com` access, multi-round search, or photographic quality.
 - The Feedback Planner is deterministic and offline; it does not yet use a live LLM provider.
 - Local Fix has a backend API but no complete frontend workflow.
 - Production authentication, object storage, distributed queues, and cross-host coordination are not implemented.

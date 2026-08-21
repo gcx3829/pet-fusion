@@ -76,7 +76,18 @@ cd ..
 ./scripts/dev.sh
 ```
 
-只有在工作台提交搜索后才会调用 provider。首次实际 smoke 建议只提交一个小尺寸背景、1 张参考图、`candidate_count=1`、`max_rounds=1`，并在结果出现后停止；不要把默认测试脚本改成 live 调用。本仓库本轮只验证离线契约，不声称已完成真实 provider/live 验证。
+只有在工作台提交搜索后才会调用 provider。首次实际 smoke 建议只提交一个小尺寸背景、1 张参考图、`candidate_count=1`、`max_rounds=1`，并在结果出现后停止；不要把默认测试脚本改成 live 调用。
+
+### 已完成的真实 smoke
+
+2026-08-21 已使用真实人物旅行照和真实宠物参考图，在三个 `FAKE_*` 开关均为 `0` 时完成一次单候选、单轮验证：
+
+- Prompt Refiner Responses Structured Outputs 成功；
+- Image edits 成功并返回 PNG；
+- Critic Responses Structured Outputs 成功，并把宠物比例过大、位置侵入人物判定为 blocking；
+- 修复了增强 prompt 超过 CriticTask 旧 8,000 字符上限的问题，恢复执行复用了已完成的 Prompt Refiner 和生成调用。
+
+该次调用使用本机配置的 OpenAI-compatible base URL，不是官方 `api.openai.com`，因此官方直连、其他中转站、真实多轮搜索、provider 对幂等 header 的实际支持和摄影质量仍未验证。
 
 `OPENAI_BASE_URL` 同时传给 Image edits、Critic Responses 和 Prompt Refiner Responses 客户端。中转站兼容性必须逐项独立验证，至少要分别确认：
 
@@ -97,11 +108,13 @@ Image edits 和 Prompt Refiner 的官方 SDK 请求会携带由本地 lineage �
 
 | 领域 | 当前状态 | 仍需人工/后续实现 |
 | --- | --- | --- |
-| 自动 Search | 显式 LangGraph、Critic/Planner 子图、Ranker、Global Winner、rebase、checkpoint | 真实凭据联调、生产队列与跨主机协调 |
-| Prompt Refiner | 默认 deterministic fake；Responses Structured Outputs adapter 与 `OPENAI_PROMPT_MODEL` 配置 | 真实模型/中转站兼容性需独立、显式 smoke |
+| 自动 Search | 显式 LangGraph、Critic/Planner 子图、Ranker、Global Winner、rebase、checkpoint；兼容端点单轮 smoke | 官方直连、真实多轮基准、生产队列与跨主机协调 |
+| Prompt Refiner | 默认 deterministic fake；Responses Structured Outputs adapter；兼容端点真实 smoke | 官方直连及其他端点兼容性 |
 | Critic / Planner | fake Critic 与可选 live Critic transport；确定性 Planner policy | GPT-5.6 Luna Planner transport、Sol escalation |
 | 背景保护 / 导出 | 用户 Fusion Mask、原始分辨率回贴、PNG/JPEG、ICC/EXIF 尽力保留、Export API | 前端 Fusion/导出体验与真实摄影文件集验证 |
 | Local Fix | 独立后端图、tight mask、0→2 深度保护、SQLite 幂等回退与 FastAPI route | 真实 edit transport、前端入口 |
 | 基准 | 离线架构和回归测试 | 按实施指南准备 5 只宠物 / 15 张旅行照的盲评集，比较单轮、rebase search 与连续 I2I，并记录成本、轮数和摄影师偏好 |
 
 这些限制不会改变 immutable source、PNG lineage、历史 Global Winner、显式 Fusion Mask 和 Local Fix 深度上限等架构约束。
+
+逐项实现证据见 [`CAPABILITIES.md`](CAPABILITIES.md)。
