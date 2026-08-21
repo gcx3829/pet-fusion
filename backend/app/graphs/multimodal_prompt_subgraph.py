@@ -201,6 +201,7 @@ def build_multimodal_prompt_subgraph(
                 parent_prompt_version=parent,
                 generation_model=services.generation_model,
             )
+        request = prompt_service.enrich_request(request)
         request_payload = request.model_dump(mode="json")
         assert_checkpoint_safe(request_payload, path="prompt_refiner_request")
         request_key = PromptRefinerService.build_request_key(
@@ -318,6 +319,7 @@ def build_multimodal_prompt_subgraph(
             and item.get("round_index") != version.round_index
         ]
         history.append(version.model_dump(mode="json"))
+
         def history_round(item: dict[str, object]) -> int:
             value = item.get("round_index")
             return value if isinstance(value, int) else 0
@@ -325,11 +327,7 @@ def build_multimodal_prompt_subgraph(
         history.sort(key=history_round)
         round_history = [dict(item) for item in state.get("round_history", [])]
         round_entry = next(
-            (
-                item
-                for item in round_history
-                if item.get("round_index") == version.round_index
-            ),
+            (item for item in round_history if item.get("round_index") == version.round_index),
             None,
         )
         if round_entry is None:
@@ -346,9 +344,7 @@ def build_multimodal_prompt_subgraph(
             state["search_id"],
             prompt_history=history,
             round_history=round_history,
-            active_directives=[
-                item.model_dump(mode="json") for item in version.active_directives
-            ],
+            active_directives=[item.model_dump(mode="json") for item in version.active_directives],
             events=(
                 (
                     f"round:{version.round_index}:prompt-refiner:ready",
@@ -400,9 +396,7 @@ def build_multimodal_prompt_subgraph(
             ],
             "active_directives_hash": version.active_directives_hash,
             "prompt_refiner_result": (
-                provider_result.model_dump(mode="json")
-                if provider_result is not None
-                else None
+                provider_result.model_dump(mode="json") if provider_result is not None else None
             ),
         }
         assert_checkpoint_safe(payload, path="prompt_refiner.output")

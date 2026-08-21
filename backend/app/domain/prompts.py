@@ -124,18 +124,27 @@ class ProfessionalPromptPlan(BaseModel):
     role_of_inputs: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=8)
     task: PromptTask
     identity_invariants: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=16)
+    pet_identity_observations: tuple[PromptClause, ...] = Field(
+        default_factory=tuple, max_length=20
+    )
+    background_observations: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=16)
     placement: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=12)
-    photographic_integration: tuple[PromptClause, ...] = Field(
-        default_factory=tuple, max_length=16
+    capture_geometry: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=12)
+    lighting_analysis: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=12)
+    color_analysis: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=12)
+    optics_and_depth_analysis: tuple[PromptClause, ...] = Field(
+        default_factory=tuple, max_length=12
     )
+    texture_and_noise_analysis: tuple[PromptClause, ...] = Field(
+        default_factory=tuple, max_length=12
+    )
+    physical_integration: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=12)
+    photographic_integration: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=16)
     scene_preservation: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=16)
+    uncertainties: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=12)
     output: PromptOutput
-    preserve_from_anchor: tuple[PromptClause, ...] = Field(
-        default_factory=tuple, max_length=16
-    )
-    change_from_anchor: tuple[PromptClause, ...] = Field(
-        default_factory=tuple, max_length=16
-    )
+    preserve_from_anchor: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=16)
+    change_from_anchor: tuple[PromptClause, ...] = Field(default_factory=tuple, max_length=16)
     summary: str = Field(default="", max_length=600)
 
     @model_validator(mode="before")
@@ -307,9 +316,7 @@ def _prompt_identity_payload(value: Mapping[str, object]) -> dict[str, object]:
         "source_manifest_hash": value.get("source_manifest_hash"),
         "round_index": value.get("round_index", 0),
         "refinement_mode": value.get("refinement_mode", PromptRefinementMode.INITIAL.value),
-        "generation_mode": value.get(
-            "generation_mode", PromptGenerationMode.SOURCE_REBASE.value
-        ),
+        "generation_mode": value.get("generation_mode", PromptGenerationMode.SOURCE_REBASE.value),
         "based_on_prompt_version_id": value.get("based_on_prompt_version_id"),
         "prompt_schema_version": value.get("prompt_schema_version", PROMPT_PLAN_SCHEMA_VERSION),
         "prompt_template_version": value.get(
@@ -323,9 +330,7 @@ def _prompt_identity_payload(value: Mapping[str, object]) -> dict[str, object]:
         "generation_prompt": value.get("generation_prompt"),
         "generation_prompt_hash": value.get("generation_prompt_hash"),
         "active_directives_hash": value.get("active_directives_hash"),
-        "active_directives": _canonical_directive_payload(
-            value.get("active_directives", [])
-        ),
+        "active_directives": _canonical_directive_payload(value.get("active_directives", [])),
         # Filesystem paths are deployment metadata.  Stable lineage uses the
         # content-addressed identity, not where the same asset is mounted.
         "visual_anchor": _visual_anchor_identity_payload(value.get("visual_anchor")),
@@ -364,9 +369,7 @@ class PromptVersion(BaseModel):
     round_index: int = Field(ge=0)
     refinement_mode: PromptRefinementMode = PromptRefinementMode.INITIAL
     generation_mode: PromptGenerationMode = PromptGenerationMode.SOURCE_REBASE
-    based_on_prompt_version_id: str | None = Field(
-        default=None, pattern=r"^pv_[0-9a-f]{32}$"
-    )
+    based_on_prompt_version_id: str | None = Field(default=None, pattern=r"^pv_[0-9a-f]{32}$")
     prompt_schema_version: str = Field(
         default=PROMPT_PLAN_SCHEMA_VERSION, min_length=1, max_length=120
     )
@@ -483,13 +486,15 @@ class PromptVersion(BaseModel):
             raise ValueError("prompt template compatibility fields must match")
         if not self.canonical_prompt.strip() or not self.generation_prompt.strip():
             raise ValueError("prompt text cannot be blank")
-        if self.canonical_prompt_hash != hashlib.sha256(
-            self.canonical_prompt.encode("utf-8")
-        ).hexdigest():
+        if (
+            self.canonical_prompt_hash
+            != hashlib.sha256(self.canonical_prompt.encode("utf-8")).hexdigest()
+        ):
             raise ValueError("canonical_prompt_hash must match canonical_prompt")
-        if self.generation_prompt_hash != hashlib.sha256(
-            self.generation_prompt.encode("utf-8")
-        ).hexdigest():
+        if (
+            self.generation_prompt_hash
+            != hashlib.sha256(self.generation_prompt.encode("utf-8")).hexdigest()
+        ):
             raise ValueError("generation_prompt_hash must match generation_prompt")
         if self.active_directives_hash != stable_directives_hash(self.active_directives):
             raise ValueError("active_directives_hash must match active_directives")
@@ -502,10 +507,7 @@ class PromptVersion(BaseModel):
                 raise ValueError("initial prompt versions cannot contain a visual anchor")
             if self.based_on_prompt_version_id is not None:
                 raise ValueError("initial prompt versions cannot have parent prompt lineage")
-        if (
-            self.refinement_mode is PromptRefinementMode.REVISION
-            and self.round_index == 0
-        ):
+        if self.refinement_mode is PromptRefinementMode.REVISION and self.round_index == 0:
             raise ValueError("revision prompt versions must belong to a later round")
         if self.generation_mode is PromptGenerationMode.CANDIDATE_ANCHORED_REBASE:
             if self.refinement_mode is not PromptRefinementMode.REVISION:

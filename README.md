@@ -48,7 +48,13 @@
 
 自动 Critic/Planner 搜索永远从 immutable source 重新生成，绝不自动把上一轮候选作为图像输入；无人工选中时只在本地应用最多 3 条 bounded directives。人工明确选择当前轮 raw candidate 并继续时，下一轮仍以 immutable original 作为 image[0] 和 Guidance Mask base，把 selected raw 仅作为 image[1] visual reference，称为 `candidate_anchored_rebase`，不是 candidate edit。Fusion 和 Local Fix 都不进入 Search。
 
-Round 0 与人工 revision 都经过多模态 Prompt Refiner：它读取底图、宠物参考、Guidance Mask、用户自然语言（revision 还读取 selected raw、对应 Critic 结果和反馈），输出经过本地校验的专业 Prompt。Critic、Ranker、人工审片仍只看 raw candidate。
+Round 0 与人工 revision 都经过多模态 Prompt Refiner：后端先从不可变底图提取白名单 EXIF
+摘要（拍摄时间/GPS、机身镜头、焦距与可推导视场角、曝光、ISO、白平衡模式等），再让
+Refiner 读取该摘要、底图、宠物参考、Guidance Mask 和用户自然语言；revision 还读取
+selected raw、对应 Critic 结果和反馈。Refiner 按宠物身份、背景、机位、光照、色彩、
+镜头/景深、锐化/噪点、接触/遮挡和不确定性输出结构化分析，由本地编译器生成并校验
+专业 Prompt。缺失的 EXIF 保持缺失，不由视觉模型伪造；Critic、Ranker、人工审片仍只看
+raw candidate。
 
 ## MVP 范围
 

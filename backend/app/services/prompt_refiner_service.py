@@ -31,6 +31,7 @@ from app.domain.assets import AssetRef, SourceManifest
 from app.domain.directives import stable_directives_hash
 from app.domain.errors import ConfigurationError
 from app.domain.evaluations import CandidateEvaluation
+from app.domain.photography import BackgroundCaptureMetadata
 from app.domain.prompts import (
     PROMPT_PLAN_SCHEMA_VERSION,
     PromptGenerationMode,
@@ -43,6 +44,7 @@ from app.domain.searches import SearchStatus
 from app.graphs.state import assert_checkpoint_safe
 from app.persistence.app_store import AppStore
 from app.services.asset_store import AssetStore
+from app.services.photography_metadata_service import PhotographyMetadataService
 from app.services.prompt_compiler import compile_generation_prompt
 
 PROMPT_REFINER_SCHEMA_VERSION: Final[Literal["prompt-refiner-request/v1"]] = (
@@ -51,7 +53,7 @@ PROMPT_REFINER_SCHEMA_VERSION: Final[Literal["prompt-refiner-request/v1"]] = (
 PROMPT_REFINER_PROXY_SCHEMA_VERSION: Final[Literal["prompt-refiner-proxy/v1"]] = (
     "prompt-refiner-proxy/v1"
 )
-PROMPT_REFINER_TEMPLATE_VERSION: Final[str] = "multimodal-prompt-refiner/v1"
+PROMPT_REFINER_TEMPLATE_VERSION: Final[str] = "multimodal-prompt-refiner/v2"
 PROMPT_REFINER_OPERATION: Final[str] = "prompt_refine"
 PROMPT_REFINER_PROXY_MAX_SIDE: Final[int] = 1536
 PROMPT_REFINER_PROXY_REFERENCE_LIMIT: Final[int] = 5
@@ -135,6 +137,7 @@ class PromptRefinerRequest(BaseModel):
     round_index: int = Field(ge=0)
     source_manifest: SourceManifest
     guidance_mask: AssetRef
+    background_capture_metadata: BackgroundCaptureMetadata | None = None
     user_intent: str = Field(min_length=1, max_length=2_000)
     human_feedback: str | None = Field(default=None, max_length=2_000)
     human_selected_candidate_id: str | None = Field(default=None, max_length=120)
@@ -152,6 +155,17 @@ class PromptRefinerRequest(BaseModel):
     @model_validator(mode="after")
     def validate_lineage(self) -> PromptRefinerRequest:
         self.source_manifest.assert_integrity()
+        metadata = self.background_capture_metadata
+        if metadata is not None and (
+            metadata.source_asset_id != self.source_manifest.background.asset_id
+            or metadata.source_asset_sha256 != self.source_manifest.background.sha256
+            or (metadata.pixel_width, metadata.pixel_height)
+            != (
+                self.source_manifest.background.width,
+                self.source_manifest.background.height,
+            )
+        ):
+            raise ValueError("Prompt Refiner capture metadata must match the source background")
         guidance = self.guidance_mask
         if guidance.mime_type != "image/png":
             raise ValueError("Prompt Refiner guidance_mask must be a PNG asset")
@@ -421,11 +435,104 @@ def compile_professional_prompt(
         "The Guidance Mask is a soft focus guide for the immutable background, not a pixel lock."
     )
     lines.extend(_plan_section("ROLE OF INPUTS", role))
+    if request.background_capture_metadata is not None:
+        metadata = request.background_capture_metadata
+        camera = f"{metadata.camera_make or ''} {metadata.camera_model or ''}".strip()
+        gps_altitude = (
+            f", altitude {metadata.gps_altitude_m:.2f} m"
+            if metadata.gps_altitude_m is not None
+            else ""
+        )
+        facts = [
+            f"Source pixel dimensions: {metadata.pixel_width} x {metadata.pixel_height}.",
+            *([f"Camera: {camera}."] if camera else []),
+            *([f"Lens: {metadata.lens_model}."] if metadata.lens_model else []),
+            *(
+                [
+                    "Recorded local capture time: "
+                    f"{metadata.captured_at_local}"
+                    f"{f' (UTC offset {metadata.utc_offset})' if metadata.utc_offset else ''}."
+                ]
+                if metadata.captured_at_local
+                else []
+            ),
+            *(
+                [
+                    f"Recorded GPS: latitude {metadata.gps_latitude:.7f}, "
+                    f"longitude {metadata.gps_longitude:.7f}"
+                    f"{gps_altitude}."
+                ]
+                if metadata.gps_latitude is not None and metadata.gps_longitude is not None
+                else []
+            ),
+            *(
+                [f"Recorded focal length: {metadata.focal_length_mm:g} mm."]
+                if metadata.focal_length_mm is not None
+                else []
+            ),
+            *(
+                [
+                    f"Recorded 35 mm-equivalent focal length: "
+                    f"{metadata.focal_length_35mm_equivalent_mm:g} mm; derived horizontal "
+                    f"field of view: {metadata.horizontal_field_of_view_degrees:g} degrees."
+                ]
+                if metadata.focal_length_35mm_equivalent_mm is not None
+                and metadata.horizontal_field_of_view_degrees is not None
+                else []
+            ),
+            *(
+                [f"Recorded aperture: f/{metadata.aperture_f_number:g}."]
+                if metadata.aperture_f_number is not None
+                else []
+            ),
+            *(
+                [f"Recorded exposure time: {metadata.exposure_time_seconds:g} seconds."]
+                if metadata.exposure_time_seconds is not None
+                else []
+            ),
+            *([f"Recorded ISO: {metadata.iso}."] if metadata.iso is not None else []),
+            *(
+                [f"Recorded exposure bias: {metadata.exposure_bias_ev:g} EV."]
+                if metadata.exposure_bias_ev is not None
+                else []
+            ),
+            *(
+                [f"Recorded exposure program: {metadata.exposure_program}."]
+                if metadata.exposure_program
+                else []
+            ),
+            *(
+                [f"Recorded metering mode: {metadata.metering_mode}."]
+                if metadata.metering_mode
+                else []
+            ),
+            *(
+                [f"Recorded white-balance mode: {metadata.white_balance_mode}."]
+                if metadata.white_balance_mode
+                else []
+            ),
+            *(
+                [f"Recorded light-source setting: {metadata.light_source}."]
+                if metadata.light_source
+                else []
+            ),
+            *([f"Recorded color space: {metadata.color_space}."] if metadata.color_space else []),
+        ]
+        lines.extend(_plan_section("BACKGROUND CAPTURE METADATA", facts))
     lines.extend(_plan_section("TASK", (plan.task,)))
     lines.extend(_plan_section("IDENTITY INVARIANTS", plan.identity_invariants))
+    lines.extend(_plan_section("PET IDENTITY OBSERVATIONS", plan.pet_identity_observations))
+    lines.extend(_plan_section("BACKGROUND OBSERVATIONS", plan.background_observations))
     lines.extend(_plan_section("PLACEMENT AND PHOTOGRAPHER INTENT", plan.placement))
+    lines.extend(_plan_section("CAPTURE GEOMETRY", plan.capture_geometry))
+    lines.extend(_plan_section("LIGHTING", plan.lighting_analysis))
+    lines.extend(_plan_section("COLOR RENDERING", plan.color_analysis))
+    lines.extend(_plan_section("OPTICS AND DEPTH", plan.optics_and_depth_analysis))
+    lines.extend(_plan_section("TEXTURE, SHARPENING, AND NOISE", plan.texture_and_noise_analysis))
+    lines.extend(_plan_section("PHYSICAL INTEGRATION", plan.physical_integration))
     lines.extend(_plan_section("PHOTOGRAPHIC INTEGRATION", plan.photographic_integration))
     lines.extend(_plan_section("SCENE PRESERVATION", plan.scene_preservation))
+    lines.extend(_plan_section("UNCERTAINTIES", plan.uncertainties))
     if request.mode is PromptRefinementMode.REVISION:
         lines.extend(_plan_section("PRESERVE FROM SELECTED RAW ANCHOR", plan.preserve_from_anchor))
         lines.extend(_plan_section("CHANGE FROM SELECTED RAW ANCHOR", plan.change_from_anchor))
@@ -508,6 +615,16 @@ class DeterministicFakePromptRefiner:
                 ),
                 "Do not substitute a generic pet of the same breed or colour.",
             ),
+            "pet_identity_observations": (
+                "Record concrete cross-reference identity traits: face geometry, eye colour, "
+                "coat-pattern topology, ear shape, body proportions, fur length, and tail "
+                "markings.",
+                "Separate traits confirmed across references from traits visible in only one view.",
+            ),
+            "background_observations": (
+                "Describe the visible scene layout, protected people or objects, target contact "
+                "surface, nearby occluders, and texture scale around the Guidance Mask.",
+            ),
             "placement": (
                 (
                     "Use the Guidance Mask to determine the editable focus region and "
@@ -526,12 +643,40 @@ class DeterministicFakePromptRefiner:
                     "written direction."
                 ),
             ),
+            "capture_geometry": (
+                "Use recorded focal-length facts when present; otherwise describe only visible "
+                "camera height, viewing direction, projection, scale, and perspective evidence.",
+            ),
+            "lighting_analysis": (
+                "Describe visible key-light direction, softness, contrast ratio, fill, shadow "
+                "direction, and local reflected colour without inventing unavailable measurements.",
+            ),
+            "color_analysis": (
+                "Describe visible white balance, overall colour cast, saturation, highlight "
+                "rolloff, and local ambient colour contamination.",
+            ),
+            "optics_and_depth_analysis": (
+                "Describe visible depth of field, focus plane, lens perspective, edge softness, "
+                "motion blur, and computational-photography rendering.",
+            ),
+            "texture_and_noise_analysis": (
+                "Describe local sharpening, microcontrast, denoising, grain or sensor noise, "
+                "compression texture, and the detail level the generated fur must match.",
+            ),
+            "physical_integration": (
+                "Specify the contact surface, paw contact, required contact and cast shadows, "
+                "occlusion ordering, fur-edge interaction, and nearby reflections.",
+            ),
             "scene_preservation": (
                 (
                     "Do not redesign, crop, restyle, move, add, or remove unrelated people, "
                     "architecture, text, or background details."
                 ),
                 "Keep all non-target content coherent with the original camera viewpoint.",
+            ),
+            "uncertainties": (
+                "State which requested facts are not present in EXIF or cannot be established "
+                "reliably from the supplied pixels; do not replace missing facts with guesses.",
             ),
             "output": (
                 "Return an authentic photograph that appears captured at the same moment "
@@ -594,6 +739,17 @@ class PromptRefinerService:
         self.proxy_builder = proxy_builder or PromptRefinerProxyBuilder(
             asset_store=asset_store,
         )
+        self.photography_metadata_service = PhotographyMetadataService(asset_store=asset_store)
+
+    def enrich_request(self, request: PromptRefinerRequest) -> PromptRefinerRequest:
+        """Attach deterministic background metadata before hashing or provider use."""
+
+        if request.background_capture_metadata is not None:
+            return request
+        metadata = self.photography_metadata_service.extract_background(
+            request.source_manifest.background
+        )
+        return request.model_copy(update={"background_capture_metadata": metadata})
 
     @staticmethod
     def apply_local_directives(
@@ -696,11 +852,14 @@ class PromptRefinerService:
             "source_manifest_hash": request.source_manifest.manifest_hash,
             "source_assets": source_assets,
             "guidance": _asset_lineage(request.guidance_mask),
+            "background_capture_metadata": (
+                request.background_capture_metadata.model_dump(mode="json")
+                if request.background_capture_metadata is not None
+                else None
+            ),
             "user_intent_hash": _sha256_text(request.user_intent),
             "feedback_hash": (
-                _sha256_text(request.human_feedback)
-                if request.human_feedback is not None
-                else None
+                _sha256_text(request.human_feedback) if request.human_feedback is not None else None
             ),
             "human_selected_candidate_id": request.human_selected_candidate_id,
             "anchor": (
@@ -765,11 +924,14 @@ class PromptRefinerService:
             ],
             "guidance_mask_asset_id": request.guidance_mask.asset_id,
             "guidance_mask_sha256": request.guidance_mask.sha256,
+            "background_capture_metadata_hash": (
+                _stable_hash(request.background_capture_metadata)
+                if request.background_capture_metadata is not None
+                else None
+            ),
             "user_intent_hash": _sha256_text(request.user_intent),
             "feedback_hash": (
-                _sha256_text(request.human_feedback)
-                if request.human_feedback is not None
-                else None
+                _sha256_text(request.human_feedback) if request.human_feedback is not None else None
             ),
             "human_selected_candidate_id": request.human_selected_candidate_id,
             "anchor": (
@@ -895,9 +1057,7 @@ class PromptRefinerService:
             else None
         )
         response_usage = (
-            _safe_usage(provider.get("usage"))
-            if isinstance(provider.get("usage"), Mapping)
-            else {}
+            _safe_usage(provider.get("usage")) if isinstance(provider.get("usage"), Mapping) else {}
         )
         if response_request_id != stored_result.provider_request_id:
             raise PromptRefinerAuditError("Prompt Refiner provider request ID mismatch")
@@ -956,9 +1116,7 @@ class PromptRefinerService:
                 )
                 if completed:
                     return True
-                existing = await asyncio.to_thread(
-                    self.app_store.get_provider_call, request_key
-                )
+                existing = await asyncio.to_thread(self.app_store.get_provider_call, request_key)
                 if existing is not None and existing[0] == "completed":
                     return False
                 last_error = PromptRefinerAuditError("Prompt Refiner provider lease was lost")
@@ -1010,8 +1168,7 @@ class PromptRefinerService:
                 SearchStatus.CANCELLED,
             }:
                 raise PromptRefinerError(
-                    "Prompt Refiner cannot run for terminal search status "
-                    f"{search.status.value}"
+                    f"Prompt Refiner cannot run for terminal search status {search.status.value}"
                 )
             if search.round_index != request.round_index:
                 raise PromptRefinerError(
@@ -1055,8 +1212,7 @@ class PromptRefinerService:
         review_entries = [
             item
             for item in search.round_history
-            if isinstance(item, dict)
-            and item.get("round_index") == request.round_index - 1
+            if isinstance(item, dict) and item.get("round_index") == request.round_index - 1
         ]
         if len(review_entries) != 1:
             raise PromptRefinerError(
@@ -1071,8 +1227,7 @@ class PromptRefinerService:
         )
         if (
             review_entry.get("human_resume_applied") is not True
-            or review_entry.get("human_selected_candidate_id")
-            != request.visual_anchor.candidate_id
+            or review_entry.get("human_selected_candidate_id") != request.visual_anchor.candidate_id
             or normalized_persisted_feedback != (request.human_feedback or "").strip()
         ):
             raise PromptRefinerError(
@@ -1244,6 +1399,7 @@ class PromptRefinerService:
     async def refine(self, request: PromptRefinerRequest) -> PromptRefinerResult:
         """Run at most two provider attempts and replay a validated completion."""
 
+        request = self.enrich_request(request)
         if not request.is_checkpoint_safe:
             raise PromptRefinerError("Prompt Refiner request is not checkpoint-safe")
         # Completed calls remain safely replayable after a Search reaches a
@@ -1333,9 +1489,7 @@ class PromptRefinerService:
                             )
                         return replay
                     if status == "failed_terminal":
-                        raise PromptRefinerError(
-                            "Prompt Refiner provider failed terminally"
-                        )
+                        raise PromptRefinerError("Prompt Refiner provider failed terminally")
                     if claimed:
                         break
                     attempts = await asyncio.to_thread(
