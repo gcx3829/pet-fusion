@@ -33,7 +33,11 @@ class CriticTask(BaseModel):
     candidate: CandidateRecord
     source_manifest: SourceManifest
     placement: PlacementIntent
-    canonical_prompt: str = Field(min_length=1, max_length=8_000)
+    # Keep this boundary aligned with PromptHistoryEntry.canonical_prompt. The
+    # multimodal refiner can legitimately produce more than the legacy 8k
+    # limit once concrete EXIF, identity, lighting, and texture observations
+    # are included.
+    canonical_prompt: str = Field(min_length=1, max_length=12_000)
     canonical_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     proxies: CriticProxyBundle
 

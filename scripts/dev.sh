@@ -60,7 +60,7 @@ echo "启动 API：http://$API_HOST:$API_PORT"
 SERVICE_PIDS+=("$!")
 
 if [[ "${PET_FUSION_SKIP_WORKER:-0}" != "1" ]]; then
-  echo "启动 mock 搜索 worker"
+  echo "启动搜索 worker"
   (
     cd "$BACKEND_DIR"
     if [[ -f "$REPO_ROOT/.env" ]]; then

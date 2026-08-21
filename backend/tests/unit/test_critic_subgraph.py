@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import time
 from dataclasses import replace
@@ -148,6 +149,10 @@ async def test_critic_subgraph_fans_out_bounded_proxies_and_replays_idempotently
         user_intent=command.user_intent,
         reference_count=len(manifest.cat_references),
     )
+    # Real multimodal prompt plans can exceed the legacy 8k Critic task limit.
+    prompt = prompt + (" Concrete visual observation." * 360)
+    assert 8_000 < len(prompt) <= 12_000
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     graph = build_critic_subgraph(
         app_store=container.app_store,
         proxy_builder=CriticProxyBuilder(
