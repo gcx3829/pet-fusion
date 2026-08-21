@@ -2049,7 +2049,9 @@ summary:focus-visible,
 
 .prompt-history-panel {
   overflow: hidden;
-  border-color: rgba(141, 174, 176, 0.22);
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .prompt-history-heading {
@@ -2068,8 +2070,7 @@ summary:focus-visible,
 
 .prompt-history-count {
   align-self: center;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
+  padding: 0;
 }
 
 .prompt-history-empty {
@@ -2112,18 +2113,19 @@ summary:focus-visible,
 
 .prompt-history-list {
   display: grid;
-  gap: 1px;
+  gap: 0;
   padding: 0;
   margin: 0;
   list-style: none;
-  background: var(--line);
+  background: transparent;
 }
 
 .prompt-history-entry {
   display: grid;
   gap: 10px;
-  padding: 17px 22px 20px;
-  background: var(--ink-raised);
+  padding: 17px 0 20px;
+  border-top: 1px solid var(--line);
+  background: transparent;
 }
 
 .prompt-entry-heading {
@@ -2169,17 +2171,18 @@ summary:focus-visible,
 
 .prompt-lineage-meta span,
 .prompt-version-lineage span {
-  padding: 4px 6px;
-  border: 1px solid var(--line);
+  padding: 2px 0;
+  border: 0;
   color: var(--paper-faint);
   font-family: var(--mono);
   font-size: 0.48rem;
   letter-spacing: 0.02em;
 }
 
-.prompt-lineage-meta span:first-child { color: var(--cyan); border-color: rgba(141, 174, 176, 0.3); }
+.prompt-lineage-meta span:first-child { color: var(--cyan); }
 .prompt-lineage-meta b { font-weight: 500; }
 .prompt-version-lineage code { color: var(--paper-muted); font-size: inherit; }
+.prompt-version-lineage summary { width: 100%; color: var(--paper-faint); cursor: pointer; font: 0.52rem var(--mono); }
 
 .prompt-visual-anchor {
   display: grid;
@@ -2205,8 +2208,8 @@ summary:focus-visible,
 .prompt-visual-anchor small { color: var(--paper-faint); font-size: 0.58rem; line-height: 1.4; }
 
 .prompt-plan-block {
-  border: 1px solid rgba(141, 174, 176, 0.28);
-  background: rgba(18, 26, 27, 0.46);
+  border-top: 1px solid var(--line);
+  background: transparent;
 }
 
 .prompt-plan-block summary {
@@ -2214,7 +2217,7 @@ summary:focus-visible,
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 11px;
+  padding: 9px 0;
   color: var(--cyan);
   cursor: pointer;
   font-size: 0.64rem;
@@ -2225,7 +2228,7 @@ summary:focus-visible,
 .prompt-plan-block summary::before { width: 12px; color: var(--cyan); content: "－"; font-family: var(--mono); }
 .prompt-plan-block:not([open]) summary::before { content: "＋"; }
 .prompt-plan-block summary code { color: var(--paper-faint); font: 0.48rem var(--mono); }
-.prompt-plan-grid { display: grid; gap: 8px; padding: 10px 11px 12px 35px; border-top: 1px solid var(--line); }
+.prompt-plan-grid { display: grid; gap: 8px; padding: 10px 0 12px 24px; border-top: 1px solid var(--line); }
 .prompt-plan-grid section { display: grid; gap: 3px; }
 .prompt-plan-grid section strong { color: var(--paper-muted); font: 0.54rem var(--mono); letter-spacing: .04em; }
 .prompt-plan-grid p,
@@ -2829,6 +2832,11 @@ select:focus-visible,
   box-shadow: none;
 }
 
+.prompt-inspector > .search-controls {
+  border: 0;
+  background: transparent;
+}
+
 .asset-browser > .source-panel .panel-heading,
 .prompt-inspector > .search-controls .panel-heading,
 .critic-inspector > .gallery-panel .panel-heading { min-height: 48px; padding: 10px 12px; }
@@ -2945,7 +2953,7 @@ select:focus-visible,
 .raw-enter-fusion { justify-self: end; min-height: 32px; padding: 0 10px; border: 1px solid var(--success); color: var(--success); background: transparent; font: 9px var(--mono); }
 .raw-enter-fusion:hover { color: var(--app-chrome); background: var(--success); }
 
-.fusion-sidebar-card { display: grid; gap: 8px; padding: 12px; border: 1px solid rgb(54 179 126 / 32%); background: rgb(54 179 126 / 5%); }
+.fusion-sidebar-card { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--border-subtle); background: transparent; }
 .fusion-sidebar-card svg { width: 18px; height: 18px; color: var(--success); }
 .fusion-sidebar-card strong { color: var(--success); font: 11px var(--mono); }
 .fusion-sidebar-card span { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
@@ -3004,17 +3012,17 @@ select:focus-visible,
 .legend-dot.is-active { background: var(--action); }
 .timeline-invariant { margin-left: auto; color: var(--text-faint); }
 
-.review-actions-block { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border-subtle); background: #1e2024; }
+.review-actions-block { display: grid; gap: 8px; padding: 12px 0 0; border-top: 1px solid var(--border-subtle); background: transparent; }
 .review-action-row { display: flex; flex-wrap: wrap; justify-content: end; gap: 5px; }
 .review-feedback--inspector { display: grid; gap: 5px; padding: 0; border: 0; background: transparent; }
 .review-feedback--inspector span { color: var(--text-faint); font: 9px var(--mono); }
 .review-feedback--inspector textarea { min-height: 58px; padding: 7px; border-color: var(--border); color: var(--text); background: var(--canvas); font-size: 10px; }
 .review-actions-block .primary-button,
 .review-actions-block .secondary-button { min-height: 30px; font-size: 9px; }
-.critic-detail-empty { display: grid; gap: 6px; padding: 18px 12px; border: 1px solid var(--border-subtle); color: var(--text-faint); background: #1e2024; }
+.critic-detail-empty { display: grid; gap: 6px; padding: 18px 0; border-top: 1px solid var(--border-subtle); color: var(--text-faint); background: transparent; }
 .critic-detail-empty strong { color: var(--text-muted); font: 11px var(--mono); }
 .critic-detail-empty span { font-size: 10px; line-height: 1.5; }
-.critic-detail { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border-subtle); background: #1e2024; }
+.critic-detail { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid var(--border-subtle); background: transparent; }
 .critic-detail > header { display: flex; align-items: end; justify-content: space-between; gap: 8px; }
 .critic-detail > header > span { display: grid; gap: 4px; }
 .critic-detail > header small { color: var(--text-faint); font: 8px var(--mono); letter-spacing: .08em; }

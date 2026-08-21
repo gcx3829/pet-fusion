@@ -24,8 +24,7 @@ interface PromptInspectorProps {
 /** Prompt tab composition. SearchControls remains the single action owner. */
 export function PromptInspector({ history, refinementState, ...searchProps }: PromptInspectorProps) {
   return (
-    <div className="prompt-inspector" id="sidebar-panel-prompt" role="tabpanel" aria-label="Prompt 摄影师意图">
-      <div className="inspector-title"><p className="workbench-kicker">INTENT / SEARCH</p><h2>Prompt</h2><p>摄影师意图、生成预算与每轮 rebase 参数。</p></div>
+    <div className="prompt-inspector" id="sidebar-panel-prompt" role="tabpanel" aria-label="生成设置">
       <SearchControls {...searchProps} />
       <PromptHistory history={history} refinementState={refinementState} />
     </div>

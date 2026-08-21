@@ -23,15 +23,15 @@ const eventLabels: Record<string, { title: string; tone: string }> = {
   "search.queued": { title: "搜索任务进入队列", tone: "neutral" },
   "search.started": { title: "搜索图开始执行", tone: "active" },
   "round.queued": { title: "人工反馈已提交，下一轮排队", tone: "active" },
-  "round.generation.started": { title: "从不可变原片生成候选", tone: "active" },
+  "round.generation.started": { title: "从原片生成候选", tone: "active" },
   "round.candidate.ready": { title: "一张候选已显影", tone: "candidate" },
   "round.critic.started": { title: "独立摄影审片开始", tone: "active" },
-  "round.evaluation.ready": { title: "结构化审片完成", tone: "candidate" },
+  "round.evaluation.ready": { title: "自动检查完成", tone: "candidate" },
   "round.winner.updated": { title: "本轮最佳已更新", tone: "winner" },
   "search.global_winner.updated": { title: "历史最佳已更新", tone: "winner" },
-  "prompt.refiner.started": { title: "多模态 Prompt 开始整理", tone: "active" },
-  "prompt.refiner.ready": { title: "本轮 Prompt 已就绪", tone: "candidate" },
-  "prompt.refiner.failed": { title: "Prompt 整理失败", tone: "danger" },
+  "prompt.refiner.started": { title: "正在分析图片", tone: "active" },
+  "prompt.refiner.ready": { title: "画面描述已准备好", tone: "candidate" },
+  "prompt.refiner.failed": { title: "图片分析失败", tone: "danger" },
   "search.planner.ready": { title: "下一轮修正已收敛", tone: "active" },
   "search.interrupted": { title: "搜索等待人工审片", tone: "warning" },
   "search.waiting_for_human": { title: "候选已交给摄影师", tone: "warning" },
@@ -52,10 +52,10 @@ function eventDetail(event: SearchEvent): string {
   const score = event.data.score ?? event.data.global_winner_score;
   if (typeof score === "number") return `摄影总分 ${score.toFixed(1)}`;
   if (event.type.startsWith("prompt.refiner.")) {
-    const round = typeof event.data.round_index === "number" ? `Round ${event.data.round_index}` : "Prompt";
+    const round = typeof event.data.round_index === "number" ? `第 ${event.data.round_index + 1} 轮` : "画面分析";
     const mode = typeof event.data.mode === "string" ? event.data.mode : "";
     const anchor = typeof event.data.selected_candidate_id === "string"
-      ? ` · Raw ${event.data.selected_candidate_id.slice(0, 12)}`
+      ? ` · 候选 ${event.data.selected_candidate_id.slice(0, 12)}`
       : "";
     return `${round}${mode ? ` · ${mode}` : ""}${anchor}`;
   }
@@ -91,7 +91,6 @@ export function SearchTimeline({
     <section className="panel timeline-panel" aria-labelledby="timeline-heading">
       <div className="panel-heading timeline-heading-row">
         <div>
-          <p className="eyebrow">05 / PROCESS LOG</p>
           <h2 id="timeline-heading">搜索时间线</h2>
         </div>
         <span className={`connection-state connection-${connectionState}`}>
@@ -102,7 +101,7 @@ export function SearchTimeline({
       {!events.length ? (
         <div className="timeline-empty">
           <span className="timeline-rail" />
-          <p>{status === "idle" ? "开始搜索后，这里只记录结构化事件与决策依据。" : "正在等待第一条工作流事件…"}</p>
+          <p>{status === "idle" ? "开始后，这里会显示生成进度和检查结果。" : "正在等待生成进度…"}</p>
         </div>
       ) : (
         <ol className="timeline-list" aria-live="polite">
@@ -123,9 +122,9 @@ export function SearchTimeline({
       )}
 
       <div className="timeline-footer">
-        <span>ROUND <b>{roundIndex}</b></span>
-        <span>ACTIVE DIRECTIVES <b>{activeDirectives.length}</b></span>
-        <span>CHECKPOINT <b>{status === "idle" ? "N/A" : "DURABLE"}</b></span>
+        <span>当前轮次 <b>{roundIndex + 1}</b></span>
+        <span>调整项 <b>{activeDirectives.length}</b></span>
+        <span>进度 <b>{status === "idle" ? "未开始" : "已保存"}</b></span>
       </div>
       {!!activeDirectives.length && (
         <div className="directive-stack">

@@ -72,8 +72,8 @@ describe("FusionEditor", () => {
   it("未接受搜索时锁定 Fusion", () => {
     render(<FusionEditor snapshot={snapshot("waiting_for_human")} placement={placement} />);
 
-    expect(screen.getByText(/接受一个 Raw candidate 后/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /生成 Fusion 预览/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/接受一张候选图后/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /生成融合预览/ })).not.toBeInTheDocument();
   });
 
   it("优先融合有效的人工所选候选，否则使用 Global Winner", async () => {
@@ -85,7 +85,7 @@ describe("FusionEditor", () => {
         placement={placement}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+    await user.click(screen.getByRole("button", { name: /生成融合预览/ }));
     await waitFor(() => expect(createFusion).toHaveBeenCalledWith(
       "search-a",
       expect.objectContaining({ candidate_id: "candidate-selected" }),
@@ -99,7 +99,7 @@ describe("FusionEditor", () => {
         placement={placement}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+    await user.click(screen.getByRole("button", { name: /生成融合预览/ }));
     await waitFor(() => expect(createFusion).toHaveBeenCalledWith(
       "search-a",
       expect.objectContaining({ candidate_id: "candidate-winner" }),
@@ -115,7 +115,7 @@ describe("FusionEditor", () => {
     await user.type(xInput, "0.9");
 
     expect(screen.getByRole("alert")).toHaveTextContent("矩形选区超出原片边界");
-    expect(screen.getByRole("button", { name: /生成 Fusion 预览/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /生成融合预览/ })).toBeDisabled();
     expect(createFusion).not.toHaveBeenCalled();
   });
 });

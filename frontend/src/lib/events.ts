@@ -119,12 +119,12 @@ export function derivePromptRefinementState(
     requestKey: typeof data.request_key === "string" ? data.request_key.slice(0, 256) : undefined,
   };
   if (latest.type === "prompt.refiner.started") {
-    return { ...common, status: "started", message: "事件只报告处理中；完整 Prompt 会在版本落库后显示。" };
+    return { ...common, status: "started", message: "正在结合原片、参考图和拍摄信息分析画面。" };
   }
   if (latest.type === "prompt.refiner.failed") {
-    return { ...common, status: "failed", message: message ?? "Prompt 整理失败，未向图像模型发送不完整版本。" };
+    return { ...common, status: "failed", message: message ?? "图片分析失败，尚未开始生成。" };
   }
-  return { ...common, status: "ready", message: "Prompt 版本已落库，下面展示实际 generation prompt。" };
+  return { ...common, status: "ready", message: "画面描述已保存，下面可查看实际发送内容。" };
 }
 
 function eventFromMessage(message: MessageEvent<string>, forcedType?: string): SearchEvent | null {

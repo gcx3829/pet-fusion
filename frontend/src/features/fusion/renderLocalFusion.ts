@@ -19,14 +19,14 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 function canvasBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => canvas.toBlob((blob) => {
     if (blob) resolve(blob);
-    else reject(new Error("浏览器无法编码 Fusion mock PNG"));
+    else reject(new Error("浏览器无法生成本地融合预览"));
   }, "image/png"));
 }
 
 /** Browser-only demo compositor. Alpha 0 keeps source; alpha 255 reveals Raw. */
 export async function renderLocalFusion({ originalSrc, generatedSrc, mask, width, height }: RenderLocalFusionInput): Promise<Blob> {
   if (width <= 0 || height <= 0 || width * height > 40_000_000) {
-    throw new Error("Fusion mock 画布尺寸无效或超过 4000 万像素");
+    throw new Error("本地融合画布尺寸无效或超过 4000 万像素");
   }
   const maskUrl = URL.createObjectURL(mask);
   try {
@@ -41,7 +41,7 @@ export async function renderLocalFusion({ originalSrc, generatedSrc, mask, width
     output.height = layer.height = height;
     const outputContext = output.getContext("2d");
     const layerContext = layer.getContext("2d");
-    if (!outputContext || !layerContext) throw new Error("浏览器不支持 Fusion mock Canvas");
+    if (!outputContext || !layerContext) throw new Error("当前浏览器不支持本地融合画布");
 
     outputContext.drawImage(original, 0, 0, width, height);
     layerContext.drawImage(generated, 0, 0, width, height);
@@ -53,4 +53,3 @@ export async function renderLocalFusion({ originalSrc, generatedSrc, mask, width
     URL.revokeObjectURL(maskUrl);
   }
 }
-

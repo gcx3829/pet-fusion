@@ -122,7 +122,7 @@ describe("FusionEditor brush mode", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+    await user.click(screen.getByRole("button", { name: /生成融合预览/ }));
 
     await waitFor(() => expect(renderLocalFusion).toHaveBeenCalledTimes(1));
     expect(renderLocalFusion).toHaveBeenCalledWith(expect.objectContaining({
@@ -134,7 +134,7 @@ describe("FusionEditor brush mode", () => {
     }));
     expect(uploadFusionMask).not.toHaveBeenCalled();
     expect(createFusion).not.toHaveBeenCalled();
-    expect(await screen.findByAltText("用户 Fusion Mask 预览")).toHaveAttribute("src", "blob:fusion-demo-result");
+    expect(await screen.findByAltText("局部融合预览")).toHaveAttribute("src", "blob:fusion-demo-result");
   });
 
   it("从 Timeline 离开再返回 Fusion 时恢复已完成的最终图而不是空白画布", async () => {
@@ -152,7 +152,7 @@ describe("FusionEditor brush mode", () => {
         onStateChange={(state) => { latestState = state; }}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+    await user.click(screen.getByRole("button", { name: /生成融合预览/ }));
     await waitFor(() => expect(latestState?.result?.fusion_asset.asset_url).toBe("blob:fusion-restored-result"));
     const restoredResult = latestState?.result;
     firstView.unmount();
@@ -169,7 +169,7 @@ describe("FusionEditor brush mode", () => {
       />,
     );
 
-    expect(await screen.findByAltText("用户 Fusion Mask 预览")).toHaveAttribute("src", "blob:fusion-restored-result");
+    expect(await screen.findByAltText("局部融合预览")).toHaveAttribute("src", "blob:fusion-restored-result");
     expect(screen.queryByTestId("brush-editor")).not.toBeInTheDocument();
   });
 
@@ -190,7 +190,7 @@ describe("FusionEditor brush mode", () => {
     expect(uploadFusionMask).not.toHaveBeenCalled();
     expect(createFusion).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+    await user.click(screen.getByRole("button", { name: /生成融合预览/ }));
     await waitFor(() => expect(createFusion).toHaveBeenCalledTimes(1));
     expect(uploadFusionMask).toHaveBeenCalledTimes(1);
     expect(createFusion).toHaveBeenCalledWith("search-brush", {
@@ -226,7 +226,7 @@ describe("FusionEditor brush mode", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /生成 Fusion 预览/ }));
+    await user.click(screen.getByRole("button", { name: /生成融合预览/ }));
     expect(screen.getByRole("button", { name: /融合中/ })).toBeDisabled();
 
     view.rerender(
@@ -248,6 +248,6 @@ describe("FusionEditor brush mode", () => {
 
     await waitFor(() => expect(uploadFusionMask).toHaveBeenCalledTimes(1));
     expect(createFusion).not.toHaveBeenCalled();
-    expect(screen.queryByAltText("用户 Fusion Mask 预览")).not.toBeInTheDocument();
+    expect(screen.queryByAltText("局部融合预览")).not.toBeInTheDocument();
   });
 });

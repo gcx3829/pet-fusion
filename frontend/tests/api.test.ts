@@ -478,11 +478,11 @@ describe("API client", () => {
     await expect(uploadFusionMask(
       "search-fusion",
       new File(["jpeg"], "mask.jpg", { type: "image/jpeg" }),
-    )).rejects.toThrow("必须是 PNG alpha 图片");
+    )).rejects.toThrow("必须是带透明通道的 PNG 图片");
     await expect(createFusion("search-fusion", {
       box: { x: 0.9, y: 0.2, width: 0.2, height: 0.2 },
       feather_radius_px: 8,
-    })).rejects.toThrow("完整位于原片归一化边界内");
+    })).rejects.toThrow("完整位于原片内");
     expect(fetch).not.toHaveBeenCalled();
   });
 

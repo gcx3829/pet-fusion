@@ -54,7 +54,7 @@ export function WorkerToolbar({
         <button className="toolbar-button" type="button" aria-label="重做" disabled={!canRedo || !canEdit} onClick={onRedo}>
           <Icon name="redo" />
         </button>
-        {canEdit && <output className="toolbar-history-depth" aria-label="操作记录">{String(historyDepth).padStart(2, "0")} STEP</output>}
+        {canEdit && <output className="toolbar-history-depth" aria-label="操作记录">{historyDepth} 步</output>}
       </div>
 
       <span className="toolbar-divider" aria-hidden="true" />
@@ -93,15 +93,15 @@ export function WorkerToolbar({
 
       <div className="toolbar-sliders" aria-label="画笔参数">
         <label className="toolbar-range">
-          <span>SIZE <output>{brushSize}</output></span>
+          <span>大小 <output>{brushSize}</output></span>
           <input type="range" min="4" max="512" step="4" value={brushSize} disabled={!canEdit || brushTool === "hand"} onChange={(event) => onBrushSizeChange(Number(event.target.value))} />
         </label>
         <label className="toolbar-range">
-          <span>FLOW <output>{brushFlow}%</output></span>
+          <span>流量 <output>{brushFlow}%</output></span>
           <input type="range" min="1" max="100" step="1" value={brushFlow} disabled={!canEdit || brushTool === "hand"} onChange={(event) => onBrushFlowChange(Number(event.target.value))} />
         </label>
         <label className="toolbar-range">
-          <span>FEATHER <output>{brushFeather}%</output></span>
+          <span>羽化 <output>{brushFeather}%</output></span>
           <input type="range" min="0" max="100" step="1" value={brushFeather} disabled={!canEdit || brushTool === "hand"} onChange={(event) => onBrushFeatherChange(Number(event.target.value))} />
         </label>
       </div>
@@ -117,7 +117,7 @@ export function WorkerToolbar({
 
       {fusionUnlocked && mode !== "fusion" && (
         <button className="toolbar-fusion-button" type="button" onClick={onEnterFusion}>
-          <Icon name="spark" /> Fusion
+          <Icon name="spark" /> 局部融合
         </button>
       )}
     </div>

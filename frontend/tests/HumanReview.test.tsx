@@ -31,7 +31,7 @@ describe("HumanReview", () => {
     render(<HumanReview snapshot={snapshot} isPending={false} selectedCandidateId="candidate-01" onAction={onAction} />);
 
     await user.type(
-      screen.getByLabelText("人工反馈（可选，用于下一轮 prompt）"),
+      screen.getByLabelText("修改意见（可选）"),
       "猫再小一点，保留眼睛和毛色。",
     );
     await user.click(screen.getByRole("button", { name: "再生成一轮" }));
@@ -48,7 +48,7 @@ describe("HumanReview", () => {
     const onAction = vi.fn();
     render(<HumanReview snapshot={snapshot} isPending={false} onAction={onAction} />);
 
-    expect(screen.getByText(/仅使用不可变原图与宠物参考图/)).toBeInTheDocument();
+    expect(screen.getAllByText(/只使用原片和宠物参考图/)).toHaveLength(2);
     await user.click(screen.getByRole("button", { name: "再生成一轮" }));
 
     expect(onAction).toHaveBeenCalledWith("continue_one_round", undefined, undefined);
@@ -57,7 +57,7 @@ describe("HumanReview", () => {
   it("选中候选时明确提示原图是底片、Raw 是视觉参考", () => {
     render(<HumanReview snapshot={snapshot} isPending={false} selectedCandidateId="candidate-01" onAction={vi.fn()} />);
 
-    expect(screen.getAllByText(/原图仍为编辑底片，所选 Raw 作为视觉参考/)).toHaveLength(2);
+    expect(screen.getAllByText(/仍从原片生成，并参考你选中的这张图/)).toHaveLength(2);
   });
 
   it("历史轮 Timeline 候选只允许查看或接受，不提交为当前轮视觉锚点", () => {
@@ -85,7 +85,7 @@ describe("HumanReview", () => {
       />,
     );
 
-    expect(screen.getByText(/当前查看的是历史轮 Raw/)).toBeInTheDocument();
+    expect(screen.getByText(/当前查看的是历史候选/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "再生成一轮" })).toBeDisabled();
   });
 });

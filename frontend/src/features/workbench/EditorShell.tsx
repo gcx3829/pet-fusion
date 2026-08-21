@@ -20,14 +20,14 @@ interface EditorShellProps {
 
 function statusLabel(status: SearchStatusValue): string {
   const labels: Record<SearchStatusValue, string> = {
-    idle: "READY",
-    queued: "QUEUED",
-    running: "PROCESSING",
-    waiting_for_human: "REVIEW",
-    accepted: "ACCEPTED",
-    completed: "COMPLETE",
-    failed: "FAILED",
-    cancelled: "CANCELLED",
+    idle: "就绪",
+    queued: "排队中",
+    running: "生成中",
+    waiting_for_human: "待审片",
+    accepted: "已接受",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
   };
   return labels[status];
 }
@@ -42,7 +42,7 @@ export function EditorShell({
   timeline,
   status,
   connectionState,
-  jobLabel = "LOCAL / 001",
+  jobLabel = "本地任务",
 }: EditorShellProps) {
   return (
     <div className="editor-shell">
@@ -50,10 +50,10 @@ export function EditorShell({
       <header className="editor-appbar">
         <a className="editor-brand" href="#editor-main" aria-label="Pet Fusion 工作台">
           <span className="editor-brand-mark"><Icon name="aperture" /></span>
-          <span><strong>PET FUSION</strong><small>IMAGE WORKBENCH</small></span>
+          <span><strong>PET FUSION</strong><small>宠物合影工作台</small></span>
         </a>
-        <div className="editor-document-title"><span>UNTITLED FUSION</span><small>{accepted ? "ACCEPTED RAW / OPTIONAL FUSION" : "RAW-FIRST SEARCH SESSION"}</small></div>
-        <div className="editor-appbar-status"><span className={`appbar-status-dot is-${status}`} /><span><small>{connectionState === "open" ? "EVENT STREAM LIVE" : connectionState === "settled" ? "CHECKPOINT SETTLED" : "WORKBENCH"}</small><strong>{jobLabel} · {statusLabel(status)}</strong></span></div>
+        <div className="editor-document-title"><span>未命名合影</span><small>{accepted ? "候选已接受，可选局部融合" : "从原片生成候选"}</small></div>
+        <div className="editor-appbar-status"><span className={`appbar-status-dot is-${status}`} /><span><small>{connectionState === "open" ? "实时更新中" : connectionState === "settled" ? "进度已保存" : "工作台"}</small><strong>{jobLabel} · {statusLabel(status)}</strong></span></div>
       </header>
       <div className="editor-body">
         <aside className="editor-sidebar" aria-label="工作台侧栏">

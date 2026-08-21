@@ -34,21 +34,21 @@ export function CriticInspector({
   ];
   const active = status === "queued" || status === "running";
   return (
-    <div className="critic-inspector" id="sidebar-panel-review" role="tabpanel" aria-label="Review Critic 审片">
-      <div className="inspector-title"><p className="workbench-kicker">CRITIC / TIMELINE CONTROLLED</p><h2>Review</h2><p>候选切换仅由下方 Timeline 控制；这里始终展示当前 Timeline 节点的评价。</p></div>
+    <div className="critic-inspector" id="sidebar-panel-review" role="tabpanel" aria-label="审片">
+      <div className="inspector-title"><h2>审片</h2><p>在下方时间线选择图片，查看评分和问题。</p></div>
       {!selected ? (
         <div className="critic-detail-empty" role="status">
-          <strong>{active ? `正在等待 ${expectedCount} 张候选` : "Timeline 尚无可审片节点"}</strong>
-          <span>{active ? "候选完成后会自动出现在 Timeline。" : "请在 Timeline 选择一个照片节点。"}</span>
+          <strong>{active ? `正在生成 ${expectedCount} 张候选` : "还没有可审的图片"}</strong>
+          <span>{active ? "生成后会自动出现在时间线。" : "请在下方时间线选择一张图片。"}</span>
         </div>
       ) : (
-        <section className="critic-detail" aria-label={`当前 Timeline 候选 R${selected.round_index} V${selected.variant_index + 1}`}>
+        <section className="critic-detail" aria-label={`当前候选：第 ${selected.round_index + 1} 轮，第 ${selected.variant_index + 1} 张`}>
           <header>
-            <span><small>CURRENT TIMELINE NODE</small><strong>R{selected.round_index} / V{selected.variant_index + 1}</strong></span>
+            <span><small>当前候选</small><strong>第 {selected.round_index + 1} 轮 / 第 {selected.variant_index + 1} 张</strong></span>
             <output>{typeof selected.score === "number" ? selected.score.toFixed(1) : "N/A"}<small>/100</small></output>
           </header>
           <code>{selected.candidate_id}</code>
-          <p>{selected.evaluation?.summary ?? "Critic 正在处理当前 Raw candidate。"}</p>
+          <p>{selected.evaluation?.summary ?? "正在检查这张候选图。"}</p>
           <div className="metric-grid critic-metric-grid">
             {metrics.map((metric) => {
               const value = selected.evaluation?.scores?.[metric.key];

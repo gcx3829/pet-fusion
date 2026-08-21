@@ -33,7 +33,7 @@ const candidates: SearchCandidate[] = [
 describe("CandidateGallery", () => {
   it("显示历史最佳而非默认把最后输出当作最佳", () => {
     render(<CandidateGallery candidates={candidates} status="waiting_for_human" expectedCount={3} />);
-    expect(screen.getByText("GLOBAL WINNER")).toBeInTheDocument();
+    expect(screen.getByText("历史最佳")).toBeInTheDocument();
     expect(screen.getByText("91.2")).toBeInTheDocument();
     expect(screen.getByText("历史最佳候选")).toBeInTheDocument();
   });

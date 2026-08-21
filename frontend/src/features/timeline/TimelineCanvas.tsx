@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Controls, Handle, MarkerType, Position, ReactFlow, type Edge as FlowEdge, type Node as FlowNode, type NodeProps } from "@xyflow/react";
+import { Handle, MarkerType, Position, ReactFlow, type Edge as FlowEdge, type Node as FlowNode, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { SearchEvent, SearchSnapshot } from "../../types";
 import { buildTimelineGraph, type TimelineMedia, type TimelineNode } from "./buildTimelineGraph";
@@ -77,7 +77,7 @@ function PhotoNode({ data }: NodeProps<PhotoFlowNode>) {
       }}
     >
       <img src={node.imageUrl} alt="" />
-      {node.kind === "source" && node.badges.includes("MASK") && <span className="timeline-mask-overlay" />}
+      {node.kind === "source" && node.badges.includes("引导") && <span className="timeline-mask-overlay" />}
       <span className="timeline-photo-meta"><strong>{node.label}</strong><small>{node.detail}</small></span>
       <span className="timeline-photo-badges">{node.badges.map((badge) => <i key={badge}>{badge}</i>)}</span>
       {node.progress && <span className="timeline-progress" aria-label="处理中"><b /><b /><b /></span>}
@@ -139,7 +139,7 @@ export function TimelineCanvas({ events, snapshot, selectedNodeId, onSelectCandi
       fitViewOptions={{ padding: 0.08, minZoom: 0.55, maxZoom: 1 }}
       proOptions={{ hideAttribution: true }}
       {...SHARED_VIEWPORT_GESTURES}
-    ><Controls showInteractive={false} position="bottom-left" /></ReactFlow>
+    />
     {hovered && preview && typeof document !== "undefined" && createPortal(
       <div
         className="timeline-preview-popover"

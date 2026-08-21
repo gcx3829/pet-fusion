@@ -117,7 +117,6 @@ export function PlacementCanvas({
     <section className="panel placement-panel" aria-labelledby="placement-heading">
       <div className="panel-heading placement-heading-row">
         <div>
-          <p className="eyebrow">02 / FRAME DIRECTION</p>
           <h2 id="placement-heading">位置与姿态</h2>
         </div>
         <label className="switch-label" htmlFor={maskToggleId}>
@@ -128,7 +127,7 @@ export function PlacementCanvas({
             onChange={(event) => setShowMasks(event.target.checked)}
           />
           <span className="switch-track"><span /></span>
-          Guidance Mask 预览
+          显示引导区域
         </label>
       </div>
 
@@ -173,7 +172,7 @@ export function PlacementCanvas({
               <ellipse className="target-contact" cx={x + width / 2} cy={y + height} rx={Math.max(18, width * .28)} ry="8" />
               <g className="target-label" transform={`translate(${x}, ${Math.max(32, y - 26)})`}>
                 <rect x="0" y="-24" width="128" height="28" rx="2" />
-                <text x="10" y="-6">PET / TARGET</text>
+                <text x="10" y="-6">宠物位置</text>
               </g>
             </g>
             <circle
@@ -198,18 +197,18 @@ export function PlacementCanvas({
         {backgroundUrl && (
           <div className="canvas-legend" aria-hidden="true">
             <span><i className="legend-target" />目标边界</span>
-            {showMasks && <span><i className="legend-model" />Guidance Mask · 发给模型</span>}
-            <span className="legend-fusion-note"><i className="legend-fusion" />Fusion Mask · 用户接受后可选</span>
+            {showMasks && <span><i className="legend-model" />引导区域 · 发给模型</span>}
+            <span className="legend-fusion-note"><i className="legend-fusion" />局部融合 · 接受候选后可用</span>
           </div>
         )}
       </div>
 
       <div className="mask-contract-note" role="note">
         <div>
-          <strong>Guidance Mask ≠ Fusion Mask</strong>
-          <span>Guidance Mask 只告诉 GPT Image 2 关注哪里，不锁定像素；当前搜索、Critic 和人工审片始终查看 Raw Candidate。</span>
+          <strong>引导区域不会锁住原图</strong>
+          <span>它只提示图像模型重点修改哪里。评分和审片始终使用模型的原始候选图。</span>
         </div>
-        <small>下方 Guidance Mask 画笔用于软引导模型；它不是像素锁。接受候选后，Fusion Mask 仍是独立的本地融合工具。</small>
+        <small>用下方画笔标出希望模型重点修改的区域。接受候选后，还可以单独做局部融合。</small>
       </div>
 
       <fieldset className="placement-fields" disabled={disabled || !backgroundUrl}>

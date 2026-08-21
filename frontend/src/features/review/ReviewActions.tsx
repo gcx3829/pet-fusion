@@ -46,15 +46,15 @@ export function ReviewActions({
       {!compact && canContinue && (
         <p className="review-rebase-note" role="status">
           {selectedForContinue
-            ? "原图仍为编辑底片，所选 Raw 作为视觉参考。"
+            ? "下一轮仍从原片生成，并参考你选中的这张图。"
             : historicalSelection
-              ? "当前选中的是历史轮 Raw：可以查看或接受，但不能作为下一轮视觉锚点。请选当前轮候选，或点击底图后 source-only 继续。"
-              : "未选择 Timeline 候选：本轮将 source-only 重生成，不会偷偷使用 Global Winner。"}
+              ? "历史候选可以查看或接受，但不能作为下一轮参考。请改选本轮候选。"
+              : "没有选中候选，下一轮只使用原片和宠物参考图。"}
         </p>
       )}
       {canContinue && !compact && (
         <label className="review-feedback review-feedback--inspector" htmlFor="review-feedback-inspector">
-          <span>人工反馈（可选，用于下一轮 prompt）</span>
+          <span>修改意见（可选）</span>
           <textarea id="review-feedback-inspector" value={humanFeedback} maxLength={2000} disabled={isPending} onChange={(event) => setHumanFeedback(event.target.value)} placeholder="例如：主体再小一些，保留当前眼睛和毛色。" />
         </label>
       )}
@@ -62,9 +62,9 @@ export function ReviewActions({
       <div className="review-action-row">
         {canCancel && <button className="secondary-button" type="button" disabled={isPending} onClick={() => onAction("cancel")}>取消搜索</button>}
         {canContinue && <button className="secondary-button" type="button" disabled={isPending || historicalSelection} onClick={() => onAction("continue_one_round", selectedForContinue ?? undefined, humanFeedback.trim() || undefined)}>再生成一轮</button>}
-        {canAcceptGlobal && <button className="primary-button" type="button" disabled={isPending} onClick={() => onAction("accept_global_winner")}><Icon name="check" /> 接受历史最佳 Raw</button>}
-        {canAcceptSelected && <button className="primary-button" type="button" disabled={isPending} onClick={() => onAction("accept_candidate", selectedCandidate?.candidate_id)}><Icon name="check" /> 接受所选 Raw</button>}
-        {!canCancel && !canContinue && !canAcceptGlobal && !canAcceptSelected && <span className="review-readonly">本轮仅供查看 · Resume 动作尚未开放</span>}
+        {canAcceptGlobal && <button className="primary-button" type="button" disabled={isPending} onClick={() => onAction("accept_global_winner")}><Icon name="check" /> 接受历史最佳</button>}
+        {canAcceptSelected && <button className="primary-button" type="button" disabled={isPending} onClick={() => onAction("accept_candidate", selectedCandidate?.candidate_id)}><Icon name="check" /> 接受所选图片</button>}
+        {!canCancel && !canContinue && !canAcceptGlobal && !canAcceptSelected && <span className="review-readonly">本轮只能查看</span>}
       </div>
     </div>
   );

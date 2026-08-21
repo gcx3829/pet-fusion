@@ -40,8 +40,7 @@ export function SearchControls({
     <section className="panel search-controls" aria-labelledby="search-heading">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">04 / SEARCH EXPOSURE</p>
-          <h2 id="search-heading">自动搜索</h2>
+          <h2 id="search-heading">生成设置</h2>
         </div>
         <span className={`status-stamp status-${status}`}>
           <i /> {statusLabels[status]}
@@ -66,7 +65,7 @@ export function SearchControls({
         <div className="setting-row">
           <div>
             <strong>每轮候选</strong>
-            <span>相同源素材独立采样</span>
+            <span>每张都从原片单独生成</span>
           </div>
           <div className="segmented-control" aria-label="每轮候选数量">
             {[1, 2, 3].map((count) => (
@@ -86,7 +85,7 @@ export function SearchControls({
         <label className="setting-row setting-row--range">
           <span>
             <strong>最多轮次</strong>
-            <small>每轮都从原片 Rebase</small>
+            <small>每轮都重新使用原片</small>
           </span>
           <input
             type="range"
@@ -97,13 +96,13 @@ export function SearchControls({
             aria-valuetext={`${options.max_rounds} 轮`}
             onChange={(event) => onOptionsChange({ ...options, max_rounds: Number(event.target.value) })}
           />
-          <output>{options.max_rounds}R</output>
+          <output>{options.max_rounds} 轮</output>
         </label>
 
         <label className="setting-row budget-row">
           <span>
             <strong>成本上限</strong>
-            <small>付费节点前再次校验</small>
+            <small>达到上限后停止生成</small>
           </span>
           <span className="budget-input">
             <b>$</b>
@@ -150,8 +149,8 @@ export function SearchControls({
       >
         <span className="expose-icon"><Icon name="aperture" /></span>
         <span>
-          <strong>{isSubmitting ? "正在建立耐久任务…" : searchExists ? statusLabels[status] : "开始 Auto Search"}</strong>
-          <small>IMMUTABLE SOURCE · BEST OF {options.candidate_count}</small>
+          <strong>{isSubmitting ? "正在开始…" : searchExists ? statusLabels[status] : "开始生成"}</strong>
+          <small>每轮 {options.candidate_count} 张候选</small>
         </span>
         <span className="expose-mark">↗</span>
       </button>

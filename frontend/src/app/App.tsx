@@ -146,10 +146,10 @@ export function App() {
   const submitMutation = useMutation({
     mutationFn: async () => {
       const editor = guidanceEditorRef.current;
-      if (!editor) throw new Error("Guidance Mask 画布尚未准备好");
+      if (!editor) throw new Error("引导区域画布尚未准备好");
       const currentDocument = editor.getDocument();
       if (!currentDocument.strokes.length) {
-        throw new Error("请先在底片上绘制 Guidance Mask；系统不会再自动添加初始 Mask");
+        throw new Error("请先在原片上画出希望模型重点修改的区域");
       }
       let nextProject = project;
       if (!nextProject) {
@@ -376,12 +376,12 @@ export function App() {
       onAction={onReviewAction}
     />
   ) : (
-    <section className="fusion-sidebar" id="sidebar-panel-fusion" role="tabpanel" aria-label="Fusion 融合">
-      <div className="inspector-title"><p className="workbench-kicker">FUSION / EXPLICIT ACTION</p><h2>Fusion</h2><p>Fusion 是 accepted Raw 之后的独立预览层，不会改写 Search/Critic 的权威资产。</p></div>
-      {fusionDemoMode && <div className="fusion-demo-notice" role="status"><strong>LOCAL FUSION DEMO</strong><span>底片、Raw 和最终合成都在浏览器本地，不调用后端。</span></div>}
-      <div className="fusion-sidebar-card"><Icon name="spark" /><strong>{fusionState.result ? "Fusion 已生成" : accepted ? "Fusion ready" : "接受 Raw 后可用"}</strong><span>{fusionState.error ?? (accepted ? "在主画布绘制区域，然后在这里应用 Fusion Mask。" : "当前 Search 仍以 Raw candidate 为唯一审片来源。")}</span></div>
-      {accepted && ui.workerMode !== "fusion" && <button className="primary-button" type="button" onClick={() => uiActions.setWorkerMode("fusion")}>在主画布打开 Fusion</button>}
-      {accepted && ui.workerMode === "fusion" && !fusionState.result && <button className="primary-button" type="button" disabled={!fusionState.ready || fusionState.pending} onClick={() => void fusionEditorRef.current?.apply()}>{fusionState.pending ? "正在融合…" : "应用 Fusion Mask"}</button>}
+    <section className="fusion-sidebar" id="sidebar-panel-fusion" role="tabpanel" aria-label="局部融合">
+      <div className="inspector-title"><h2>局部融合</h2><p>只修改你画出的区域，不会改动已经接受的原始候选。</p></div>
+      {fusionDemoMode && <div className="fusion-demo-notice" role="status"><strong>本地预览</strong><span>图片只在浏览器中处理，不会发送到后端。</span></div>}
+      <div className="fusion-sidebar-card"><Icon name="spark" /><strong>{fusionState.result ? "预览已生成" : accepted ? "可以开始" : "请先接受一张候选图"}</strong><span>{fusionState.error ?? (accepted ? "在主画布画出需要融合的区域，然后应用。" : "接受候选图后才能使用局部融合。")}</span></div>
+      {accepted && ui.workerMode !== "fusion" && <button className="primary-button" type="button" onClick={() => uiActions.setWorkerMode("fusion")}>打开局部融合</button>}
+      {accepted && ui.workerMode === "fusion" && !fusionState.result && <button className="primary-button" type="button" disabled={!fusionState.ready || fusionState.pending} onClick={() => void fusionEditorRef.current?.apply()}>{fusionState.pending ? "正在融合…" : "应用融合范围"}</button>}
       {fusionState.result && <button className="fusion-export-button" type="button" onClick={exportFullSizeFusion}><Icon name="export" /><span><strong>导出全尺寸 PNG</strong><small>{effectiveBackgroundWidth ?? fusionState.result.fusion_asset.width ?? "原图"} × {effectiveBackgroundHeight ?? fusionState.result.fusion_asset.height ?? "尺寸"}</small></span></button>}
     </section>
   );
@@ -394,7 +394,7 @@ export function App() {
       sidebar={sidebarContent}
       status={status}
       connectionState={connectionState}
-      jobLabel={search ? `JOB ${search.search_id.slice(0, 8)}` : "READY / 01"}
+      jobLabel={search ? `任务 ${search.search_id.slice(0, 8)}` : "本地任务"}
       toolbar={(
         <WorkerToolbar
           mode={ui.workerMode}

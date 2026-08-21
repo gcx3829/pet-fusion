@@ -57,12 +57,12 @@ describe("PromptHistory", () => {
       tuned: true,
     }]} />);
 
-    expect(screen.getByText("多模态专业描述计划")).toBeInTheDocument();
+    expect(screen.getByText("图像分析")).toBeInTheDocument();
     expect(screen.getByText("保留眼睛与毛色")).toBeInTheDocument();
     expect(screen.getByText("主体缩小约 12%")).toBeInTheDocument();
-    expect(screen.getByText("所选 Raw 作为视觉参考")).toBeInTheDocument();
+    expect(screen.getByText("参考所选候选")).toBeInTheDocument();
     expect(screen.getByText(/pv_initial/)).toBeInTheDocument();
-    expect(screen.getByText(/候选视觉锚点/)).toBeInTheDocument();
+    expect(screen.getByText(/从原片生成，并参考所选候选/)).toBeInTheDocument();
     expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
   });
 
@@ -72,8 +72,8 @@ describe("PromptHistory", () => {
       refinementState={{ status: "started", roundIndex: 1, mode: "revision" }}
     />);
 
-    expect(screen.getByRole("status")).toHaveTextContent("正在整理");
-    expect(screen.getByRole("status")).toHaveTextContent("完整 Prompt 会在版本落库后显示");
+    expect(screen.getByRole("status")).toHaveTextContent("正在分析图片");
+    expect(screen.getByRole("status")).toHaveTextContent("完成后会在下方显示实际发送内容");
   });
 
   it("旧记录不会被错误标成多模态 Prompt", () => {
@@ -85,7 +85,7 @@ describe("PromptHistory", () => {
       tuned: false,
     }]} />);
 
-    expect(screen.getByText("初始 Prompt（兼容记录）")).toBeInTheDocument();
-    expect(screen.queryByText("多模态初始理解")).not.toBeInTheDocument();
+    expect(screen.getByText("初始画面描述")).toBeInTheDocument();
+    expect(screen.queryByText("初始图像分析")).not.toBeInTheDocument();
   });
 });

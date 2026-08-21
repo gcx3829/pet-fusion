@@ -128,7 +128,7 @@ describe("workbench raw-first graph", () => {
     const layout = layoutTimelineGraph(afterAccept);
     expect(afterAccept.nodes.find((node) => node.id === "final")).toMatchObject({
       label: "已接受",
-      detail: "等待 Fusion Mask",
+      detail: "可选局部融合",
       candidateId: "b",
     });
     expect(afterAccept.edges).toContainEqual(expect.objectContaining({
@@ -209,10 +209,10 @@ describe("workbench raw-first graph", () => {
         onSelectSource={onSelectSource}
       />,
     );
-    const node = screen.getByRole("button", { name: /R0 · 1/ });
+    const node = screen.getByRole("button", { name: /第 1 轮 · 1/ });
     fireEvent.pointerEnter(node, { clientX: 40, clientY: 30 });
     const preview = screen.getByRole("status");
-    expect(preview).toHaveTextContent("R0 · 1");
+    expect(preview).toHaveTextContent("第 1 轮 · 1");
     expect(preview.querySelector(".timeline-preview-zoom")).not.toBeNull();
     expect(preview.querySelector(".timeline-preview-navigator i")).not.toBeNull();
     fireEvent.click(node);
@@ -244,19 +244,19 @@ describe("workbench raw-first graph", () => {
     }
 
     render(<SelectionHarness />);
-    expect(screen.getByAltText("Raw candidate a")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /第 1 轮，第 1 张候选 Raw/ })).not.toBeInTheDocument();
+    expect(screen.getByAltText("候选图 a")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /第 1 轮，第 1 张候选图/ })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /R1 · 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: /第 2 轮 · 1/ }));
 
-    expect(screen.getByAltText("Raw candidate b")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "当前 Timeline 候选 R1 V1" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /R1 · 1/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByAltText("候选图 b")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "当前候选：第 2 轮，第 1 张" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /第 2 轮 · 1/ })).toHaveAttribute("aria-pressed", "true");
 
-    fireEvent.click(screen.getByRole("button", { name: /R0 · 1/ }));
-    expect(screen.getByAltText("Raw candidate a")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "当前 Timeline 候选 R0 V1" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /R0 · 1/ })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: /第 1 轮 · 1/ }));
+    expect(screen.getByAltText("候选图 a")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "当前候选：第 1 轮，第 1 张" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /第 1 轮 · 1/ })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("工具栏提供独立手型工具，避免平移时在 Mask 上落笔", () => {
@@ -353,10 +353,10 @@ describe("workbench raw-first graph", () => {
     render(<RawCandidateViewer snapshot={current} expectedCount={3} sourceWidth={1200} sourceHeight={800} />);
 
     expect(screen.getByRole("status")).toHaveClass("worker-generation-placeholder");
-    expect(screen.getByText("正在生成 R1")).toBeInTheDocument();
+    expect(screen.getByText("正在生成第 2 轮")).toBeInTheDocument();
     expect(screen.getByLabelText("3 个候选生成槽位").children).toHaveLength(3);
     expect(screen.getByLabelText("候选 3 正在生成")).toBeInTheDocument();
     expect(screen.getByRole("status").style.getPropertyValue("--source-ratio")).toBe("1.5");
-    expect(screen.getByText("正在生成 R1").closest(".generation-placeholder-stage")).not.toBeNull();
+    expect(screen.getByText("正在生成第 2 轮").closest(".generation-placeholder-stage")).not.toBeNull();
   });
 });

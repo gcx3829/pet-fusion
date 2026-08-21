@@ -1012,15 +1012,15 @@ export const MaskBrushEditor = forwardRef<MaskBrushEditorHandle, MaskBrushEditor
             tabIndex={disabled ? -1 : 0}
           />
           {showChrome && <div className="mask-layer-label mask-layer-label-bottom">
-            {mode === "guidance" ? "原片 · 观察底图" : "生成图 · alpha 255"}
+            {mode === "guidance" ? "原片" : "生成图 · 完全显示"}
           </div>}
           {showChrome && <div className="mask-layer-label mask-layer-label-top">
-            {mode === "guidance" ? "Guidance · 可编辑区域" : "原图 · alpha 0"}
+            {mode === "guidance" ? "模型重点修改区域" : "原图 · 完全保留"}
           </div>}
         </div>
         {showChrome && <div className="mask-brush-footer">
           <span id={instructionsId}>按住鼠标或触控笔绘制；键盘方向键移动，空格绘制；笔迹只保存在本地浏览器内存</span>
-          <span>{mode === "guidance" ? "绘制后：0 = 保持原图，255 = 模型可编辑" : "绘制后：0 = 原图，255 = 生成图"}</span>
+          <span>{mode === "guidance" ? "画过的区域允许模型重点修改" : "画过的区域显示生成图"}</span>
           <span>{history.present.strokes.length} 个笔划</span>
         </div>}
         {exportError ? <p className="mask-export-error" role="alert">{exportError}</p> : null}

@@ -40,11 +40,11 @@ export interface TimelineMedia {
 
 function candidateBadges(candidate: SearchCandidate): string[] {
   const badges: string[] = [];
-  if (candidate.is_global_winner) badges.push("GLOBAL");
-  else if (candidate.is_round_winner) badges.push("WINNER");
+  if (candidate.is_global_winner) badges.push("历史最佳");
+  else if (candidate.is_round_winner) badges.push("本轮最佳");
   const blocking = candidate.evaluation?.issues.filter((issue) => issue.severity === "blocking").length ?? 0;
-  if (blocking) badges.push(`${blocking} BLOCK`);
-  else if (candidate.evaluation) badges.push("CRITIC OK");
+  if (blocking) badges.push(`${blocking} 个严重问题`);
+  else if (candidate.evaluation) badges.push("检查通过");
   return badges;
 }
 
@@ -57,8 +57,8 @@ function candidateNode(candidate: SearchCandidate, snapshot?: SearchSnapshot | n
     id: `candidate:${candidate.candidate_id}`,
     kind: "candidate",
     imageUrl,
-    label: `R${candidate.round_index} · ${candidate.variant_index + 1}`,
-    detail: evaluated ? "Critic 已完成" : "Raw candidate",
+    label: `第 ${candidate.round_index + 1} 轮 · ${candidate.variant_index + 1}`,
+    detail: evaluated ? "自动检查已完成" : "原始候选",
     roundIndex: candidate.round_index,
     candidateId: candidate.candidate_id,
     score: candidate.score,
@@ -86,9 +86,9 @@ export function buildTimelineGraph(
       kind: "source",
       imageUrl: media.sourceImageUrl,
       label: "底图",
-      detail: media.guidanceActive ? "Guidance Mask" : "原始照片",
+      detail: media.guidanceActive ? "已绘制引导区域" : "原始照片",
       status: "complete",
-      badges: media.guidanceActive ? ["MASK"] : [],
+      badges: media.guidanceActive ? ["引导"] : [],
     });
   }
   const candidates = [...(snapshot?.candidates ?? [])].sort((left, right) => (
@@ -115,13 +115,13 @@ export function buildTimelineGraph(
         id,
         kind: "candidate",
         imageUrl: media.sourceImageUrl,
-        label: `R${roundIndex} · ${variantIndex + 1}`,
+        label: `第 ${roundIndex + 1} 轮 · ${variantIndex + 1}`,
         detail: "正在生成",
         roundIndex,
         status: "active",
         progress: "indeterminate",
         placeholder: true,
-        badges: ["GENERATING"],
+        badges: ["生成中"],
       });
     }
   }
@@ -139,12 +139,12 @@ export function buildTimelineGraph(
         id: "final",
         kind: "final",
         imageUrl: acceptedUrl,
-        label: media.fusionImageUrl ? "Fusion" : "已接受",
-        detail: media.fusionImageUrl ? "最终融合照片" : "等待 Fusion Mask",
+        label: media.fusionImageUrl ? "已融合" : "已接受",
+        detail: media.fusionImageUrl ? "最终照片" : "可选局部融合",
         candidateId: accepted.candidate_id,
         score: accepted.score,
         status: "complete",
-        badges: [media.fusionImageUrl ? "FINAL" : "ACCEPTED"],
+        badges: [media.fusionImageUrl ? "最终图" : "已接受"],
       });
       hasAcceptedOutput = nodes.some((node) => node.id === sourceId);
       acceptedSourceId = hasAcceptedOutput ? sourceId : null;

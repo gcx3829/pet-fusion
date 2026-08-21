@@ -9,10 +9,10 @@ interface SidebarTabsProps {
 }
 
 const tabs: { value: SidebarTab; label: string; short: string; icon: "image" | "spark" | "check" | "lock" }[] = [
-  { value: "assets", label: "Assets", short: "素材", icon: "image" },
-  { value: "prompt", label: "Prompt", short: "意图", icon: "spark" },
-  { value: "review", label: "Review", short: "审片", icon: "check" },
-  { value: "fusion", label: "Fusion", short: "融合", icon: "lock" },
+  { value: "assets", label: "素材", short: "原片与参考", icon: "image" },
+  { value: "prompt", label: "生成", short: "意图与设置", icon: "spark" },
+  { value: "review", label: "审片", short: "评分与选择", icon: "check" },
+  { value: "fusion", label: "融合", short: "局部合成", icon: "lock" },
 ];
 
 export function SidebarTabs({ value, accepted, onChange }: SidebarTabsProps) {
@@ -43,7 +43,7 @@ export function SidebarTabs({ value, accepted, onChange }: SidebarTabsProps) {
               aria-controls={`sidebar-panel-${tab.value}`}
               disabled={disabled}
               tabIndex={value === tab.value ? 0 : -1}
-              title={disabled ? "接受 Raw candidate 后解锁 Fusion" : tab.label}
+              title={disabled ? "接受一张候选图后可用" : tab.label}
               onClick={() => onChange(tab.value)}
               ref={(element) => { tabRefs.current[index] = element; }}
               onKeyDown={(event) => {

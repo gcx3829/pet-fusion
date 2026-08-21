@@ -106,13 +106,13 @@ export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(fu
     try {
       let maskAssetId: string | undefined;
       if (effectiveMode === "brush") {
-        if (!brushRef.current?.getDocument().strokes.length) throw new Error("请先在图片上绘制 Fusion 区域");
+        if (!brushRef.current?.getDocument().strokes.length) throw new Error("请先在图片上画出需要融合的区域");
         const file = await brushRef.current.exportMaskFile(`${candidate.candidate_id}-fusion-mask.png`);
         if (epochRef.current !== epoch) return;
         if (demoMode) {
           const generatedSrc = rawCandidateUrl(candidate);
           if (!backgroundSrc || !generatedSrc || !backgroundWidth || !backgroundHeight) {
-            throw new Error("Fusion mock 缺少底片、Raw candidate 或原图尺寸");
+            throw new Error("本地预览缺少原片、候选图或图片尺寸");
           }
           const blob = await renderLocalFusion({
             originalSrc: backgroundSrc,
@@ -143,14 +143,14 @@ export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(fu
         }
         maskAssetId = (await uploadFusionMask(snapshot.search_id, file)).asset.asset_id;
       } else if (effectiveMode === "alpha") {
-        if (!maskFile) throw new Error("请先选择 PNG alpha Fusion Mask");
+        if (!maskFile) throw new Error("请先选择带透明通道的 PNG 蒙版");
         maskAssetId = (await uploadFusionMask(snapshot.search_id, maskFile)).asset.asset_id;
       }
       if (epochRef.current !== epoch) return;
       const next = await createFusion(snapshot.search_id, { candidate_id: candidate.candidate_id, mask_asset_id: maskAssetId, box: effectiveMode === "box" ? box : undefined, feather_radius_px: effectiveMode === "brush" ? 0 : feather });
       if (epochRef.current === epoch) setResult(next);
     } catch (cause) {
-      if (epochRef.current === epoch) setError(cause instanceof Error ? cause.message : "Fusion 生成失败");
+      if (epochRef.current === epoch) setError(cause instanceof Error ? cause.message : "融合预览生成失败");
     } finally {
       if (epochRef.current === epoch) setPending(false);
     }
@@ -158,28 +158,28 @@ export const FusionEditor = forwardRef<FusionEditorHandle, FusionEditorProps>(fu
   useImperativeHandle(ref, () => ({ apply }), [apply]);
 
   const canvas = result
-    ? <img className="worker-image" src={assetUrl(result)} alt="用户 Fusion Mask 预览" />
+    ? <img className="worker-image" src={assetUrl(result)} alt="局部融合预览" />
     : effectiveMode === "brush" && hasBrush && candidate
       ? <div className="fusion-editor-surface"><MaskBrushEditor key={`${snapshot.search_id}:${candidate.candidate_id}`} ref={bindBrushHandle} originalSrc={backgroundSrc} generatedSrc={rawCandidateUrl(candidate)} generatedCropMapping={candidate.crop_mapping} width={backgroundWidth ?? 1} height={backgroundHeight ?? 1} disabled={pending || interactionDisabled} controlledTool={controlledTool} controlledBrush={controlledBrush} showChrome={showChrome} onHistoryChange={onBrushHistoryChange} onUserEdit={clearCompletedResult} /></div>
       : null;
 
   if (!showChrome) {
-    if (!accepted || !candidate || !hasBrush) return <div className="canvas-image-empty" role="status"><Icon name="lock" /><span>接受一个 Raw candidate 后可编辑 Fusion</span></div>;
+    if (!accepted || !candidate || !hasBrush) return <div className="canvas-image-empty" role="status"><Icon name="lock" /><span>接受一张候选图后可编辑融合范围</span></div>;
     return canvas;
   }
-  if (!accepted) return <div className="fusion-disabled"><Icon name="lock" /> 接受一个 Raw candidate 后再选择融合范围。</div>;
+  if (!accepted) return <div className="fusion-disabled"><Icon name="lock" /> 接受一张候选图后再选择融合范围。</div>;
   return <section className="panel fusion-editor">
-    <div className="fusion-candidate-line"><span>当前 Raw</span><strong>{candidate?.candidate_id ?? "未选择"}</strong></div>
-    <div className="fusion-mode-tabs" role="tablist" aria-label="Fusion Mask 类型">
+    <div className="fusion-candidate-line"><span>当前候选</span><strong>{candidate?.candidate_id ?? "未选择"}</strong></div>
+    <div className="fusion-mode-tabs" role="tablist" aria-label="融合范围类型">
       {hasBrush && <button type="button" role="tab" aria-selected={effectiveMode === "brush"} onClick={() => setMode("brush")}>画笔实时融合</button>}
       <button type="button" role="tab" aria-selected={effectiveMode === "box"} onClick={() => setMode("box")}>矩形选区</button>
-      <button type="button" role="tab" aria-selected={effectiveMode === "alpha"} onClick={() => setMode("alpha")}>PNG Alpha Mask</button>
+      <button type="button" role="tab" aria-selected={effectiveMode === "alpha"} onClick={() => setMode("alpha")}>PNG 蒙版</button>
     </div>
     {canvas}
     {effectiveMode === "box" && <div className="fusion-box-grid">{(["x", "y", "width", "height"] as const).map((key) => <label key={key}><span>{key.toUpperCase()}</span><input aria-label={key.toUpperCase()} type="number" min="0" max="1" step="0.01" value={box[key]} onChange={(event) => setBox((current) => ({ ...current, [key]: Number(event.target.value) }))} /></label>)}</div>}
-    {effectiveMode === "alpha" && <label className="fusion-file-input"><span>上传 PNG Alpha Mask</span><input type="file" accept="image/png" onChange={(event) => setMaskFile(event.currentTarget.files?.[0] ?? null)} /></label>}
+    {effectiveMode === "alpha" && <label className="fusion-file-input"><span>上传 PNG 蒙版</span><input type="file" accept="image/png" onChange={(event) => setMaskFile(event.currentTarget.files?.[0] ?? null)} /></label>}
     {effectiveMode !== "brush" && <label className="fusion-feather"><span>边缘羽化 <strong>{feather}px</strong></span><input type="range" min="0" max="64" value={feather} onChange={(event) => setFeather(Number(event.target.value))} /></label>}
-    <button className="primary-button" type="button" disabled={!ready || pending} onClick={() => void apply()}>{pending ? "融合中…" : "生成 Fusion 预览"}</button>
+    <button className="primary-button" type="button" disabled={!ready || pending} onClick={() => void apply()}>{pending ? "融合中…" : "生成融合预览"}</button>
     {(boxError || error) && <p className="fusion-error" role="alert">{boxError ?? error}</p>}
   </section>;
 });

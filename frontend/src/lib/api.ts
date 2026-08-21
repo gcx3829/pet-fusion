@@ -384,9 +384,18 @@ function normalizeStringList(value: unknown, maxItems = 24, maxItemLength = 600)
 const promptPlanSections = [
   "role_of_inputs",
   "identity_invariants",
+  "pet_identity_observations",
+  "background_observations",
   "placement",
+  "capture_geometry",
+  "lighting_analysis",
+  "color_analysis",
+  "optics_and_depth_analysis",
+  "texture_and_noise_analysis",
+  "physical_integration",
   "photographic_integration",
   "scene_preservation",
+  "uncertainties",
   "preserve_from_anchor",
   "change_from_anchor",
 ] as const;
@@ -622,9 +631,9 @@ export async function uploadGuidanceMask(
   file: File,
 ): Promise<GuidanceMaskRegistration> {
   if (file.type !== "image/png") {
-    throw new Error("Guidance Mask 必须是 PNG alpha 图片");
+    throw new Error("引导区域必须导出为带透明通道的 PNG 图片");
   }
-  if (!file.size) throw new Error("Guidance Mask 不能为空");
+  if (!file.size) throw new Error("引导区域不能为空");
   if (file.size > MAX_UPLOAD_BYTES) {
     throw new Error(`Guidance Mask 超过 ${MAX_UPLOAD_BYTES} 字节上传限制`);
   }
@@ -635,7 +644,7 @@ export async function uploadGuidanceMask(
     { method: "POST", body: form },
   ));
   const asset = normalizeAsset(object.asset);
-  if (!asset) throw new Error("Guidance Mask 上传成功，但响应缺少资产引用");
+  if (!asset) throw new Error("引导区域上传成功，但响应缺少图片信息");
   return {
     project_id: stringValue(object.project_id, projectId),
     source_manifest_hash: stringValue(object.source_manifest_hash),
@@ -750,7 +759,7 @@ function normalizeFusion(value: unknown): FusionResult {
   const fusionAsset = normalizeAsset(object.fusion_asset);
   const maskAsset = normalizeAsset(object.mask_asset);
   if (!rawAsset || !fusionAsset || !maskAsset) {
-    throw new Error("Fusion 响应缺少完整资产引用");
+    throw new Error("融合结果缺少完整图片信息");
   }
   const boxValue = isObject(object.box) ? object.box : undefined;
   const box: FusionBox | undefined = boxValue
@@ -782,9 +791,9 @@ export async function uploadFusionMask(
   file: File,
 ): Promise<FusionMaskRegistration> {
   if (file.type !== "image/png") {
-    throw new Error("Fusion Mask 必须是 PNG alpha 图片");
+    throw new Error("融合蒙版必须是带透明通道的 PNG 图片");
   }
-  if (!file.size) throw new Error("Fusion Mask 不能为空");
+  if (!file.size) throw new Error("融合蒙版不能为空");
   if (file.size > MAX_UPLOAD_BYTES) {
     throw new Error(`Fusion Mask 超过 ${MAX_UPLOAD_BYTES} 字节上传限制`);
   }
@@ -795,7 +804,7 @@ export async function uploadFusionMask(
     { method: "POST", body: form },
   ));
   const asset = normalizeAsset(object.asset);
-  if (!asset) throw new Error("Fusion Mask 上传成功，但响应缺少资产引用");
+  if (!asset) throw new Error("融合蒙版上传成功，但响应缺少图片信息");
   return {
     search_id: stringValue(object.search_id, searchId),
     source_manifest_hash: stringValue(object.source_manifest_hash),
@@ -814,10 +823,10 @@ export async function createFusion(
 ): Promise<FusionResult> {
   const { box, feather_radius_px: feather } = payload;
   if (Boolean(payload.mask_asset_id) === Boolean(box)) {
-    throw new Error("Fusion 必须且只能提供矩形或 PNG alpha mask 之一");
+    throw new Error("融合范围只能选择矩形或 PNG 蒙版中的一种");
   }
   if (!Number.isInteger(feather) || feather < 0 || feather > 256) {
-    throw new Error("Fusion 羽化半径必须是 0 到 256 的整数");
+    throw new Error("融合羽化必须是 0 到 256 的整数");
   }
   if (box) {
     const values = [box.x, box.y, box.width, box.height];
@@ -830,7 +839,7 @@ export async function createFusion(
       || box.x + box.width > 1
       || box.y + box.height > 1
     ) {
-      throw new Error("Fusion 矩形必须完整位于原片归一化边界内");
+      throw new Error("融合矩形必须完整位于原片内");
     }
   }
   const object = asObject(await request(

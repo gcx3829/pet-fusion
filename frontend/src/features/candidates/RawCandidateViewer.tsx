@@ -33,8 +33,8 @@ export function RawCandidateViewer({ snapshot, selectedCandidateId, expectedCoun
     return <div className="worker-generation-placeholder" role="status" style={{ "--source-ratio": ratio } as CSSProperties}>
       <div className="generation-placeholder-stage">
         <span className="generation-placeholder-mark"><Icon name="aperture" /></span>
-        <strong>正在生成 R{snapshot.round_index}</strong>
-        <small>Raw candidate 返回后会替换对应 Timeline 占位节点</small>
+        <strong>正在生成第 {snapshot.round_index + 1} 轮</strong>
+        <small>生成完成后会自动出现在时间线</small>
         <i aria-hidden="true" />
       </div>
       <div className="generation-placeholder-slots" aria-label={`${count} 个候选生成槽位`}>
@@ -42,5 +42,5 @@ export function RawCandidateViewer({ snapshot, selectedCandidateId, expectedCoun
       </div>
     </div>;
   }
-  return <img className="worker-image" src={src} alt={`Raw candidate ${selected.candidate_id}`} onError={() => setFailed(true)} />;
+  return <img className="worker-image" src={src} alt={`候选图 ${selected.candidate_id}`} onError={() => setFailed(true)} />;
 }

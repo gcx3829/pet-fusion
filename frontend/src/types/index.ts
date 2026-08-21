@@ -202,9 +202,18 @@ export interface ProfessionalPromptPlan {
   role_of_inputs?: string[];
   task?: string;
   identity_invariants?: string[];
+  pet_identity_observations?: string[];
+  background_observations?: string[];
   placement?: string[];
+  capture_geometry?: string[];
+  lighting_analysis?: string[];
+  color_analysis?: string[];
+  optics_and_depth_analysis?: string[];
+  texture_and_noise_analysis?: string[];
+  physical_integration?: string[];
   photographic_integration?: string[];
   scene_preservation?: string[];
+  uncertainties?: string[];
   output?: string;
   preserve_from_anchor?: string[];
   change_from_anchor?: string[];

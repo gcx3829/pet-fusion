@@ -184,7 +184,7 @@ export const GuidanceMaskEditor = forwardRef<GuidanceMaskEditorHandle, GuidanceM
         };
       },
       exportMaskFile: (fileName?: string) => {
-        if (!brushRef.current) return Promise.reject(new Error("Guidance Mask 画布尚未准备好"));
+        if (!brushRef.current) return Promise.reject(new Error("引导区域画布尚未准备好"));
         return brushRef.current.exportMaskFile(fileName);
       },
       resetToPlacement,
@@ -193,7 +193,7 @@ export const GuidanceMaskEditor = forwardRef<GuidanceMaskEditorHandle, GuidanceM
     }), [defaultDocument, dirty, height, historyState, present, resetToPlacement, width]);
 
     return (
-      <div className="guidance-editor-surface" aria-label="Guidance Mask 画布">
+      <div className="guidance-editor-surface" aria-label="引导区域画布">
         {!dimensions ? (
           <div className="canvas-status-overlay" role="status">正在读取图片…</div>
         ) : (
@@ -216,12 +216,12 @@ export const GuidanceMaskEditor = forwardRef<GuidanceMaskEditorHandle, GuidanceM
             onUserEdit={handleUserEdit}
           />
         )}
-        {locked && <span className="canvas-status-overlay">MASK LOCKED</span>}
+        {locked && <span className="canvas-status-overlay">引导区域已锁定</span>}
       </div>
     );
   },
 );
 
 export function GuidanceMaskEditorPlaceholder({ children }: { children?: ReactNode }) {
-  return <div className="guidance-editor-placeholder">{children ?? "选择原片后编辑 Guidance Mask"}</div>;
+  return <div className="guidance-editor-placeholder">{children ?? "选择原片后绘制引导区域"}</div>;
 }

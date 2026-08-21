@@ -99,8 +99,8 @@ export function WorkerViewport({
     return (
       <div className="worker-viewport worker-empty" role="status">
         <span className="worker-empty-mark"><Icon name={mode === "fusion" ? "lock" : "aperture"} /></span>
-        <strong>{mode === "fusion" ? "Fusion 需要已接受的 Raw" : "候选正在进入暗房"}</strong>
-        <p>{mode === "fusion" ? "完成人工接受后，显式进入 Fusion 才能编辑融合范围。" : "生成状态和 Raw 候选会在这里稳定显示。"}</p>
+        <strong>{mode === "fusion" ? "请先接受一张候选图" : "正在准备候选图"}</strong>
+        <p>{mode === "fusion" ? "接受后即可选择需要局部融合的范围。" : "生成进度和候选图会显示在这里。"}</p>
       </div>
     );
   }

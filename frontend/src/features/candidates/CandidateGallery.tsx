@@ -33,7 +33,7 @@ function ImageFrame({ candidate }: { candidate: SearchCandidate }) {
   return (
     <img
       src={rawImageUrl}
-      alt={`第 ${candidate.round_index + 1} 轮，第 ${candidate.variant_index + 1} 张候选 Raw`}
+      alt={`第 ${candidate.round_index + 1} 轮，第 ${candidate.variant_index + 1} 张候选图`}
       loading="lazy"
       onError={() => setFailed(true)}
     />
@@ -78,24 +78,23 @@ export function CandidateGallery({
     <section className="panel gallery-panel" aria-labelledby="gallery-heading">
       <div className="panel-heading gallery-heading-row">
         <div>
-          <p className="eyebrow">04 / CONTACT SHEET</p>
-          <h2 id="gallery-heading">候选接触印样</h2>
+          <h2 id="gallery-heading">候选图片</h2>
         </div>
         <p className="gallery-summary">
           <strong>{String(candidates.length).padStart(2, "0")}</strong>
-          <span>EXPOSURES</span>
+          <span>张</span>
         </p>
       </div>
       <div className="raw-review-notice" role="note">
-        <strong>RAW CANDIDATE</strong>
-        <span>Critic 与人工评价均以模型原始输出为准；Fusion Mask 只有在用户主动融合后才会影响预览或导出。</span>
+        <strong>原始候选</strong>
+        <span>评分和选择都以模型的原始输出为准；局部融合只影响最终预览和导出。</span>
       </div>
 
       {!candidates.length && !isActive ? (
         <div className="empty-gallery">
           <div className="film-frame-stack" aria-hidden="true"><i /><i /><i /></div>
           <p>搜索结果会像接触印样一样排列在这里。</p>
-          <small>每张候选都来自不可变原片，而不是上一张生成图。</small>
+          <small>每张候选都从原片生成，不会反复加工上一张图。</small>
         </div>
       ) : (
         <div className="contact-sheet" aria-live="polite">
@@ -121,8 +120,8 @@ export function CandidateGallery({
                   <span className="film-edge film-edge--top" aria-hidden="true" />
                   <ImageFrame candidate={candidate} />
                   <span className="candidate-number">{String(candidate.variant_index + 1).padStart(2, "0")}</span>
-                  {candidate.is_global_winner && <span className="winner-ribbon">GLOBAL WINNER</span>}
-                  {candidate.is_round_winner && !candidate.is_global_winner && <span className="round-ribbon">ROUND PICK</span>}
+                  {candidate.is_global_winner && <span className="winner-ribbon">历史最佳</span>}
+                  {candidate.is_round_winner && !candidate.is_global_winner && <span className="round-ribbon">本轮最佳</span>}
                 </button>
                 <div className="candidate-meta">
                   <div>
@@ -132,10 +131,10 @@ export function CandidateGallery({
                   <p className="candidate-score"><strong>{scoreLabel(candidate.score)}</strong><small>/ 100</small></p>
                 </div>
                 <div className="candidate-flags">
-                  <span className="raw-flag">RAW REVIEW</span>
-                  <span className={blocking ? "has-blocking" : ""}>{blocking} BLOCK</span>
-                  <span>{warnings} WARN</span>
-                  {!candidate.evaluation && <span>CRITIC PENDING</span>}
+                  <span className="raw-flag">原始图</span>
+                  <span className={blocking ? "has-blocking" : ""}>{blocking} 个严重问题</span>
+                  <span>{warnings} 个提醒</span>
+                  {!candidate.evaluation && <span>等待检查</span>}
                 </div>
               </article>
             );
@@ -143,7 +142,7 @@ export function CandidateGallery({
           {isActive && Array.from({ length: Math.max(0, expectedCount - candidates.length) }, (_, index) => (
             <div className="candidate-card candidate-skeleton" key={`skeleton-${index}`} aria-label="候选正在生成">
               <div className="skeleton-image"><Icon name="aperture" /></div>
-              <span>DEVELOPING…</span>
+              <span>生成中…</span>
             </div>
           ))}
         </div>
@@ -153,10 +152,10 @@ export function CandidateGallery({
         <div className="inspection-drawer">
           <div className="inspection-head">
             <div>
-              <span className="eyebrow">SELECTED RAW CANDIDATE</span>
+              <span className="eyebrow">当前候选</span>
               <strong>R{selected.round_index} / V{selected.variant_index + 1}</strong>
             </div>
-            <p>{selected.evaluation?.summary ?? "正在查看 Raw candidate，等待结构化 Critic 评价。"}</p>
+            <p>{selected.evaluation?.summary ?? "正在检查这张候选图。"}</p>
           </div>
           <div className="metric-grid">
             {metrics.map((metric) => {

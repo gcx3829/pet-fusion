@@ -121,12 +121,12 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
   };
 
   return (
-    <div className="asset-browser" id="sidebar-panel-assets" role="tabpanel" aria-label="Assets 素材">
+    <div className="asset-browser" id="sidebar-panel-assets" role="tabpanel" aria-label="素材">
       <div className="asset-browser-heading">
-        <div><p className="workbench-kicker">PROJECT LIBRARY</p><h2>Assets</h2></div>
+        <div><h2>素材</h2></div>
         <div className="asset-layout-toggle" role="group" aria-label="素材布局">
-          <button type="button" aria-pressed={layout === "list"} onClick={() => onLayoutChange("list")}>LIST</button>
-          <button type="button" aria-pressed={layout === "grid"} onClick={() => onLayoutChange("grid")}>GRID</button>
+          <button type="button" aria-pressed={layout === "list"} onClick={() => onLayoutChange("list")}>列表</button>
+          <button type="button" aria-pressed={layout === "grid"} onClick={() => onLayoutChange("grid")}>网格</button>
         </div>
       </div>
 
@@ -141,8 +141,8 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
         input.value = "";
       }} />
       <div className="library-import-row">
-        <label className="library-import" htmlFor={inputId} aria-disabled={preparing}><Icon name="plus" /><span>{preparing ? "正在导入…" : "导入素材"}</span><small>一次选择多张</small></label>
-        <label className="library-import library-import--folder" htmlFor={folderInputId} aria-disabled={preparing}><Icon name="plus" /><span>导入文件夹</span><small>保留文件夹分组</small></label>
+        <label className="library-import" htmlFor={inputId} aria-disabled={preparing}><Icon name="plus" /><span>{preparing ? "正在导入…" : "选择图片"}</span></label>
+        <label className="library-import library-import--folder" htmlFor={folderInputId} aria-disabled={preparing}><Icon name="plus" /><span>选择文件夹</span></label>
       </div>
 
       <div
@@ -173,7 +173,7 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
             : value.references.some((item) => localAssetKey(item) === key) ? "reference" : undefined;
           return <AssetItem key={key} file={file} layout={layout} role={role} disabled={locked} onPreview={setPreview} onAssignBackground={() => assignBackground(file)} onAssignReference={() => assignReference(file)} />;
         })}</div></section>)}
-        {!library.length && <div className="library-empty"><Icon name="image" /><strong>素材库为空</strong><span>导入图片后拖到画布设为底片，或拖到宠物参考。</span></div>}
+        {!library.length && <div className="library-empty"><Icon name="image" /><strong>还没有图片</strong><span>先导入原片和宠物参考图。</span></div>}
       </div>
       {message && <p className="field-message" role="status">{message}</p>}
       {locked && <button className="text-button reset-button" type="button" onClick={onReset}>更换素材并新建任务</button>}

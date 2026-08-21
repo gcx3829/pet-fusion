@@ -147,7 +147,7 @@ describe("GuidanceMaskEditor", () => {
       />,
     );
     const canvas = await screen.findByLabelText("Mask 画布，按住鼠标绘制");
-    expect(screen.getByText("MASK LOCKED")).toBeInTheDocument();
+    expect(screen.getByText("引导区域已锁定")).toBeInTheDocument();
     expect(canvas).toHaveAttribute("aria-disabled", "true");
     fireEvent.pointerDown(canvas, { pointerId: 3, button: 0, clientX: 20, clientY: 50 });
     fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 80, clientY: 50 });
