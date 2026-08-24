@@ -112,8 +112,10 @@ export interface CriticIssue {
   issue_id?: string;
   category: string;
   severity: IssueSeverity;
+  region?: string | null;
   evidence: string;
   suggested_fix?: string | null;
+  confidence?: number;
 }
 
 export interface DimensionScores {
@@ -133,6 +135,12 @@ export interface CandidateEvaluation {
   issues: CriticIssue[];
   summary?: string;
   no_meaningful_defect?: boolean;
+  identity_match?: boolean;
+  prompt_adherent?: boolean;
+  recommended_action?: "accept" | "regenerate" | "review" | "none";
+  hard_constraint_failures?: string[];
+  semantic_conflict?: boolean;
+  semantic_conflict_reasons?: string[];
 }
 
 export interface SearchCandidate {
@@ -152,6 +160,8 @@ export interface SearchCandidate {
   protected_asset_url?: string;
   review_asset_kind?: "raw";
   score?: number;
+  ranker_eligible?: boolean;
+  hard_fail_reasons?: string[];
   evaluation?: CandidateEvaluation;
   is_round_winner: boolean;
   is_global_winner: boolean;

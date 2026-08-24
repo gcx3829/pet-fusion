@@ -256,7 +256,7 @@ OPENAI_BASE_URL=
 - 默认仍使用确定性的 mock generator、Critic 和 Prompt Refiner；`FAKE_GENERATOR=0`、`FAKE_CRITIC=0`、`FAKE_PROMPT_REFINER=0` 的官方 SDK 代码路径已接通。当前只完成了 OpenAI-compatible 端点上的单候选、单轮真实 smoke，尚未验证官方 OpenAI 直连、真实多轮搜索和摄影质量基准。Feedback Planner 仍是离线确定性 provider，尚无 GPT-5.6 Luna transport；
 - raw-first Search/Critic/人工接受、Guidance Mask、全分辨率回贴、PNG/JPEG 生产导出 API，以及 ICC/EXIF 尽力保留均已实现。Fusion Mask 是用户显式触发的独立融合层，后端提供 search-scoped alpha mask 上传与矩形/PNG alpha + 羽化 API，前端提供 Fusion 预览编辑器；旧 Composite Floor 资产仅为兼容 Local Fix、导出和历史 SQLite 数据保留，不作为 Search/Critic 默认图像；
 - checkpoint、搜索 lease 和 provider-call lease 已覆盖本机进程崩溃恢复边界，但生产队列、跨主机协调、鉴权和对象存储尚未实现；
-- 前端已覆盖素材分配、Guidance 画笔、Search、Critic 分数/问题、Timeline 唯一选片控制、人工接受、Fusion 画笔与融合结果的全尺寸 PNG 直接下载。Local Fix 尚无前端入口；生产 Export API 的 JPEG/PNG、质量、ICC/EXIF 策略也尚未做成完整导出面板。
+- 前端已覆盖素材分配、Guidance 画笔、Search、八维 Critic 参考分/结构化问题证据、Timeline 唯一选片控制、人工反馈与接受、Fusion 画笔与融合结果的全尺寸 PNG 直接下载。Critic 结果明确作为人工审片参考，不作为自动通过结论；量表歧义、低分无证据或评分与文字结论冲突时会标记为输出矛盾并退出自动排名。Live Critic 额外接收 source/raw 并排对照图以检查构图、旋转和全局渲染漂移，但这仍不是确定性的像素差异门禁。Local Fix 尚无前端入口；生产 Export API 的 JPEG/PNG、质量、ICC/EXIF 策略也尚未做成完整导出面板。
 
 这些限制是实施指导中分阶段交付的结果，不是对非协商架构约束的替代；后续真实 provider、自动多轮和局部修复仍必须遵守 immutable-source rebase、幂等调用、PNG lineage、历史最佳和最大修复深度 2 等规则。
 

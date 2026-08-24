@@ -30,8 +30,8 @@ from app.services.proxy_builder import CriticProxyBundle
 
 RUBRIC_VERSION = "critic-rubric/v1-fake"
 FAKE_CRITIC_MODEL = "deterministic-critic-fixture/v1"
-CRITIC_EVALUATION_SCHEMA_VERSION = "critic-evaluation/v2"
-CRITIC_INPUT_SEMANTICS_VERSION = "raw-authority/v1"
+CRITIC_EVALUATION_SCHEMA_VERSION = "critic-evaluation/v3"
+CRITIC_INPUT_SEMANTICS_VERSION = "raw-authority/v2"
 CRITIC_PROVIDER_RESULT_POLL_SECONDS = 0.02
 CRITIC_PROVIDER_RESULT_WAIT_SECONDS = 30.0
 CRITIC_PROVIDER_CALL_LEASE_SECONDS = 30
@@ -171,6 +171,11 @@ class CriticEvaluationService:
                     "placement_overlay": proxies.placement_overlay_proxy.sha256,
                     "references": [item.sha256 for item in proxies.reference_proxies],
                     "candidate": proxies.candidate_proxy.sha256,
+                    "scene_comparison": (
+                        proxies.scene_comparison_proxy.sha256
+                        if proxies.scene_comparison_proxy is not None
+                        else None
+                    ),
                 }
                 if proxies is not None
                 else None
@@ -343,6 +348,11 @@ class CriticEvaluationService:
                     "placement_overlay": request.proxies.placement_overlay_proxy.asset_id,
                     "references": [item.asset_id for item in request.proxies.reference_proxies],
                     "candidate": request.proxies.candidate_proxy.asset_id,
+                    "scene_comparison": (
+                        request.proxies.scene_comparison_proxy.asset_id
+                        if request.proxies.scene_comparison_proxy is not None
+                        else None
+                    ),
                 }
                 if request.proxies is not None
                 else None

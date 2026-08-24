@@ -45,7 +45,7 @@ This is a greenfield implementation; it does not import the former ComfyUI/depth
 - SQLite business persistence and LangGraph checkpoints containing references rather than image bytes;
 - REST and SSE APIs with idempotent paid/external side effects;
 - a React/TypeScript editing workbench with local Guidance and Fusion brushes;
-- raw-candidate review, prompt lineage, Critic scores, and a photo timeline;
+- raw-candidate review with all eight Critic dimensions, structured issue evidence, human-decision context, prompt lineage, and a photo timeline whose nodes remain the sole candidate selector; ambiguous score scales and score/verdict contradictions are surfaced and excluded from automatic ranking, while the live Critic receives a source/raw comparison sheet for framing and global-rendering drift checks;
 - full-resolution PNG/JPEG export with best-effort ICC and EXIF preservation.
 
 ## Stack

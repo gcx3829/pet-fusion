@@ -195,8 +195,10 @@ async def test_critic_subgraph_fans_out_bounded_proxies_and_replays_idempotently
             bundle.background_proxy,
             bundle.placement_overlay_proxy,
             bundle.raw_candidate_proxy,
+            bundle.scene_comparison_proxy,
             *bundle.reference_proxies,
         ):
+            assert asset is not None
             assert max(asset.width, asset.height) <= 32
 
 
@@ -223,6 +225,11 @@ async def test_critic_proxy_uses_raw_when_legacy_protected_asset_differs(
 
     assert bundle.candidate_proxy == bundle.raw_candidate_proxy
     assert bundle.raw_candidate_proxy.sha256 != bundle.background_proxy.sha256
+    assert bundle.scene_comparison_proxy is not None
+    assert max(
+        bundle.scene_comparison_proxy.width,
+        bundle.scene_comparison_proxy.height,
+    ) <= 64
 
 
 async def test_critic_subgraph_isolates_exhausted_provider_failures_on_replay(

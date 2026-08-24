@@ -19,6 +19,7 @@ from app.domain.searches import (
     SearchRunRecord,
     SearchStatus,
 )
+from app.services.candidate_ranker import DeterministicCandidateRanker
 
 router = APIRouter(tags=["searches"])
 
@@ -54,9 +55,17 @@ def _search_response(container: object, search_id: str) -> SearchResponse:
     if not isinstance(container, AppContainer):
         raise TypeError("Search response requires an application container")
     search = container.app_store.get_search(search_id)
+    ranker = (
+        container.search_runner.candidate_ranker
+        or DeterministicCandidateRanker()
+    )
+    evaluations = container.app_store.list_evaluations_with_scores(search_id)
     return SearchResponse.from_record(
         search,
-        evaluations=container.app_store.list_evaluations_with_scores(search_id),
+        evaluations=[
+            (evaluation, score, ranker.score(evaluation))
+            for evaluation, score in evaluations
+        ],
     )
 
 

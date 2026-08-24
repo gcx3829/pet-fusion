@@ -61,6 +61,18 @@ MIN_BLOCKING_CONFIDENCE = 0.75
 MAX_CRITIC_ISSUES = 20
 EvaluationAction = Literal["accept", "regenerate", "review", "none"]
 
+_SCORE_CATEGORY_BY_DIMENSION: dict[str, CriticCategory] = {
+    "cat_identity": CriticCategory.CAT_IDENTITY,
+    "pose_geometry": CriticCategory.POSE_GEOMETRY,
+    "perspective_scale": CriticCategory.PERSPECTIVE_SCALE,
+    "lighting_color": CriticCategory.LIGHTING_COLOR,
+    "optical_consistency": CriticCategory.OPTICAL_CONSISTENCY,
+    "physical_integration": CriticCategory.PHYSICAL_INTEGRATION,
+    "scene_preservation": CriticCategory.SCENE_PRESERVATION,
+}
+LOW_SCORE_REQUIRES_EVIDENCE = 50.0
+POSITIVE_VERDICT_SCORE_FLOOR = 60.0
+
 
 class CriticIssue(BaseModel):
     """One observable issue reported for a candidate image."""
@@ -169,6 +181,7 @@ class CandidateEvaluation(BaseModel):
     summary: str = Field(min_length=1, max_length=500)
     hard_constraint_failures: tuple[str, ...] = Field(default_factory=tuple)
     semantic_conflict: bool = False
+    semantic_conflict_reasons: tuple[str, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="before")
     @classmethod
@@ -189,9 +202,55 @@ class CandidateEvaluation(BaseModel):
             )
         )
         normalized["issues"] = normalized_issues
-        normalized["semantic_conflict"] = bool(normalized.get("semantic_conflict")) or (
-            bool(normalized.get("no_meaningful_defect"))
-            and any(issue.severity is Severity.BLOCKING for issue in normalized_issues)
+        scores = DimensionScores.model_validate(normalized.get("scores"))
+        score_values = scores.as_mapping()
+        reasons = list(normalized.get("semantic_conflict_reasons") or ())
+        blocking = any(issue.severity is Severity.BLOCKING for issue in normalized_issues)
+        action = normalized.get("recommended_action")
+        no_defect = bool(normalized.get("no_meaningful_defect"))
+
+        # A bare numeric value such as 8 is valid on both a 0..10 and a 0..100
+        # scale.  A schema validator cannot infer which meaning the vision model
+        # intended, so the safe response is to reject the result for automatic
+        # ranking instead of silently multiplying it into a high score.
+        if max(score_values.values()) <= 10:
+            reasons.append("ambiguous_score_scale_0_10")
+        if no_defect and blocking:
+            reasons.append("no_defect_with_blocking_issue")
+        if action == "accept" and blocking:
+            reasons.append("accept_with_blocking_issue")
+        if (no_defect or action == "accept") and min(score_values.values()) < (
+            POSITIVE_VERDICT_SCORE_FLOOR
+        ):
+            reasons.append("positive_verdict_with_low_score")
+
+        issue_categories = {issue.category for issue in normalized_issues}
+        for dimension, category in _SCORE_CATEGORY_BY_DIMENSION.items():
+            if (
+                score_values[dimension] < LOW_SCORE_REQUIRES_EVIDENCE
+                and category not in issue_categories
+            ):
+                reasons.append(f"low_score_without_issue:{dimension}")
+        if (
+            score_values["overall_photographic_naturalness"]
+            < LOW_SCORE_REQUIRES_EVIDENCE
+            and not normalized_issues
+        ):
+            reasons.append("low_naturalness_without_issue")
+        if bool(normalized.get("identity_match")) and (
+            score_values["cat_identity"] < LOW_SCORE_REQUIRES_EVIDENCE
+        ):
+            reasons.append("identity_flag_score_conflict")
+        if bool(normalized.get("prompt_adherent")) and (
+            score_values["scene_preservation"] < LOW_SCORE_REQUIRES_EVIDENCE
+        ):
+            reasons.append("prompt_flag_scene_score_conflict")
+        if action == "regenerate" and not normalized_issues:
+            reasons.append("regenerate_without_issue")
+
+        normalized["semantic_conflict_reasons"] = tuple(dict.fromkeys(reasons))
+        normalized["semantic_conflict"] = bool(normalized.get("semantic_conflict")) or bool(
+            normalized["semantic_conflict_reasons"]
         )
         return normalized
 

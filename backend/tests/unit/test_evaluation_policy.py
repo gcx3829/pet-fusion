@@ -218,6 +218,101 @@ def test_relay_unit_interval_scores_are_normalized_to_public_scale() -> None:
     assert scores.scene_preservation == 96
 
 
+def test_ambiguous_zero_to_ten_scores_are_not_silently_promoted() -> None:
+    evaluation = CandidateEvaluation(
+        rubric_version="critic-rubric/test",
+        candidate_id="candidate-ambiguous-scale",
+        round_index=0,
+        scores=DimensionScores(
+            cat_identity=9,
+            pose_geometry=8,
+            perspective_scale=9,
+            lighting_color=8.5,
+            optical_consistency=8.5,
+            physical_integration=8.5,
+            scene_preservation=10,
+            overall_photographic_naturalness=8.5,
+        ),
+        issues=(),
+        no_meaningful_defect=True,
+        identity_match=True,
+        prompt_adherent=True,
+        recommended_action="accept",
+        summary="No visible defect.",
+    )
+
+    assert evaluation.scores.cat_identity == 9
+    assert evaluation.semantic_conflict
+    assert "ambiguous_score_scale_0_10" in evaluation.semantic_conflict_reasons
+    ranking = DeterministicCandidateRanker().score(evaluation)
+    assert not ranking.eligible
+    assert "critic_semantic_conflict" in ranking.hard_fail_reasons
+
+
+def test_low_score_requires_matching_visible_issue() -> None:
+    evaluation = CandidateEvaluation(
+        rubric_version="critic-rubric/test",
+        candidate_id="candidate-missing-evidence",
+        round_index=0,
+        scores=DimensionScores(
+            cat_identity=90,
+            pose_geometry=90,
+            perspective_scale=90,
+            lighting_color=90,
+            optical_consistency=90,
+            physical_integration=90,
+            scene_preservation=30,
+            overall_photographic_naturalness=70,
+        ),
+        issues=(),
+        no_meaningful_defect=False,
+        identity_match=True,
+        prompt_adherent=False,
+        recommended_action="review",
+        summary="The scene may have changed.",
+    )
+
+    assert evaluation.semantic_conflict
+    assert (
+        "low_score_without_issue:scene_preservation"
+        in evaluation.semantic_conflict_reasons
+    )
+
+
+def test_low_scene_score_with_matching_issue_is_internally_consistent() -> None:
+    issue = CriticIssue(
+        issue_id="scene-drift",
+        category="scene_preservation",
+        severity=Severity.BLOCKING,
+        evidence="The source framing and global color rendering changed.",
+        confidence=0.96,
+    )
+    evaluation = CandidateEvaluation(
+        rubric_version="critic-rubric/test",
+        candidate_id="candidate-scene-drift",
+        round_index=0,
+        scores=DimensionScores(
+            cat_identity=90,
+            pose_geometry=90,
+            perspective_scale=87,
+            lighting_color=83,
+            optical_consistency=82,
+            physical_integration=84,
+            scene_preservation=30,
+            overall_photographic_naturalness=78,
+        ),
+        issues=(issue,),
+        no_meaningful_defect=False,
+        identity_match=True,
+        prompt_adherent=False,
+        recommended_action="regenerate",
+        summary="The candidate changes the immutable scene globally.",
+    )
+
+    assert not evaluation.semantic_conflict
+    assert evaluation.semantic_conflict_reasons == ()
+
+
 def test_evaluation_checkpoint_payload_contains_no_image_bytes() -> None:
     evaluation = make_evaluation("candidate-safe")
     payload = evaluation.model_dump(mode="json")

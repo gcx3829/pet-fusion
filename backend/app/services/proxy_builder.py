@@ -6,7 +6,7 @@ import io
 import math
 from typing import Literal
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.assets import AssetRef, SourceManifest
@@ -36,6 +36,7 @@ class CriticProxyBundle(BaseModel):
     # protected-first implementation can still be read.
     raw_candidate_proxy: AssetRef
     protected_candidate_proxy: AssetRef | None = None
+    scene_comparison_proxy: AssetRef | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -135,6 +136,55 @@ class CriticProxyBuilder:
         draw.rectangle((left, top, right, bottom), outline=(255, 196, 72, 255), width=line_width)
         return self._store_proxy(image.convert("RGB"))
 
+    def _scene_comparison(
+        self, background_proxy: AssetRef, candidate_proxy: AssetRef
+    ) -> AssetRef:
+        """Place source and raw candidate on one bounded, equal-size review sheet."""
+
+        self.asset_store.assert_intact(background_proxy)
+        self.asset_store.assert_intact(candidate_proxy)
+        with Image.open(background_proxy.filesystem_path) as opened:
+            background = ImageOps.exif_transpose(opened).convert("RGB")
+        with Image.open(candidate_proxy.filesystem_path) as opened:
+            candidate = ImageOps.exif_transpose(opened).convert("RGB")
+
+        gap = max(1, round(self.max_side / 384))
+        panel_width = max(1, (self.max_side - gap) // 2)
+        panel_height = min(
+            self.max_side,
+            max(
+                1,
+                round(
+                    max(
+                        background.height / background.width,
+                        candidate.height / candidate.width,
+                    )
+                    * panel_width
+                ),
+            ),
+        )
+        background = ImageOps.contain(
+            background, (panel_width, panel_height), Image.Resampling.LANCZOS
+        )
+        candidate = ImageOps.contain(
+            candidate, (panel_width, panel_height), Image.Resampling.LANCZOS
+        )
+        sheet = Image.new(
+            "RGB", (panel_width * 2 + gap, panel_height), color=(14, 16, 19)
+        )
+        sheet.paste(
+            background,
+            ((panel_width - background.width) // 2, (panel_height - background.height) // 2),
+        )
+        sheet.paste(
+            candidate,
+            (
+                panel_width + gap + (panel_width - candidate.width) // 2,
+                (panel_height - candidate.height) // 2,
+            ),
+        )
+        return self._store_proxy(sheet)
+
     def build(
         self,
         *,
@@ -154,6 +204,7 @@ class CriticProxyBuilder:
         )
         candidate_proxy = self._proxy_asset(candidate.raw_authoritative_asset)
         overlay_proxy = self._placement_overlay(background_proxy, placement)
+        comparison_proxy = self._scene_comparison(background_proxy, candidate_proxy)
         return CriticProxyBundle(
             candidate_id=candidate.candidate_id,
             source_manifest_hash=source_manifest.manifest_hash,
@@ -165,4 +216,5 @@ class CriticProxyBuilder:
             # providers use ``candidate_proxy`` so protected data cannot become
             # the review authority by accident.
             protected_candidate_proxy=candidate_proxy,
+            scene_comparison_proxy=comparison_proxy,
         )

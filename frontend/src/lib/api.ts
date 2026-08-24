@@ -63,6 +63,10 @@ function numberValue(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function normalizeCropMapping(value: unknown): CropMapping | undefined {
   if (!isObject(value) || !isObject(value.crop_box) || !isObject(value.padding)) {
     return undefined;
@@ -222,8 +226,10 @@ function normalizeIssues(value: unknown): CriticIssue[] {
       issue_id: stringValue(item.issue_id) || undefined,
       category: stringValue(item.category, "photographic_naturalness"),
       severity: severity === "blocking" || severity === "warning" ? severity : "info",
+      region: stringValue(item.region) || undefined,
       evidence: stringValue(item.evidence, stringValue(item.description, "未提供说明")),
       suggested_fix: stringValue(item.suggested_fix) || undefined,
+      confidence: typeof item.confidence === "number" ? item.confidence : undefined,
     }];
   });
 }
@@ -232,22 +238,42 @@ function normalizeEvaluation(value: unknown): CandidateEvaluation | undefined {
   if (!isObject(value)) return undefined;
   const scoreObject = isObject(value.scores) ? value.scores : undefined;
   return {
-    total_score: numberValue(value.total_score, numberValue(value.score)) || undefined,
+    total_score: optionalNumber(value.total_score) ?? optionalNumber(value.score),
     scores: scoreObject ? {
-      cat_identity: numberValue(scoreObject.cat_identity) || undefined,
-      pose_geometry: numberValue(scoreObject.pose_geometry) || undefined,
-      perspective_scale: numberValue(scoreObject.perspective_scale) || undefined,
-      lighting_color: numberValue(scoreObject.lighting_color) || undefined,
-      optical_consistency: numberValue(scoreObject.optical_consistency) || undefined,
-      physical_integration: numberValue(scoreObject.physical_integration) || undefined,
-      scene_preservation: numberValue(scoreObject.scene_preservation) || undefined,
+      cat_identity: optionalNumber(scoreObject.cat_identity),
+      pose_geometry: optionalNumber(scoreObject.pose_geometry),
+      perspective_scale: optionalNumber(scoreObject.perspective_scale),
+      lighting_color: optionalNumber(scoreObject.lighting_color),
+      optical_consistency: optionalNumber(scoreObject.optical_consistency),
+      physical_integration: optionalNumber(scoreObject.physical_integration),
+      scene_preservation: optionalNumber(scoreObject.scene_preservation),
       overall_photographic_naturalness:
-        numberValue(scoreObject.overall_photographic_naturalness) || undefined,
+        optionalNumber(scoreObject.overall_photographic_naturalness),
     } : undefined,
     issues: normalizeIssues(value.issues),
     summary: stringValue(value.summary) || undefined,
     no_meaningful_defect: typeof value.no_meaningful_defect === "boolean"
       ? value.no_meaningful_defect
+      : undefined,
+    identity_match: typeof value.identity_match === "boolean" ? value.identity_match : undefined,
+    prompt_adherent: typeof value.prompt_adherent === "boolean" ? value.prompt_adherent : undefined,
+    recommended_action:
+      value.recommended_action === "accept"
+      || value.recommended_action === "regenerate"
+      || value.recommended_action === "review"
+      || value.recommended_action === "none"
+        ? value.recommended_action
+        : undefined,
+    hard_constraint_failures: Array.isArray(value.hard_constraint_failures)
+      ? value.hard_constraint_failures.filter((item): item is string => typeof item === "string")
+      : undefined,
+    semantic_conflict: typeof value.semantic_conflict === "boolean"
+      ? value.semantic_conflict
+      : undefined,
+    semantic_conflict_reasons: Array.isArray(value.semantic_conflict_reasons)
+      ? value.semantic_conflict_reasons.filter(
+        (item): item is string => typeof item === "string",
+      )
       : undefined,
   };
 }
@@ -301,7 +327,7 @@ function normalizeCandidate(
   const id = stringValue(value.candidate_id, stringValue(value.id));
   if (!id) return undefined;
   const linkedEvaluation = normalizeEvaluation(value.evaluation ?? evaluations?.[id]);
-  const directScore = numberValue(value.total_score, numberValue(value.score));
+  const directScore = optionalNumber(value.total_score) ?? optionalNumber(value.score);
   const rawImageUrl = imageUrlFromCandidate(value);
   const rawAsset = normalizeAsset(value.raw_asset);
   const protectedAsset = normalizeAsset(value.protected_asset);
@@ -325,7 +351,13 @@ function normalizeCandidate(
       stringValue(value.protected_image_url),
     ) || protectedAsset?.asset_url || protectedAsset?.content_url || protectedAsset?.url,
     review_asset_kind: "raw",
-    score: directScore || linkedEvaluation?.total_score,
+    score: directScore ?? linkedEvaluation?.total_score,
+    ranker_eligible: typeof value.ranker_eligible === "boolean"
+      ? value.ranker_eligible
+      : undefined,
+    hard_fail_reasons: Array.isArray(value.hard_fail_reasons)
+      ? value.hard_fail_reasons.filter((item): item is string => typeof item === "string")
+      : undefined,
     evaluation: linkedEvaluation,
     is_round_winner: value.is_round_winner === true || id === roundWinnerId,
     is_global_winner: value.is_global_winner === true || id === globalWinnerId,

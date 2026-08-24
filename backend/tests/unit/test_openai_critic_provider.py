@@ -25,7 +25,10 @@ from app.services.critic_service import (
     CriticStructuredOutput,
 )
 from app.services.generator_service import FAKE_IMAGE_MODEL, GenerationRequest
-from app.services.openai_critic_client import OfficialOpenAICriticProvider
+from app.services.openai_critic_client import (
+    CRITIC_SYSTEM_INSTRUCTIONS,
+    OfficialOpenAICriticProvider,
+)
 from app.services.prompt_compiler import compile_canonical_prompt
 from app.services.proxy_builder import CriticProxyBuilder
 from tests.conftest import make_image_bytes
@@ -219,9 +222,11 @@ async def test_official_critic_uses_structured_responses_and_safe_idempotent_aud
         for part in message["content"]
         if part["type"] == "input_image"
     ]
-    assert len(image_parts) == 4
+    assert len(image_parts) == 5
     assert all(part["image_url"].startswith("data:image/png;base64,") for part in image_parts)
     assert all(part["detail"] == "high" for part in image_parts)
+    assert "Never use a 0..1 or 0..10 scale" in CRITIC_SYSTEM_INSTRUCTIONS
+    assert "camera roll, crop/framing" in CRITIC_SYSTEM_INSTRUCTIONS
 
     request_key = service.build_request_key(
         search_id=search.search_id,
@@ -246,7 +251,7 @@ async def test_official_critic_uses_structured_responses_and_safe_idempotent_aud
             (request_key,),
         ).fetchone()
     audited_request = json.loads(request_json)
-    assert audited_request["input_semantics_version"] == "raw-authority/v1"
+    assert audited_request["input_semantics_version"] == "raw-authority/v2"
     assert audited_request["raw_asset_id"] == request.candidate.raw_asset.asset_id
     assert audited_request["raw_asset_sha256"] == request.candidate.raw_asset.sha256
     assert all("protected" not in key for key in audited_request)

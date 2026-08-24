@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.assets import AssetRef, PublicAssetRef
 from app.domain.candidates import CandidateRecord, CandidateResponse
-from app.domain.evaluations import CandidateEvaluation
+from app.domain.evaluations import CandidateEvaluation, CandidateScore
 from app.domain.prompts import PromptHistoryEntry, PublicPromptHistoryEntry
 
 
@@ -147,12 +147,18 @@ class SearchResponse(BaseModel):
         cls,
         search: SearchRunRecord,
         *,
-        evaluations: Sequence[tuple[CandidateEvaluation, float | None]] = (),
+        evaluations: Sequence[
+            tuple[CandidateEvaluation, float | None]
+            | tuple[CandidateEvaluation, float | None, CandidateScore]
+        ] = (),
     ) -> SearchResponse:
-        evaluation_by_candidate = {
-            evaluation.candidate_id: (evaluation, score)
-            for evaluation, score in evaluations
-        }
+        evaluation_by_candidate: dict[
+            str, tuple[CandidateEvaluation, float | None, CandidateScore | None]
+        ] = {}
+        for item in evaluations:
+            evaluation, score = item[0], item[1]
+            ranking = item[2] if len(item) == 3 else None
+            evaluation_by_candidate[evaluation.candidate_id] = (evaluation, score, ranking)
         response_candidates = [
             CandidateResponse.from_record(
                 item,
@@ -163,6 +169,11 @@ class SearchResponse(BaseModel):
                 ),
                 score=(
                     evaluation_by_candidate[item.candidate_id][1]
+                    if item.candidate_id in evaluation_by_candidate
+                    else None
+                ),
+                ranking=(
+                    evaluation_by_candidate[item.candidate_id][2]
                     if item.candidate_id in evaluation_by_candidate
                     else None
                 ),

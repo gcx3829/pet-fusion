@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.assets import AssetRef
 from app.domain.compositing import CompositeResult, CropMapping
-from app.domain.evaluations import CandidateEvaluation
+from app.domain.evaluations import CandidateEvaluation, CandidateScore
 
 
 class CandidateRecord(BaseModel):
@@ -127,6 +127,8 @@ class CandidateResponse(BaseModel):
     protected_mime_type: str | None = None
     review_asset_kind: Literal["raw"] = "raw"
     score: float | None = Field(default=None, ge=0, le=100)
+    ranker_eligible: bool | None = None
+    hard_fail_reasons: tuple[str, ...] = Field(default_factory=tuple)
     evaluation: CandidateEvaluation | None = None
 
     @classmethod
@@ -136,6 +138,7 @@ class CandidateResponse(BaseModel):
         *,
         evaluation: CandidateEvaluation | None = None,
         score: float | None = None,
+        ranking: CandidateScore | None = None,
     ) -> CandidateResponse:
         raw = candidate.raw_authoritative_asset
         protected = candidate.protected_asset
@@ -176,5 +179,7 @@ class CandidateResponse(BaseModel):
             protected_mime_type=protected.mime_type,
             review_asset_kind="raw",
             score=score,
+            ranker_eligible=ranking.eligible if ranking is not None else None,
+            hard_fail_reasons=(ranking.hard_fail_reasons if ranking is not None else ()),
             evaluation=evaluation,
         )

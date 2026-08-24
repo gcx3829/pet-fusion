@@ -158,6 +158,27 @@ describe("API client", () => {
         },
         generation_depth: 0,
         model: "fake-gpt-image-2",
+        ranker_eligible: false,
+        hard_fail_reasons: ["critic_semantic_conflict"],
+        evaluation: {
+          score: 63.5,
+          recommended_action: "review",
+          identity_match: true,
+          prompt_adherent: false,
+          hard_constraint_failures: ["pose_geometry"],
+          semantic_conflict: false,
+          scores: { cat_identity: 0, pose_geometry: 42 },
+          issues: [{
+            issue_id: "issue-01",
+            category: "pose_geometry",
+            severity: "blocking",
+            region: "右前肢",
+            evidence: "肢体折叠不自然",
+            suggested_fix: "重建完整前肢",
+            confidence: 0.94,
+          }],
+          summary: "需要人工检查",
+        },
       }],
       global_winner_id: null,
       prompt_history: [{
@@ -181,6 +202,8 @@ describe("API client", () => {
       image_url: "/api/v1/assets/asset-01",
       model: "fake-gpt-image-2",
       is_global_winner: false,
+      ranker_eligible: false,
+      hard_fail_reasons: ["critic_semantic_conflict"],
       raw_width: 120,
       raw_height: 100,
       crop_mapping: {
@@ -191,6 +214,19 @@ describe("API client", () => {
         canvas_width: 120,
         canvas_height: 100,
         padding: { left: 10, top: 5, right: 10, bottom: 5 },
+      },
+      evaluation: {
+        total_score: 63.5,
+        recommended_action: "review",
+        identity_match: true,
+        prompt_adherent: false,
+        hard_constraint_failures: ["pose_geometry"],
+        scores: { cat_identity: 0, pose_geometry: 42 },
+        issues: [expect.objectContaining({
+          region: "右前肢",
+          confidence: 0.94,
+          suggested_fix: "重建完整前肢",
+        })],
       },
     });
     expect(snapshot.prompt_history).toEqual([expect.objectContaining({
