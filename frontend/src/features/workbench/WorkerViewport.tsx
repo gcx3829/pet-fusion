@@ -89,8 +89,7 @@ export function WorkerViewport({
     ) : (
       <div className="worker-viewport worker-empty" role="status" onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }} onDrop={onBackgroundDrop} data-testid="worker-drop-surface">
         <span className="worker-empty-mark"><Icon name="image" /></span>
-        <strong>把素材拖到这里作为底片</strong>
-        <p>也可以在左侧素材项选择“底片”。</p>
+        <strong>拖入底片</strong>
       </div>
     );
   }
@@ -100,7 +99,6 @@ export function WorkerViewport({
       <div className="worker-viewport worker-empty" role="status">
         <span className="worker-empty-mark"><Icon name={mode === "fusion" ? "lock" : "aperture"} /></span>
         <strong>{mode === "fusion" ? "请先接受一张候选图" : "正在准备候选图"}</strong>
-        <p>{mode === "fusion" ? "接受后即可选择需要局部融合的范围。" : "生成进度和候选图会显示在这里。"}</p>
       </div>
     );
   }

@@ -64,7 +64,7 @@ describe("CriticInspector", () => {
       />,
     );
 
-    expect(screen.getByText("AI 仅供参考")).toBeInTheDocument();
+    expect(screen.getByText("AI 参考")).toBeInTheDocument();
     expect(screen.getByLabelText("AI 参考分 63.5")).toBeInTheDocument();
     expect(screen.getByText("1 个阻断问题")).toBeInTheDocument();
     expect(screen.getAllByText("姿态结构")).toHaveLength(2);
@@ -145,8 +145,8 @@ describe("CriticInspector", () => {
       />,
     );
 
-    expect(screen.getByText("Critic 输出矛盾")).toBeInTheDocument();
+    expect(screen.getByText("结果矛盾")).toBeInTheDocument();
     expect(screen.queryByText("未发现明确缺陷")).not.toBeInTheDocument();
-    expect(screen.getByText("量表、评分或文字结论不一致，禁止自动采信")).toBeInTheDocument();
+    expect(screen.getByText("评分与结论不一致")).toBeInTheDocument();
   });
 });

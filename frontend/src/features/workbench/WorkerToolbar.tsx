@@ -10,7 +10,6 @@ interface WorkerToolbarProps {
   brushFeather: number;
   canUndo?: boolean;
   canRedo?: boolean;
-  historyDepth?: number;
   fusionUnlocked?: boolean;
   onUndo?: () => void;
   onRedo?: () => void;
@@ -32,7 +31,6 @@ export function WorkerToolbar({
   brushFeather,
   canUndo = false,
   canRedo = false,
-  historyDepth = 0,
   fusionUnlocked = false,
   onUndo,
   onRedo,
@@ -54,10 +52,7 @@ export function WorkerToolbar({
         <button className="toolbar-button" type="button" aria-label="重做" disabled={!canRedo || !canEdit} onClick={onRedo}>
           <Icon name="redo" />
         </button>
-        {canEdit && <output className="toolbar-history-depth" aria-label="操作记录">{historyDepth} 步</output>}
       </div>
-
-      <span className="toolbar-divider" aria-hidden="true" />
 
       <div className="toolbar-cluster" aria-label="画笔工具">
         <button
@@ -91,22 +86,20 @@ export function WorkerToolbar({
         </button>
       </div>
 
-      <div className="toolbar-sliders" aria-label="画笔参数">
+      {canEdit && brushTool !== "hand" && <div className="toolbar-sliders" aria-label="画笔参数">
         <label className="toolbar-range">
           <span>大小 <output>{brushSize}</output></span>
-          <input type="range" min="4" max="512" step="4" value={brushSize} disabled={!canEdit || brushTool === "hand"} onChange={(event) => onBrushSizeChange(Number(event.target.value))} />
+          <input type="range" min="4" max="512" step="4" value={brushSize} onChange={(event) => onBrushSizeChange(Number(event.target.value))} />
         </label>
         <label className="toolbar-range">
           <span>流量 <output>{brushFlow}%</output></span>
-          <input type="range" min="1" max="100" step="1" value={brushFlow} disabled={!canEdit || brushTool === "hand"} onChange={(event) => onBrushFlowChange(Number(event.target.value))} />
+          <input type="range" min="1" max="100" step="1" value={brushFlow} onChange={(event) => onBrushFlowChange(Number(event.target.value))} />
         </label>
         <label className="toolbar-range">
           <span>羽化 <output>{brushFeather}%</output></span>
-          <input type="range" min="0" max="100" step="1" value={brushFeather} disabled={!canEdit || brushTool === "hand"} onChange={(event) => onBrushFeatherChange(Number(event.target.value))} />
+          <input type="range" min="0" max="100" step="1" value={brushFeather} onChange={(event) => onBrushFeatherChange(Number(event.target.value))} />
         </label>
-      </div>
-
-      <span className="toolbar-divider toolbar-divider--loose" aria-hidden="true" />
+      </div>}
 
       <div className="toolbar-cluster toolbar-zoom" aria-label="画布缩放">
         <button className="toolbar-button toolbar-fit" type="button" aria-label="适合窗口" onClick={onFit}><Icon name="fit" /></button>

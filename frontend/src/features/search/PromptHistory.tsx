@@ -30,7 +30,7 @@ function refinementLabel(entry: PromptHistoryEntry): string {
 function generationLabel(mode?: PromptGenerationMode): string {
   if (mode === "candidate_anchored_rebase") return "从原片生成，并参考所选候选";
   if (mode === "source_rebase") return "只使用原片和宠物参考图";
-  return "未记录生成方式";
+  return "未记录";
 }
 
 const planSections: Array<{ key: keyof ProfessionalPromptPlan; label: string }> = [
@@ -85,15 +85,13 @@ function PromptBlock({
   label,
   prompt,
   hash,
-  open = false,
 }: {
   label: string;
   prompt: string;
   hash?: string;
-  open?: boolean;
 }) {
   return (
-    <details className="prompt-block" open={open}>
+    <details className="prompt-block">
       <summary>
         <span>{label}</span>
         <code title={hash}>{shortHash(hash)}</code>
@@ -104,12 +102,11 @@ function PromptBlock({
 }
 
 export function PromptHistory({ history, refinementState }: PromptHistoryProps) {
-  const latestRoundIndex = history.length ? history[history.length - 1].round_index : null;
   return (
     <section className="panel prompt-history-panel" aria-labelledby="prompt-history-heading">
       <div className="panel-heading prompt-history-heading">
         <div>
-          <h2 id="prompt-history-heading">生成记录</h2>
+          <h2 id="prompt-history-heading">Prompt</h2>
         </div>
         <span className="prompt-history-count">
           {history.length ? `${history.length} 轮` : "暂无记录"}
@@ -131,7 +128,7 @@ export function PromptHistory({ history, refinementState }: PromptHistoryProps) 
       )}
 
       {!history.length ? (
-        <p className="prompt-history-empty">开始生成后，这里会显示图像分析和实际发送给模型的内容。</p>
+        <p className="prompt-history-empty">生成后可查看每轮 Prompt。</p>
       ) : (
         <ol className="prompt-history-list">
           {history.map((entry) => {
@@ -154,13 +151,13 @@ export function PromptHistory({ history, refinementState }: PromptHistoryProps) 
                 </div>
                 <div className="prompt-lineage-meta" aria-label="生成记录概览">
                   <span><b>{refinementLabel(entry)}</b></span>
-                  <span>{generationLabel(entry.generation_mode)}</span>
                 </div>
                 {(entry.prompt_version_id || entry.based_on_prompt_version_id || entry.human_selected_candidate_id) && (
                   <details className="prompt-version-lineage" aria-label="技术信息">
                     <summary>技术信息</summary>
                     {entry.prompt_version_id && <span>版本 <code>{shortHash(entry.prompt_version_id)}</code></span>}
                     {entry.based_on_prompt_version_id && <span>基于 <code>{shortHash(entry.based_on_prompt_version_id)}</code></span>}
+                    {entry.generation_mode && <span>方式 · {generationLabel(entry.generation_mode)}</span>}
                     {entry.human_selected_candidate_id && <span>所选候选 <code>{entry.human_selected_candidate_id}</code></span>}
                     {entry.prompt_model && <span>分析模型 · {entry.prompt_model}</span>}
                     {entry.generation_model && <span>图像模型 · {entry.generation_model}</span>}
@@ -179,7 +176,7 @@ export function PromptHistory({ history, refinementState }: PromptHistoryProps) 
                         {entry.visual_anchor.candidate_id ?? entry.human_selected_candidate_id ?? "未提供候选 ID"}
                         {typeof entry.visual_anchor.round_index === "number" ? ` · 第 ${entry.visual_anchor.round_index + 1} 轮` : ""}
                       </p>
-                      <small>原图仍是编辑底片；这一张只用于保持上一轮成功的视觉特征。</small>
+                      <small>仅作视觉参考，底片仍为原片。</small>
                     </div>
                   </div>
                 )}
@@ -200,13 +197,12 @@ export function PromptHistory({ history, refinementState }: PromptHistoryProps) 
                 )}
                 <PlanBlock plan={entry.professional_prompt_plan} />
                 <PromptBlock
-                  label="实际发送给图像模型"
+                  label="本轮 Prompt"
                   prompt={entry.generation_prompt}
                   hash={entry.generation_prompt_hash}
-                  open={entry.round_index === latestRoundIndex}
                 />
                 <PromptBlock
-                  label="基础画面描述"
+                  label="基础 Prompt"
                   prompt={entry.canonical_prompt}
                   hash={entry.canonical_prompt_hash}
                 />

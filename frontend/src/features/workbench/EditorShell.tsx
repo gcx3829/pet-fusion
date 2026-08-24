@@ -50,10 +50,14 @@ export function EditorShell({
       <header className="editor-appbar">
         <a className="editor-brand" href="#editor-main" aria-label="Pet Fusion 工作台">
           <span className="editor-brand-mark"><Icon name="aperture" /></span>
-          <span><strong>PET FUSION</strong><small>宠物合影工作台</small></span>
+          <strong>PET FUSION</strong>
         </a>
-        <div className="editor-document-title"><span>未命名合影</span><small>{accepted ? "候选已接受，可选局部融合" : "从原片生成候选"}</small></div>
-        <div className="editor-appbar-status"><span className={`appbar-status-dot is-${status}`} /><span><small>{connectionState === "open" ? "实时更新中" : connectionState === "settled" ? "进度已保存" : "工作台"}</small><strong>{jobLabel} · {statusLabel(status)}</strong></span></div>
+        <div className="editor-document-title">未命名合影</div>
+        <div className="editor-appbar-status" title={connectionState === "open" ? "实时更新已连接" : connectionState === "settled" ? "进度已保存" : "等待连接"}>
+          <span className={`appbar-status-dot is-${status}`} />
+          <span>{jobLabel}</span>
+          <strong>{statusLabel(status)}</strong>
+        </div>
       </header>
       <div className="editor-body">
         <aside className="editor-sidebar" aria-label="工作台侧栏">

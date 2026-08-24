@@ -106,32 +106,29 @@ export function CriticInspector({
   const semanticConflict = hasClientSemanticConflict(evaluation, score);
   const isCurrentRound = selected?.round_index === snapshot?.round_index;
   const verdict = !evaluation
-    ? { tone: "is-pending", label: "正在分析", detail: "Critic 结果尚未返回" }
+    ? { tone: "is-pending", label: "正在分析", detail: "等待结果" }
     : semanticConflict
-      ? { tone: "is-warning", label: "Critic 输出矛盾", detail: "量表、评分或文字结论不一致，禁止自动采信" }
+      ? { tone: "is-warning", label: "结果矛盾", detail: "评分与结论不一致" }
       : blockingCount > 0
-        ? { tone: "is-blocking", label: `${blockingCount} 个阻断问题`, detail: "建议先处理结构性缺陷" }
+        ? { tone: "is-blocking", label: `${blockingCount} 个阻断问题`, detail: "需要修正" }
         : selected?.ranker_eligible === false
-          ? { tone: "is-warning", label: "未通过自动门槛", detail: "存在硬约束失败，请人工复核原图" }
+          ? { tone: "is-warning", label: "未通过门槛", detail: "硬约束未通过" }
         : warningCount > 0
-          ? { tone: "is-warning", label: `${warningCount} 项需要复核`, detail: "没有自动结论，请结合原图判断" }
-          : { tone: "is-clear", label: "未发现明确缺陷", detail: "仍需人工检查整体可信度" };
+          ? { tone: "is-warning", label: `${warningCount} 项需复核`, detail: "请人工确认" }
+          : { tone: "is-clear", label: "未发现明确缺陷", detail: "仍需人工确认" };
 
   return (
     <div className="critic-inspector" id="sidebar-panel-review" role="tabpanel" aria-label="审片">
       <header className="review-inspector-heading">
-        <div>
-          <span className="workbench-kicker">RAW REVIEW</span>
-          <h2>审片</h2>
-        </div>
-        <span className="review-authority-badge">AI 仅供参考</span>
+        <h2>审片</h2>
+        <span className="review-authority-badge">AI 参考</span>
       </header>
 
       {!selected ? (
         <div className="critic-detail-empty" role="status">
           <span className="critic-empty-icon"><Icon name={active ? "spark" : "image"} /></span>
           <strong>{active ? `正在生成 ${expectedCount} 张候选` : "从时间线选择一张图片"}</strong>
-          <span>{active ? "图片和检查状态会沿时间线出现。" : "时间线是唯一的图片切换入口。"}</span>
+          <span>{active ? "结果会显示在时间线。" : "请在时间线选择。"}</span>
         </div>
       ) : (
         <section className="critic-detail" aria-label={`当前候选：第 ${selected.round_index + 1} 轮，第 ${selected.variant_index + 1} 张`}>
@@ -139,12 +136,11 @@ export function CriticInspector({
             <span className="critic-selection-index">R{selected.round_index + 1} · {String(selected.variant_index + 1).padStart(2, "0")}</span>
             <span className={isCurrentRound ? "is-current" : "is-history"}>{isCurrentRound ? "本轮选择" : "历史候选"}</span>
             {selected.is_global_winner && <span className="is-best">历史最佳</span>}
-            <code title={selected.candidate_id}>{selected.candidate_id}</code>
           </div>
 
           <div className={`critic-verdict ${verdict.tone}`}>
             <span className="critic-verdict-mark"><Icon name={semanticConflict || blockingCount > 0 || selected?.ranker_eligible === false ? "warning" : evaluation ? "check" : "spark"} /></span>
-            <span><small>系统检查</small><strong>{verdict.label}</strong><em>{verdict.detail}</em></span>
+            <span><small>AI</small><strong>{verdict.label}</strong><em>{verdict.detail}</em></span>
             <output aria-label={`AI 参考分 ${typeof score === "number" ? score.toFixed(1) : "不可用"}`}>
               <small>参考分</small>
               <strong>{typeof score === "number" ? score.toFixed(1) : "—"}</strong>
@@ -152,12 +148,11 @@ export function CriticInspector({
           </div>
 
           <div className="critic-summary">
-            <span>摘要</span>
             <p>{evaluation?.summary ?? "正在读取原始候选并生成结构化检查结果。"}</p>
           </div>
 
           <section className="critic-section" aria-labelledby="critic-dimensions-heading">
-            <header><h3 id="critic-dimensions-heading">检查维度</h3><span>0–100 · 横向比较</span></header>
+            <header><h3 id="critic-dimensions-heading">评分</h3><span>0–100</span></header>
             <div className="critic-metric-list">
               {METRICS.map((metric) => {
                 const value = evaluation?.scores?.[metric.key];
@@ -174,8 +169,8 @@ export function CriticInspector({
 
           <section className="critic-section critic-findings" aria-labelledby="critic-findings-heading">
             <header>
-              <h3 id="critic-findings-heading">检查发现</h3>
-              <span>{issues.length ? `${issues.length} 项` : "无明确问题"}</span>
+              <h3 id="critic-findings-heading">问题</h3>
+              <span>{issues.length ? `${issues.length} 项` : "无"}</span>
             </header>
             {issues.length ? (
               <div className="critic-issue-list">
@@ -201,7 +196,7 @@ export function CriticInspector({
                 })}
               </div>
             ) : (
-              <p className="critic-findings-empty">系统没有报告明确异常；这不等同于图片已通过，请继续检查肢体、接触关系和整体光影。</p>
+              <p className="critic-findings-empty">未报告问题，仍需人工确认。</p>
             )}
           </section>
         </section>

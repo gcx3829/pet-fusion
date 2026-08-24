@@ -58,7 +58,7 @@ describe("HumanReview", () => {
     render(<HumanReview snapshot={snapshot} isPending={false} selectedCandidateId="candidate-01" onAction={vi.fn()} />);
 
     expect(screen.getAllByText(/仍从原片生成，并参考你选中的这张图/)).toHaveLength(1);
-    expect(screen.getByText(/仍以原片和 Guidance Mask 为底/)).toBeInTheDocument();
+    expect(screen.getByText("下一轮参考当前候选")).toBeInTheDocument();
   });
 
   it("历史轮 Timeline 候选只允许查看或接受，不提交为当前轮视觉锚点", () => {

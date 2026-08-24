@@ -8,11 +8,11 @@ interface SidebarTabsProps {
   onChange: (tab: SidebarTab) => void;
 }
 
-const tabs: { value: SidebarTab; label: string; short: string; icon: "image" | "spark" | "check" | "lock" }[] = [
-  { value: "assets", label: "素材", short: "原片与参考", icon: "image" },
-  { value: "prompt", label: "生成", short: "意图与设置", icon: "spark" },
-  { value: "review", label: "审片", short: "评分与选择", icon: "check" },
-  { value: "fusion", label: "融合", short: "局部合成", icon: "lock" },
+const tabs: { value: SidebarTab; label: string; icon: "image" | "spark" | "check" | "lock" }[] = [
+  { value: "assets", label: "素材", icon: "image" },
+  { value: "prompt", label: "生成", icon: "spark" },
+  { value: "review", label: "审片", icon: "check" },
+  { value: "fusion", label: "融合", icon: "lock" },
 ];
 
 export function SidebarTabs({ value, accepted, onChange }: SidebarTabsProps) {
@@ -63,7 +63,6 @@ export function SidebarTabs({ value, accepted, onChange }: SidebarTabsProps) {
             >
               <Icon name={tab.icon} />
               <span>{tab.label}</span>
-              <small>{tab.short}</small>
               {disabled && <i aria-hidden="true" />}
             </button>
           );

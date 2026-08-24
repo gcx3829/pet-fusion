@@ -15,7 +15,7 @@ describe("AssetBrowser", () => {
     const input = view.container.querySelector('input[type="file"]') as HTMLInputElement;
     const files = ["a.jpg", "b.jpg", "c.jpg"].map((name) => new File([name], name, { type: "image/jpeg", lastModified: 1 }));
     fireEvent.change(input, { target: { files } });
-    await waitFor(() => expect(screen.getByText("已加入 3 张素材")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("已导入 3 张")).toBeInTheDocument());
     expect(screen.getAllByText(/\.jpg$/)).toHaveLength(3);
 
     const transfer = { effectAllowed: "", dropEffect: "", values: new Map<string, string>(), setData(type: string, value: string) { this.values.set(type, value); }, getData(type: string) { return this.values.get(type) ?? ""; } };

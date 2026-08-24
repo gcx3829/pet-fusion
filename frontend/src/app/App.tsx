@@ -377,12 +377,12 @@ export function App() {
     />
   ) : (
     <section className="fusion-sidebar" id="sidebar-panel-fusion" role="tabpanel" aria-label="局部融合">
-      <div className="inspector-title"><h2>局部融合</h2><p>只修改你画出的区域，不会改动已经接受的原始候选。</p></div>
-      {fusionDemoMode && <div className="fusion-demo-notice" role="status"><strong>本地预览</strong><span>图片只在浏览器中处理，不会发送到后端。</span></div>}
-      <div className="fusion-sidebar-card"><Icon name="spark" /><strong>{fusionState.result ? "预览已生成" : accepted ? "可以开始" : "请先接受一张候选图"}</strong><span>{fusionState.error ?? (accepted ? "在主画布画出需要融合的区域，然后应用。" : "接受候选图后才能使用局部融合。")}</span></div>
-      {accepted && ui.workerMode !== "fusion" && <button className="primary-button" type="button" onClick={() => uiActions.setWorkerMode("fusion")}>打开局部融合</button>}
+      <div className="inspector-title"><h2>融合</h2></div>
+      {fusionDemoMode && <div className="fusion-demo-notice" role="status"><strong>本地预览</strong></div>}
+      <div className="fusion-sidebar-card"><Icon name="spark" /><strong>{fusionState.result ? "预览已生成" : accepted ? "可以开始" : "请先接受候选"}</strong>{(fusionState.error || accepted) && <span>{fusionState.error ?? "在画布涂出融合范围。"}</span>}</div>
+      {accepted && ui.workerMode !== "fusion" && <button className="primary-button" type="button" onClick={() => uiActions.setWorkerMode("fusion")}>开始融合</button>}
       {accepted && ui.workerMode === "fusion" && !fusionState.result && <button className="primary-button" type="button" disabled={!fusionState.ready || fusionState.pending} onClick={() => void fusionEditorRef.current?.apply()}>{fusionState.pending ? "正在融合…" : "应用融合范围"}</button>}
-      {fusionState.result && <button className="fusion-export-button" type="button" onClick={exportFullSizeFusion}><Icon name="export" /><span><strong>导出全尺寸 PNG</strong><small>{effectiveBackgroundWidth ?? fusionState.result.fusion_asset.width ?? "原图"} × {effectiveBackgroundHeight ?? fusionState.result.fusion_asset.height ?? "尺寸"}</small></span></button>}
+      {fusionState.result && <button className="fusion-export-button" type="button" onClick={exportFullSizeFusion}><Icon name="export" /><span><strong>导出 PNG</strong><small>{effectiveBackgroundWidth ?? fusionState.result.fusion_asset.width ?? "原图"} × {effectiveBackgroundHeight ?? fusionState.result.fusion_asset.height ?? "尺寸"}</small></span></button>}
     </section>
   );
 
@@ -405,7 +405,6 @@ export function App() {
           brushFeather={ui.brushFeather}
           canUndo={ui.workerMode === "create" ? Boolean(guidanceState?.canUndo) : ui.workerMode === "fusion" && fusionHistory.canUndo}
           canRedo={ui.workerMode === "create" ? Boolean(guidanceState?.canRedo) : ui.workerMode === "fusion" && fusionHistory.canRedo}
-          historyDepth={ui.workerMode === "create" ? guidanceState?.document.strokes.length ?? 0 : ui.workerMode === "fusion" ? fusionHistory.undoDepth : 0}
           fusionUnlocked={accepted}
           onUndo={() => ui.workerMode === "fusion" ? fusionBrushRef.current?.undo() : guidanceEditorRef.current?.undo()}
           onRedo={() => ui.workerMode === "fusion" ? fusionBrushRef.current?.redo() : guidanceEditorRef.current?.redo()}

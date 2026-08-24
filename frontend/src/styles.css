@@ -3380,3 +3380,185 @@ select:focus-visible,
   .asset-browser-heading { display: flex; }
   .reference-drop-slot, .library-list { display: none; }
 }
+
+/* Compact workbench: canvas-first density inspired by professional node and
+   image editors. Secondary explanations stay available through labels,
+   titles and disclosure controls instead of occupying the workspace. */
+.editor-shell { grid-template-rows: 40px minmax(0, 1fr); }
+.editor-appbar {
+  grid-template-columns: 220px minmax(0, 1fr) 220px;
+  padding: 0 10px;
+}
+.editor-brand { gap: 7px; }
+.editor-brand-mark { width: 22px; height: 22px; }
+.editor-brand-mark svg { width: 13px; height: 13px; }
+.editor-document-title::before,
+.editor-document-title::after { display: none; }
+.editor-document-title { font-size: 9px; letter-spacing: .08em; }
+.editor-appbar-status { gap: 6px; color: var(--text-faint); font: 8px var(--mono); }
+.editor-appbar-status strong {
+  padding: 3px 5px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 8px;
+}
+.appbar-status-dot { width: 5px; height: 5px; }
+.appbar-status-dot.is-running,
+.appbar-status-dot.is-queued { box-shadow: none; }
+
+.editor-body { grid-template-columns: 292px minmax(0, 1fr); }
+.sidebar-tab {
+  min-height: 40px;
+  grid-template-columns: auto auto;
+  gap: 5px;
+  padding: 0 4px;
+  font-size: 9px;
+}
+.sidebar-tab svg { width: 13px; height: 13px; }
+.sidebar-tab i { top: 7px; right: 7px; }
+.asset-browser,
+.prompt-inspector,
+.critic-inspector,
+.fusion-sidebar { gap: 8px; padding: 10px; }
+.asset-browser-heading h2,
+.inspector-title h2,
+.review-inspector-heading h2 { margin: 0; font-size: 15px; }
+.asset-browser-heading,
+.review-inspector-heading { min-height: 28px; align-items: center; }
+.asset-layout-toggle button { min-width: 27px; min-height: 24px; padding: 0 6px; }
+.library-import-row { gap: 3px; }
+.library-import-row .library-import {
+  min-height: 34px;
+  grid-template-columns: 16px minmax(0, 1fr);
+  padding: 4px 7px;
+}
+.reference-drop-slot { min-height: 54px; padding: 6px 7px; }
+.reference-slot-thumbs { min-height: 22px; }
+.library-empty { min-height: 96px; padding: 12px; border-color: var(--border-subtle); }
+.library-empty svg { width: 19px; height: 19px; }
+
+.editor-main { grid-template-rows: 38px minmax(0, 1fr); }
+.worker-toolbar { height: 38px; gap: 4px; padding: 0 6px; }
+.toolbar-cluster + .toolbar-cluster { margin-left: 3px; padding-left: 5px; border-left: 1px solid var(--border-subtle); }
+.toolbar-button { width: 28px; height: 28px; flex-basis: 28px; }
+.toolbar-button svg { width: 14px; height: 14px; }
+.toolbar-sliders { min-width: 322px; gap: 8px; margin-left: 5px; }
+.toolbar-range { width: 98px; }
+.toolbar-zoom-step { width: 28px; flex-basis: 28px; }
+.toolbar-fusion-button { min-height: 26px; }
+.worker-empty { border-color: transparent; }
+.worker-empty-mark { width: 38px; height: 38px; }
+.worker-empty-mark svg { width: 18px; height: 18px; }
+.worker-empty strong { font-size: 12px; }
+
+.prompt-inspector > .search-controls .panel-heading,
+.prompt-inspector > .prompt-history-panel .panel-heading { min-height: 34px; padding: 4px 0 8px; }
+.prompt-inspector > .search-controls .panel-heading h2,
+.prompt-inspector > .prompt-history-panel .panel-heading h2 { font-size: 12px; }
+.search-controls .intent-field { padding: 8px 0; border-bottom: 0; }
+.search-controls .intent-field textarea { min-height: 72px; padding: 8px 42px 8px 8px; }
+.search-controls .intent-field > small { right: 7px; bottom: 15px; }
+.search-controls .search-settings { padding: 0; }
+.search-settings--primary .setting-row { min-height: 42px; border: 1px solid var(--border-subtle); padding: 0 8px; }
+.search-controls .setting-row strong,
+.search-controls .check-setting strong { font-size: 10px; }
+.search-controls .segmented-control button { width: 31px; height: 26px; }
+.search-advanced { border-top: 1px solid var(--border-subtle); }
+.search-advanced > summary {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  list-style: none;
+}
+.search-advanced > summary::-webkit-details-marker { display: none; }
+.search-advanced > summary::before { color: var(--text-faint); content: "›"; }
+.search-advanced[open] > summary::before { transform: rotate(90deg); }
+.search-advanced > summary span { margin-right: auto; padding-left: 6px; }
+.search-advanced > summary small { color: var(--text-faint); font: 8px var(--mono); }
+.search-advanced .search-settings { display: grid; gap: 0; padding-bottom: 5px; }
+.search-advanced .setting-row { min-height: 44px; }
+.search-advanced .check-setting { min-height: 40px; }
+.search-run-button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 2px 0 0;
+  border-radius: 2px;
+}
+.search-run-button svg { width: 14px; height: 14px; }
+.search-run-button strong { font-size: 10px; font-weight: 600; }
+.control-hint { margin: 0; font-size: 9px; }
+
+.prompt-history-panel { border-top: 1px solid var(--border-subtle); }
+.prompt-history-empty { padding: 9px 0; font-size: 10px; }
+.prompt-refinement-status { grid-template-columns: 6px auto; padding: 7px 0; }
+.prompt-refinement-status > span:last-child { grid-column: 1 / -1; }
+.prompt-history-entry { gap: 7px; padding: 10px 0 12px; }
+.prompt-entry-heading > div { gap: 3px; }
+.prompt-entry-heading strong { font-size: 11px; }
+.prompt-status { padding: 3px 5px; }
+.prompt-visual-anchor { grid-template-columns: 54px minmax(0, 1fr); padding: 6px; }
+.prompt-visual-anchor img { width: 54px; height: 42px; }
+.prompt-block > summary,
+.prompt-plan-block > summary,
+.prompt-version-lineage > summary { min-height: 30px; }
+
+.critic-inspector { gap: 8px; }
+.review-inspector-heading { min-height: 28px; }
+.review-authority-badge { padding: 3px 5px; }
+.critic-detail-empty { min-height: 130px; padding: 16px; }
+.critic-empty-icon { width: 32px; height: 32px; }
+.critic-detail { gap: 8px; }
+.critic-selection-context { padding-top: 6px; }
+.critic-verdict {
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  min-height: 60px;
+  gap: 7px;
+  padding: 7px;
+}
+.critic-verdict-mark { width: 22px; height: 22px; }
+.critic-verdict strong { font-size: 11px; }
+.critic-verdict output strong { font-size: 17px; }
+.critic-summary { padding: 7px; border: 0; border-left: 2px solid var(--border); }
+.critic-summary p { font-size: 10px; line-height: 1.45; }
+.critic-metric { padding: 5px 6px 6px; }
+.critic-issue summary { min-height: 30px; }
+.critic-findings-empty { padding: 7px; }
+.review-actions-block { gap: 7px; padding-top: 8px; }
+.review-refinement-context {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+}
+.review-refinement-context > svg { width: 13px; height: 13px; margin: 0; }
+.review-feedback--inspector textarea { min-height: 66px; }
+.review-explore-button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.review-action-row { gap: 4px; }
+.fusion-sidebar-card { gap: 6px; padding: 9px 0; }
+.fusion-demo-notice { padding: 6px 8px; }
+
+@media (max-width: 1100px) {
+  .editor-appbar { grid-template-columns: 190px minmax(0, 1fr) 190px; }
+  .editor-body { grid-template-columns: 268px minmax(0, 1fr); }
+}
+
+@media (max-width: 767px) {
+  .editor-shell { grid-template-rows: 40px minmax(0, 1fr); }
+  .editor-appbar-status > span:not(.appbar-status-dot),
+  .editor-appbar-status > strong { display: none; }
+  .sidebar-tab { min-height: 38px; }
+}

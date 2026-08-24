@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PromptHistory } from "../src/features/search/PromptHistory";
 
 describe("PromptHistory", () => {
-  it("默认展开最新一轮的调优 prompt 并显示人工反馈", () => {
+  it("默认收起长 Prompt 并显示人工反馈", () => {
     render(<PromptHistory history={[
       {
         round_index: 0,
@@ -24,7 +24,7 @@ describe("PromptHistory", () => {
 
     expect(screen.getByText("猫再小一点")).toBeInTheDocument();
     const latest = screen.getByText("调优 generation").closest("details");
-    expect(latest).toHaveAttribute("open");
+    expect(latest).not.toHaveAttribute("open");
   });
 
   it("展示多模态结构化计划、版本继承和所选 Raw 视觉锚点", () => {

@@ -57,28 +57,18 @@ export function ReviewActions({
       aria-label={compact ? "审片操作" : undefined}
       aria-labelledby={compact ? undefined : "review-next-step-heading"}
     >
-      {!compact && <header className="review-actions-heading">
-        <div><span className="workbench-kicker">HUMAN DECISION</span><h3 id="review-next-step-heading">下一步</h3></div>
-        <span>等待人工决定</span>
-      </header>}
+      {!compact && <h3 className="sr-only" id="review-next-step-heading">下一步</h3>}
 
       {!compact && canContinue && (
-        <div className={`review-refinement-context ${historicalSelection ? "is-warning" : ""}`} role="status">
+        <div className={`review-refinement-context ${historicalSelection ? "is-warning" : ""}`} role="status" title={selectedForContinue ? `AI 检查 ${selectedIssueCount} 项` : undefined}>
           <Icon name={historicalSelection ? "warning" : "arrow"} />
-          <span>
-            <strong>{selectedForContinue ? "以当前选择为视觉参考" : historicalSelection ? "历史候选不能继续探索" : "从原片重新采样"}</strong>
-            <small>{selectedForContinue
-              ? `仍以原片和 Guidance Mask 为底；Critic 的 ${selectedIssueCount} 项检查会随候选上下文进入 Prompt Refiner。`
-              : historicalSelection
-                ? "可接受这张历史候选，或在时间线改选本轮图片。"
-                : "未选择本轮候选，下一轮不会使用视觉锚点。"}</small>
-          </span>
+          <strong>{selectedForContinue ? "下一轮参考当前候选" : historicalSelection ? "历史候选不能继续" : "下一轮从原片生成"}</strong>
         </div>
       )}
 
       {canContinue && !compact && (
         <label className="review-feedback review-feedback--inspector" htmlFor="review-feedback-inspector">
-          <span><strong>修改意见（可选）</strong><small>{humanFeedback.length} / 2000</small></span>
+          <span><strong>修改意见</strong><small>{humanFeedback.length} / 2000</small></span>
           <textarea
             id="review-feedback-inspector"
             aria-label="修改意见（可选）"
@@ -86,9 +76,8 @@ export function ReviewActions({
             maxLength={2000}
             disabled={isPending}
             onChange={(event) => setHumanFeedback(event.target.value)}
-            placeholder="描述主观目标，例如：猫再小一些；保留当前眼睛和毛色；接触阴影更自然。"
+            placeholder="例如：猫小一些，保留眼睛和毛色。"
           />
-          <small>这里写你对画面的判断。系统检查只是另一份输入，不会替你做接受决定。</small>
         </label>
       )}
 
@@ -99,27 +88,27 @@ export function ReviewActions({
           <button
             className="review-explore-button"
             type="button"
+            aria-label="继续探索一轮"
             disabled={isPending || historicalSelection}
             onClick={() => onAction("continue_one_round", selectedForContinue ?? undefined, humanFeedback.trim() || undefined)}
           >
             <Icon name="spark" />
-            <span><strong>{isPending ? "正在提交…" : "继续探索一轮"}</strong><small>{selectedForContinue ? "当前候选作为参考" : "从原片重新生成"}</small></span>
-            <Icon name="arrow" />
+            <strong>{isPending ? "正在提交…" : "继续一轮"}</strong>
           </button>
         )}
         {canAcceptSelected && (
-          <button className="review-accept-button" type="button" disabled={isPending} onClick={acceptSelected}>
-            <Icon name="check" /> 接受当前图片
+          <button className="review-accept-button" type="button" aria-label="接受当前图片" disabled={isPending} onClick={acceptSelected}>
+            <Icon name="check" /> 接受
           </button>
         )}
         {showSeparateGlobalAction && (
-          <button className="review-tertiary-button" type="button" disabled={isPending} onClick={() => onAction("accept_global_winner")}>
-            接受历史最佳
+          <button className="review-tertiary-button" type="button" aria-label="接受历史最佳" disabled={isPending} onClick={() => onAction("accept_global_winner")}>
+            接受最佳
           </button>
         )}
         {canCancel && (
-          <button className="review-tertiary-button is-danger" type="button" disabled={isPending} onClick={() => onAction("cancel")}>
-            结束搜索
+          <button className="review-tertiary-button is-danger" type="button" aria-label="结束搜索" disabled={isPending} onClick={() => onAction("cancel")}>
+            结束
           </button>
         )}
         {!canCancel && !canContinue && !canAcceptGlobal && !canAcceptSelected && <span className="review-readonly">本轮只能查看</span>}

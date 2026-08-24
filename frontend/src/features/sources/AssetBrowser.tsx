@@ -108,7 +108,7 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
     if (!images.length) { setMessage("请选择 JPEG、PNG 或 WebP 图片"); return; }
     setPreparing(true);
     updateLibrary([...library, ...images]);
-    setMessage(`已加入 ${images.length} 张素材`);
+    setMessage(`已导入 ${images.length} 张`);
     setPreparing(false);
   };
   const assignBackground = (file: File) => {
@@ -125,8 +125,8 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
       <div className="asset-browser-heading">
         <div><h2>素材</h2></div>
         <div className="asset-layout-toggle" role="group" aria-label="素材布局">
-          <button type="button" aria-pressed={layout === "list"} onClick={() => onLayoutChange("list")}>列表</button>
-          <button type="button" aria-pressed={layout === "grid"} onClick={() => onLayoutChange("grid")}>网格</button>
+          <button type="button" aria-label="列表" title="列表" aria-pressed={layout === "list"} onClick={() => onLayoutChange("list")}>列</button>
+          <button type="button" aria-label="网格" title="网格" aria-pressed={layout === "grid"} onClick={() => onLayoutChange("grid")}>格</button>
         </div>
       </div>
 
@@ -141,8 +141,8 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
         input.value = "";
       }} />
       <div className="library-import-row">
-        <label className="library-import" htmlFor={inputId} aria-disabled={preparing}><Icon name="plus" /><span>{preparing ? "正在导入…" : "选择图片"}</span></label>
-        <label className="library-import library-import--folder" htmlFor={folderInputId} aria-disabled={preparing}><Icon name="plus" /><span>选择文件夹</span></label>
+        <label className="library-import" htmlFor={inputId} aria-disabled={preparing}><Icon name="plus" /><span>{preparing ? "导入中…" : "导入"}</span></label>
+        <label className="library-import library-import--folder" htmlFor={folderInputId} aria-disabled={preparing}><Icon name="plus" /><span>文件夹</span></label>
       </div>
 
       <div
@@ -159,7 +159,7 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
         <span><Icon name="image" /> 宠物参考</span><strong>{value.references.length} / 5</strong>
         <div className="reference-slot-thumbs">
           {value.references.map((file) => <button key={localAssetKey(file)} type="button" title={`移除 ${file.name}`} disabled={locked} onClick={() => onChange({ ...value, references: value.references.filter((item) => item !== file) })}><AssetThumb file={file} /></button>)}
-          {!value.references.length && <small>把素材拖到这里</small>}
+          {!value.references.length && <small>拖入参考图</small>}
         </div>
       </div>
 
@@ -173,10 +173,10 @@ export function AssetBrowser({ value, onChange, locked, onReset, layout, onLayou
             : value.references.some((item) => localAssetKey(item) === key) ? "reference" : undefined;
           return <AssetItem key={key} file={file} layout={layout} role={role} disabled={locked} onPreview={setPreview} onAssignBackground={() => assignBackground(file)} onAssignReference={() => assignReference(file)} />;
         })}</div></section>)}
-        {!library.length && <div className="library-empty"><Icon name="image" /><strong>还没有图片</strong><span>先导入原片和宠物参考图。</span></div>}
+        {!library.length && <div className="library-empty"><Icon name="image" /><strong>导入图片</strong></div>}
       </div>
       {message && <p className="field-message" role="status">{message}</p>}
-      {locked && <button className="text-button reset-button" type="button" onClick={onReset}>更换素材并新建任务</button>}
+      {locked && <button className="text-button reset-button" type="button" onClick={onReset}>新建任务</button>}
       {preview && typeof document !== "undefined" && createPortal(
         <div
           className="asset-hover-preview"
